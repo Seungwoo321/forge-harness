@@ -1,0 +1,39 @@
+# ADR 0001: 개발 프로세스 하네스의 정책 결정
+
+날짜: 2026-10-28 · 대상: `docs/spec.md` (작성 당시 agent-harness 레포의 `docs/dev-process-harness-tobe.md`)
+
+## 결정
+
+| 주제 | 결정 | 이유 |
+|---|---|---|
+| 재시도 상한 | `retry.maxPerSignature`, `retry.maxResolver` 기본 2, 범위 1–5, 정책 상속으로 변경 | 규칙 문서 간 서술이 달랐다(상한 2 vs 상한 없음). 상한은 유지하되 작업마다 다를 수 있어 정책 값으로 둔다 |
+| 권한 | 작업 종류(`kind`)가 아니라 최종 목표 유형(`goal.class`: task / product-prelaunch / product-live)과 정책이 정한다 | 같은 `impl` 이라도 단건 태스크와 출시 전 완제품은 허용 범위가 다르다. 출시 전 제품은 소유 자원 전체가 허용 대상이다 |
+| 유형 판정 | 하네스는 추론하지 않고 정책 값을 읽는다. 값이 없으면 대화형은 `policy-setup`, 비대화형만 `task`(`unconfirmed-default`) | 경로별 매핑은 사용자 환경 데이터라 문서·규칙에 넣지 않고 workspace·global 정책(`goal.defaults`)이 가진다. 오분류의 비용은 비대칭이다(과허용 > 과제한) |
+| 체크포인트 보존 | 하네스는 삭제하지 않는다(`keep`) | 객체 크기가 작고 디스크 정리는 별개 작업이다 |
+| 리뷰 | 사람 리뷰는 의무가 아니다. `review.mode` 정책(none / conditional / required)과 `review.by`. 출시 전 제품 기본값은 `none` | 정본이 제품 완성 기준으로 이미 검토됐다. 세부 리뷰가 자주 필요하면 정본이 부족하다는 신호이므로 §8.10 의 정본 재검토 보고로 다룬다 |
+| 의사결정 | 방향이 정해지면 추론으로 결정하고 `assumptions` 에 기록한다. 사용자 알림은 추론 불가 이슈 5종으로 한정한다 | 질문은 사용자만 정할 수 있는 것에만 한다 |
+| 정책 부재 | 어느 수준에도 `goal.class` 가 없으면 단위 시작을 차단하고 `policy-setup` 대화형 스킬이 도구로 질문해 `policy set` 으로 기록한다. 비대화형은 `task` 를 `unconfirmed-default` 로 적용 | 목표 유형이 권한을 정하므로 무확인 기본값으로 진행하지 않는다. 단서 수집(`detect`)은 제안에만 쓰고 결정은 사용자가 한다 |
+| 사용자 결정 대기 | 상태가 아니라 수용 기준 단위의 보류(`openDecisions[].blocks`). 보류되지 않은 작업이 없을 때만 Stopped | 알림을 비차단으로 두면서도 단위 상태 모델과 충돌하지 않게 한다 |
+| head 변경 | Accepted·Delivered 어디서든 head 가 바뀌면 SelfGated 로 돌아가 재수용한다 (merge 포함) | 판정받은 head 와 머지되는 head 를 같게 유지한다 |
+| AC 커버리지 | 러너가 테스트·검증 코드의 AC ID 패턴에서 `covers` 를 추출해 집계한다. 스킬 제안은 집계에 쓰지 않는다 | 리뷰 없는 수용의 근거를 결정적으로 만든다 |
+| 변경 귀속 | 단위당 작업트리 격리가 기본(`isolation: worktree`). 공유 시 다른 활성 단위의 경로를 제외한다 | 병행 단위의 변경이 범위 이탈로 오판되지 않게 한다 |
+| 수용 근거 | 게이트 증거 + 수용 기준 커버리지. 리뷰는 정책이 요구할 때 추가 | 생산자 ≠ 검증자 원칙을 결정적 게이트로 충족한다 |
+| `review` kind | 다른 단위 X 의 InReview 단계를 수행하는 세션의 단위. 산출물은 X 의 레코드에 쓴다 | 리뷰를 별도 단위로 두면서도 상태·계약 검사가 X 기준으로 닫히게 한다 |
+| 재개 사건 | 세션 종료·컨텍스트 압축은 실패가 아니라 재개 사건 | `00-economy.md` §6 의 단위 경계와 같은 뜻. 실패로 세면 해결 세션 상한을 소모한다 |
+| 비결정 게이트 관측 | 실패 증거는 재사용하지 않고, 리뷰 세션이 `evidence rerun` 으로 통과 증거를 독립 재실행한다 | 재사용만 있으면 비결정을 관측할 기회가 없다 |
+
+## 상주 규칙·스킬 개정 (이 결정의 후속)
+
+아래 경로는 agent-harness 레포(계정 상주 규칙·스킬의 소스) 기준이다.
+
+이 설계를 정본으로 삼기 위해 같은 날 아래 문장을 함께 고쳤다.
+
+| 파일 | 변경 전 | 변경 후 |
+|---|---|---|
+| `profile/personal/rules/10-personal.md` §2 | 같은 원인 서명의 재시도는 최대 2회 | `retry.maxPerSignature` 정책 값(기본 2) |
+| `profile/personal/rules/10-personal.md` §3 | 머지는 `review` 세션이 판정 `배포` 를 낸 head 에 고정 | 머지는 `Accepted` 가 고정한 head 에서만. 리뷰는 정책이 요구할 때 |
+| `profile/personal/skills/work-tracking/SKILL.md` §5 6항 | 수용 판정은 리뷰 세션이 한다 | 수용 판정은 게이트 증거 + AC 커버리지, 정책이 요구하면 리뷰 세션 |
+| `profile/personal/skills/harness-building/SKILL.md` §4 | 최대 2회 | `retry.maxPerSignature` 정책 값(기본 2) |
+| `core/skills/work-session/SKILL.md` §6 | 동일 원인의 고정 재시도 상한 없이 계속 수리 | `retry.maxResolver` 정책 값(기본 2)까지 |
+| `core/skills/session-handoff/SKILL.md` | 동일 원인의 고정 재시도 상한은 없다 | `retry.maxResolver` 정책 값(기본 2)까지 |
+| `core/rules/00-economy.md` §6 | 최대2회 | `retry.maxResolver`(기본 2) |

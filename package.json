@@ -1,0 +1,13 @@
+{
+  "name": "forge-harness",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@12.7.0",
+  "scripts": {
+    "test": "node --test 'scripts/**/*.test.mjs'"
+  },
+  "version": "0.1.0"
+}

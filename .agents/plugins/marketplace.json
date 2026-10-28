@@ -1,0 +1,21 @@
+{
+  "name": "forge-harness",
+  "interface": {
+    "displayName": "forge-harness"
+  },
+  "plugins": [
+    {
+      "name": "forge-harness",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity",
+      "version": "0.1.0"
+    }
+  ]
+}

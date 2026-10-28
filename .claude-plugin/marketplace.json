@@ -1,0 +1,16 @@
+{
+  "name": "forge-harness",
+  "owner": {
+    "name": "Seungwoo321"
+  },
+  "description": "forge-harness 플러그인 마켓플레이스",
+  "plugins": [
+    {
+      "name": "forge-harness",
+      "source": "./",
+      "description": "개발 작업 단위 수명주기 하네스 (제어면 스크립트 + 단계 스킬)",
+      "version": "0.1.0",
+      "homepage": "https://github.com/Seungwoo321/forge-harness"
+    }
+  ]
+}

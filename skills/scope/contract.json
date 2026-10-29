@@ -1,0 +1,32 @@
+{
+  "contractVersion": "harness.contract/1",
+  "schemaVersion": "harness.schema/1",
+  "stage": "scope",
+  "reads": ["request", "canon", "policy"],
+  "writes": ["acceptance", "scopePaths", "assumptions", "openDecisions"],
+  "input": {
+    "type": "object", "additionalProperties": false,
+    "required": ["unit", "targetUnit", "stage", "attempt", "inputRevision", "inputDigest", "head", "contentFingerprint", "data"],
+    "properties": {
+      "unit": {"type": "string"}, "targetUnit": {"type": "string"}, "stage": {"type": "string"},
+      "attempt": {"type": "integer", "minimum": 1}, "inputRevision": {"type": "integer", "minimum": 1},
+      "inputDigest": {"type": "string"}, "head": {"type": "string"}, "contentFingerprint": {"type": "string"},
+      "data": {"type": "object", "additionalProperties": false, "required": ["request", "canon", "policy"], "properties": {
+        "request": {"type": ["string", "object"], "properties": {}}, "canon": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["path", "digest"], "properties": {"path": {"type": "string"}, "digest": {"type": "string"}}}},
+        "policy": {"type": "object", "properties": {}}
+      }}
+    }
+  },
+  "output": {
+    "type": "object", "additionalProperties": false,
+    "required": ["inputDigest", "attempt", "submissionId", "status", "summary", "acceptance", "scopePaths"],
+    "properties": {
+      "inputDigest": {"type": "string"}, "attempt": {"type": "integer", "minimum": 1}, "submissionId": {"type": "string"},
+      "status": {"type": "string", "enum": ["done", "blocked", "needs-decision", "needs-diagnosis"]}, "summary": {"type": "string"},
+      "acceptance": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["id", "text"], "properties": {"id": {"type": "string"}, "text": {"type": "string"}, "status": {"type": "string", "enum": ["open", "covered", "deferred", "dropped"]}}}},
+      "scopePaths": {"type": "array", "items": {"type": "string"}},
+      "assumptions": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["decision", "basis", "reversible"], "properties": {"decision": {"type": "string"}, "basis": {"type": "string"}, "reversible": {"type": "boolean"}}}},
+      "openDecisions": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["id", "kind", "question", "options", "blocks", "requiredAction", "canonRefs"], "properties": {"id": {"type": "string"}, "kind": {"type": "string", "enum": ["preference", "authority", "canon-conflict", "external-access", "retry-limit"]}, "question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}}, "blocks": {"type": "array", "items": {"type": "string"}}, "requiredAction": {"type": ["object", "null"], "additionalProperties": false, "required": ["stage", "effect", "resumeCondition"], "properties": {"stage": {"type": "string"}, "effect": {"type": "string"}, "resumeCondition": {"type": "string"}}}, "canonRefs": {"type": "array", "items": {"type": "string"}}}}}
+    }
+  }
+}

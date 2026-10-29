@@ -1,0 +1,12 @@
+{
+  "contractVersion": "harness.contract/1", "schemaVersion": "harness.schema/1", "stage": "handoff",
+  "reads": ["acceptance", "changedPaths", "evidence", "assumptions", "next"], "writes": ["handoff"],
+  "input": {"type": "object", "additionalProperties": false, "required": ["unit", "targetUnit", "stage", "attempt", "inputRevision", "inputDigest", "head", "contentFingerprint", "data"], "properties": {
+    "unit": {"type": "string"}, "targetUnit": {"type": "string"}, "stage": {"type": "string"}, "attempt": {"type": "integer", "minimum": 1}, "inputRevision": {"type": "integer", "minimum": 1}, "inputDigest": {"type": "string"}, "head": {"type": "string"}, "contentFingerprint": {"type": "string"},
+    "data": {"type": "object", "additionalProperties": false, "required": ["acceptance", "changedPaths", "evidence", "assumptions", "next"], "properties": {"acceptance": {"type": "array", "items": {"type": "object", "properties": {}}}, "changedPaths": {"type": "array", "items": {"type": "string"}}, "evidence": {"type": "array", "items": {"type": "object", "properties": {}}}, "assumptions": {"type": "array", "items": {"type": "object", "properties": {}}}, "next": {"type": ["object", "null"], "properties": {}}}
+    }
+  }},
+  "output": {"type": "object", "additionalProperties": false, "required": ["inputDigest", "attempt", "submissionId", "status", "summary", "handoff"], "properties": {
+    "inputDigest": {"type": "string"}, "attempt": {"type": "integer", "minimum": 1}, "submissionId": {"type": "string"}, "status": {"type": "string", "enum": ["done", "blocked", "needs-decision", "needs-diagnosis"]}, "summary": {"type": "string"}, "handoff": {"type": "object", "properties": {}}
+  }}
+}

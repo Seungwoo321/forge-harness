@@ -1,0 +1,13 @@
+{
+  "contractVersion": "harness.contract/1", "schemaVersion": "harness.schema/1", "stage": "root-cause",
+  "reads": ["failures", "evidence", "changedPaths", "diff"], "writes": ["findings", "assumptions"],
+  "input": {"type": "object", "additionalProperties": false, "required": ["unit", "targetUnit", "stage", "attempt", "inputRevision", "inputDigest", "head", "contentFingerprint", "data"], "properties": {
+    "unit": {"type": "string"}, "targetUnit": {"type": "string"}, "stage": {"type": "string"}, "attempt": {"type": "integer", "minimum": 1}, "inputRevision": {"type": "integer", "minimum": 1}, "inputDigest": {"type": "string"}, "head": {"type": "string"}, "contentFingerprint": {"type": "string"},
+    "data": {"type": "object", "additionalProperties": false, "required": ["failures", "evidence", "changedPaths", "diff"], "properties": {"failures": {"type": "array", "items": {"type": "object", "properties": {}}}, "evidence": {"type": "array", "items": {"type": "object", "properties": {}}}, "changedPaths": {"type": "array", "items": {"type": "string"}}, "diff": {"type": "object", "properties": {}}}}
+  }},
+  "output": {"type": "object", "additionalProperties": false, "required": ["inputDigest", "attempt", "submissionId", "status", "summary", "findings", "assumptions"], "properties": {
+    "inputDigest": {"type": "string"}, "attempt": {"type": "integer", "minimum": 1}, "submissionId": {"type": "string"}, "status": {"type": "string", "enum": ["done", "blocked", "needs-decision", "needs-diagnosis"]}, "summary": {"type": "string"},
+    "findings": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["id", "kind", "severity", "site", "claim", "case", "fix"], "properties": {"id": {"type": "string"}, "kind": {"type": "string", "enum": ["review", "diagnosis", "scope-guard", "coverage", "shared-path"]}, "severity": {"type": "string", "enum": ["must-fix", "should-fix", "nice"]}, "site": {"type": "string"}, "claim": {"type": "string"}, "case": {"type": "string"}, "fix": {"type": "string"}, "acceptanceRef": {"type": "string"}, "classification": {"type": ["string", "null"], "enum": ["product", "harness", "environment", "user-domain", null]}, "resolvedAt": {"type": ["string", "null"]}}}},
+    "assumptions": {"type": "array", "items": {"type": "object", "properties": {}}}
+  }}
+}

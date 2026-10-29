@@ -1,0 +1,16 @@
+{
+  "contractVersion": "harness.contract/1", "schemaVersion": "harness.schema/1", "stage": "implement",
+  "reads": ["acceptance", "scopePaths", "policy", "canon", "feedback", "assumptions"],
+  "writes": ["changedPaths", "coverage", "riskAssessment", "assumptions", "openDecisions"],
+  "input": {"type": "object", "additionalProperties": false, "required": ["unit", "targetUnit", "stage", "attempt", "inputRevision", "inputDigest", "head", "contentFingerprint", "data"], "properties": {
+    "unit": {"type": "string"}, "targetUnit": {"type": "string"}, "stage": {"type": "string"}, "attempt": {"type": "integer", "minimum": 1}, "inputRevision": {"type": "integer", "minimum": 1}, "inputDigest": {"type": "string"}, "head": {"type": "string"}, "contentFingerprint": {"type": "string"},
+    "data": {"type": "object", "additionalProperties": false, "required": ["acceptance", "scopePaths", "policy", "canon", "feedback", "assumptions"], "properties": {
+      "acceptance": {"type": "array", "items": {"type": "object", "properties": {}}}, "scopePaths": {"type": "array", "items": {"type": "string"}}, "policy": {"type": "object", "properties": {}}, "canon": {"type": "array", "items": {"type": "object", "properties": {}}}, "feedback": {"type": "array", "items": {"type": "object", "properties": {}}}, "assumptions": {"type": "array", "items": {"type": "object", "properties": {}}}
+    }}
+  }},
+  "output": {"type": "object", "additionalProperties": false, "required": ["inputDigest", "attempt", "submissionId", "status", "summary", "changedPaths", "coverage", "assumptions", "openDecisions"], "properties": {
+    "inputDigest": {"type": "string"}, "attempt": {"type": "integer", "minimum": 1}, "submissionId": {"type": "string"}, "status": {"type": "string", "enum": ["done", "blocked", "needs-decision", "needs-diagnosis"]}, "summary": {"type": "string"},
+    "changedPaths": {"type": "array", "items": {"type": "string"}}, "coverage": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["acceptanceRef", "evidenceHint"], "properties": {"acceptanceRef": {"type": "string"}, "evidenceHint": {"type": "string"}}}},
+    "riskAssessment": {"type": "object", "properties": {}}, "assumptions": {"type": "array", "items": {"type": "object", "properties": {}}}, "openDecisions": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["id", "kind", "question", "options", "blocks", "requiredAction", "canonRefs"], "properties": {"id": {"type": "string"}, "kind": {"type": "string", "enum": ["preference", "authority", "canon-conflict", "external-access", "retry-limit"]}, "question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}}, "blocks": {"type": "array", "items": {"type": "string"}}, "requiredAction": {"type": ["object", "null"], "additionalProperties": false, "required": ["stage", "effect", "resumeCondition"], "properties": {"stage": {"type": "string"}, "effect": {"type": "string"}, "resumeCondition": {"type": "string"}}}, "canonRefs": {"type": "array", "items": {"type": "string"}}}}}
+  }}
+}

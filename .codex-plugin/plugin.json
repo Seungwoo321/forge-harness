@@ -1,6 +1,6 @@
 {
   "name": "forge-harness",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "개발 작업 단위를 항상 같은 절차로 처리하는 하네스. 범위 확정·구현·결정적 게이트·수용·전달·인계를 제어면 스크립트가 소유하고, 판단은 단계별 스킬이 맡는다.",
   "author": {
     "name": "Seungwoo321"
@@ -33,6 +33,10 @@
       "이 단위를 시작해줘"
     ],
     "brandColor": "#c0392b",
-    "screenshots": []
+    "screenshots": [
+      "./assets/first-run.svg"
+    ],
+    "composerIcon": "./assets/icon.svg",
+    "logo": "./assets/logo.svg"
   }
 }

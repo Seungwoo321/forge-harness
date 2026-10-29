@@ -1,0 +1,6 @@
+Policy saved at project
+Started unit greeting
+Opened scope stage for greeting
+Submitted scope stage for greeting
+Opened implement stage for greeting
+PASS: packaged policy, scope submission, and implement input

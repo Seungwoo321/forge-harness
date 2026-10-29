@@ -9,7 +9,7 @@
       "name": "forge-harness",
       "source": "./",
       "description": "개발 작업 단위 수명주기 하네스 (제어면 스크립트 + 단계 스킬)",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "homepage": "https://github.com/Seungwoo321/forge-harness"
     }
   ]

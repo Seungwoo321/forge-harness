@@ -5,6 +5,8 @@ description: Set up, show, or change the work policy before a unit starts.
 
 # Policy setup
 
+Resolve this skill's installed directory first; the package root is two directories above it. Run from the user's project cwd. `policy` below means `node "<package-root>/scripts/policy.mjs" policy`, not a PATH executable. Reuse the unit driver's explicit state/project/workspace/global roots. Show the CLI output unchanged.
+
 Use this step when `policy resolve --json` returns `POLICY_UNSET`, when the user asks to change policy, or when the user asks to inspect the effective policy.
 
 ## Init

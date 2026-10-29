@@ -1,0 +1,8 @@
+{
+  "kind": "impl",
+  "request": {
+    "text": "Add a greeting to greeting.txt.",
+    "userInputRef": "example:local-first-run"
+  },
+  "canon": []
+}

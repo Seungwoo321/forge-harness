@@ -1,31 +1,29 @@
-# 0012: Canonical design and task lifecycle
+# ADR 0012: Canonical design and sequential task lifecycle
 
 ## Status
 
-Proposed — implementation target captured in [goal prompt](../goals/studio-harness-engine.md); reconcile against the active specification before acceptance.
+Accepted. This decision is reflected in `docs/spec.md` §14 and supersedes the earlier JSON-file state and worktree-isolation decisions.
 
 ## Context
 
-Behavior scenarios are useful implementation and verification units, but they do not by themselves describe a complete product target. Projects may already own detailed TO-BE specifications, architecture documents, policies, and decisions. Treating scenarios as the only canon leaves design gaps and forces design work outside the task workflow.
-
-The workflow also needs durable task, session, and verification history. Markdown handoff files can be generated for provider compatibility, but they are not the authoritative work state.
+G/W/T scenarios are necessary for observable behavioral acceptance, but they do not by themselves describe a complete product target. Product teams own richer TO-BE design documents, architecture, policies and decisions. The development workflow must preserve these documents as semantic canon while connecting them to actionable goals, scenarios and tasks. The prior JSON Unit Record model also needs durable queryable relationships and session/evidence history without a second Markdown state authority.
 
 ## Decision
 
-The harness treats the target project's approved design documents as canonical inputs. It records their paths, content digests, authority relationships, and captured revisions, then links work goals, G/W/T scenarios, tasks, and verification evidence to those inputs. Design documents remain project-owned and reviewable in their existing format; the harness does not replace them with a second product specification.
+Approved project design documents remain project-owned files and the semantic source of truth. Forge records each source's path, authority, digest and captured revision. Design work produces or updates those documents first. Reviewable goals divide the approved target. G/W/T scenarios describe observable behavior under goals. Executable tasks link to goals, relevant scenarios, code scope and evidence requirements. Non-behavioral work can carry explicit task acceptance without a fabricated scenario. Unresolved product meaning remains an explicit decision blocker.
 
-Work goals divide the canonical target into reviewable outcomes. Scenarios describe observable behavior under those goals. Tasks are executable units linked to the relevant goals, scenarios, code scope, and evidence requirements. Chores that do not express product behavior may use task acceptance criteria without an invented scenario.
+Forge stores structured work state in one project-local SQLite database at `.local/forge/forge.sqlite3`. Rust CLI/daemon services own database access, transactional state transitions, migrations, constraints, idempotency and append-only event/effect/evidence history. Provider hooks and scripts are thin adapters that call the public CLI/daemon contract; they do not write the database or duplicate transition logic. LLM roles author proposals, implementation and independent review but cannot directly mutate authoritative state. Existing JSON Unit Records are imported through a versioned, loss-checked migration; source records are retained until post-migration identity and evidence reconciliation succeeds.
 
-The work lifecycle remains sequential and single-checkout: one active task session owns the shared branch; a completed task starts a fresh session from a deterministic database-backed brief; the prior session closes only after the successor is observed accepting and starting work. A blocked task may use a bounded resolver session, after which the owning task session resumes.
+Work remains sequential in one checkout and one branch. Forge admits one active task owner/session at a time and does not create or schedule parallel Git worktrees. A completed task produces a successor request from current database state. The local Studio Kit App session service is the sole owner of cmux/Orca launch, observation and close effects; Forge stores the task-to-session association and App operation reference. A bounded technical resolver may run while its parent task is blocked; once resolved, the parent task session resumes. After the parent task completes, successor selection starts the next task in a fresh session. User decisions, authentication, quota, access and external approvals are reported as blockers without an automated resolver session.
 
-The local database is the source of truth for task state, decisions, attempts, session transitions, raw structured events, and evidence references. Original design files and captured source snapshots remain authoritative design artifacts. Generated Markdown prompts or reports are projections and never replace their source records.
-
-Claude Code and Codex use provider adapters over shared workflow contracts. cmux and Orca use runner adapters for session creation, observation, prompt delivery, acceptance, and exact-session closure. Hooks gate supported tool actions; scripts and the daemon own deterministic state transitions and runner effects.
+Claude Code and Codex provider hooks call the public Forge service at supported lifecycle/tool boundaries. Hooks are enforcement only after the host activates them. Codex unmanaged hook definitions require user review and trust; Forge and Studio Kit App never bypass this host gate. If required hook trust or runner capability is not established, startup reports the workflow as unenforced and blocks the selected managed start.
 
 ## Consequences
 
-- Scenario authoring follows canonical design and does not substitute for it.
-- Canonical-source changes can invalidate dependent planning and verification evidence by digest.
-- Session startup, handoff, recovery, and closure require durable identities and idempotent effect records.
-- Provider hooks and runner APIs remain adapters; neither provider conversation history nor Markdown handoff files own task state.
-- The implementation contract, schema, migration, and acceptance scenarios must define the local database and runner lifecycle before replacing the current record store.
+- Design documents precede goals; goals precede applicable scenarios and executable tasks.
+- Scenario coverage cannot substitute for completeness of product design.
+- SQLite is the single authority for structured task/session/evidence state; generated Markdown and JSON are exchange/projection formats.
+- Transactional migrations preserve prior JSON records and original evidence references without parallel writers.
+- Single-branch ownership removes worktree isolation policy and concurrent-task path attribution.
+- Forge owns work lifecycle; Studio Kit App owns generic runner effects; Gate Kernel or the selected verifier owns original verdicts.
+- Provider trust and actual hook discovery are observable preconditions, never prompt-only claims.

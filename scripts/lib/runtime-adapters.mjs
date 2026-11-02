@@ -1,5 +1,6 @@
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+import { mkdir } from 'node:fs/promises';
 import { createAdapters } from './adapters.mjs';
 import { formatCliResult } from './report.mjs';
 import { parseUnitArgs, runUnitCli } from './unit-driver.mjs';
@@ -34,7 +35,16 @@ export async function runPublicUnitCli(argv, { cwd = process.cwd(), contractsDir
     }
     const { sessionRunner, ...injected } = providers;
     const session = createAdapters({ sessionRunner }).session;
-    return await runUnitCli(argv, { cwd, contractsDir, adapters: Object.freeze({ ...core, ...injected, session }) });
+    const output = await runUnitCli(argv, { cwd, contractsDir, adapters: Object.freeze({ ...core, ...injected, session }) });
+    const result = JSON.parse(output.slice(output.lastIndexOf('RESULT ') + 7));
+    if (argv[0] === 'unit' && argv[1] === 'finish' && result.finalizePending && options.adapters) {
+      const directory = path.join(result.stateRoot, 'units', argv[2]);
+      await mkdir(directory, { recursive: true });
+      const arguments_ = [fileURLToPath(new URL('../unit.mjs', import.meta.url)), 'unit', 'finalize', argv[2], '--adapters', path.resolve(cwd, options.adapters)];
+      for (const key of ['state-root', 'project-root']) if (options[key]) arguments_.push(`--${key}`, path.resolve(cwd, options[key]));
+      await core.detach(process.execPath, arguments_, { cwd, logPath: path.join(directory, 'finalization.log') });
+    }
+    return output;
   } catch (error) {
     return formatCliResult({ code: error.code === 'CLI_USAGE' ? 2 : 4, summary: 'Runtime adapter configuration failed', details: { error: error.code ?? 'ADAPTER_CONFIG_INVALID', message: error.message } });
   }

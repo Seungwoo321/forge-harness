@@ -1,0 +1,73 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createSessionRunner } from './lib/session-runtime.mjs';
+
+function fixture(mode) {
+  let present = true;
+  let closes = 0;
+  let placeholder = false;
+  let unrelated = false;
+  const owner = { sessionId: 'owner', cwd: '/work/product', incarnationId: 'tty1:11:START', tty: 'tty1',
+    worker: { executable: 'worker', incarnationId: 'tty1:11:START', pid: 11, threadId: 'native-owner' } };
+  const recipient = { sessionId: 'receiver', cwd: '/work/product', incarnationId: 'tty2:22:START', executable: 'worker' };
+  const input = { effect: 'session.close', key: 'close-key', args: { owner, recipient, session: 'owner', incarnation: owner.incarnationId } };
+  const command = async (binary, args) => {
+    let stdout = '';
+    if (binary === 'cmux' && args.includes('tree')) stdout = JSON.stringify({ windows: [{ id: 'window', workspaces: [{ id: 'workspace', panes: [{ surfaces: [
+      ...(present ? [{ id: 'owner', type: 'terminal', tty: 'tty1' }] : []), ...(placeholder ? [{id:'placeholder',type:'terminal',tty:'tty3'}] : []),
+      ...(mode==='solo-race'?[]:[{ id: 'receiver', type: 'terminal', tty: 'tty2' }]),
+    ] }] }, ...(mode==='solo-race'?[{id:'receiver-workspace',panes:[{surfaces:[{id:'receiver',type:'terminal',tty:'tty2'}]}]}]:[])] }] });
+    else if (binary === 'cmux' && args.includes('new-surface')) { placeholder = true; }
+    else if (binary === 'cmux' && args.includes('close-surface')) {
+      if(mode==='solo-race') unrelated = true;
+      assert.equal(args[args.indexOf('--workspace') + 1], 'workspace');
+      closes += 1; if (mode === 'failed') return { exitCode: 1 }; present = false; if (mode === 'lost') return { exitCode: 1 };
+    }
+    else if (binary === 'ps') {
+      if (args.includes('tty=')) stdout = mode === 'caller' ? 'tty1' : '??';
+      else if (args.includes('pid=,pgid=,tpgid=,comm=')) stdout = args.includes('tty2') ? '22 22 22 worker\n' : '11 11 11 worker\n';
+      else stdout = mode === 'reused' && args.includes('11') ? 'CHANGED' : mode === 'recipient-drift' && args.includes('22') ? 'CHANGED' : 'START';
+    } else if (binary === 'lsof') stdout = 'p11\nn/work/product\n';
+    else throw new Error(`unexpected ${binary} ${args.join(' ')}`);
+    return { exitCode: 0, stdout };
+  };
+  const runner = createSessionRunner({ runtime: 'cmux', command, parent: { ...owner, closable: mode !== 'orchestrator' },
+    launch: () => ['worker'], pollAttempts: 1, taskTransport: { async identity() { return { threadId: mode === 'thread-drift' ? 'another-thread' : 'native-owner' }; } } });
+  return { runner, input, closes: () => closes, placeholder: () => placeholder, unrelated: () => unrelated };
+}
+
+for (const mode of ['orchestrator', 'caller', 'reused', 'recipient-drift', 'thread-drift']) {
+  test(`native close rejects ${mode} before touching a surface`, async () => {
+    const f = fixture(mode);
+    await assert.rejects(f.runner.execute(f.input));
+    assert.equal(f.closes(), 0);
+  });
+}
+
+test('native close verifies disappearance and lost response reconciles without another close', async () => {
+  for (const mode of ['success', 'lost']) {
+    const f = fixture(mode);
+    if (mode === 'lost') await assert.rejects(f.runner.execute(f.input));
+    else assert.equal((await f.runner.execute(f.input)).closed, true);
+    const checked = await f.runner.verify(f.input);
+    assert.equal(checked.status, 'completed');
+    assert.equal(checked.result.incarnationId, f.input.args.owner.incarnationId);
+    assert.equal(f.closes(), 1);
+  }
+});
+
+test('native failed close remains unknown while the exact session still exists', async () => {
+  const f = fixture('failed');
+  await assert.rejects(f.runner.execute(f.input));
+  assert.equal((await f.runner.verify(f.input)).status, 'not-applied');
+  assert.equal(f.closes(), 1);
+});
+
+
+test('last-surface closure uses an exited placeholder and never closes concurrently added surfaces', async () => {
+  const f = fixture('solo-race');
+  assert.equal((await f.runner.execute(f.input)).closed, true);
+  assert.equal(f.placeholder(), true);
+  assert.equal(f.unrelated(), true);
+  assert.equal(f.closes(), 1);
+});

@@ -10,6 +10,7 @@ import { createLedgerStore } from './lib/ledger.mjs';
 import { createUnitStateStore } from './lib/unit-state.mjs';
 import { finishSessionUnit } from './lib/session-flow.mjs';
 import { runUnitCli } from './lib/unit-driver.mjs';
+import { taskDigest } from './lib/session-task.mjs';
 
 const packet = [
   '목표: finish the approved work',
@@ -46,7 +47,7 @@ const resultFields = {
   remainingRisk: 'none', nextFirstAction: 'read the handoff',
 };
 
-test('final projection precedes a new-session successor and the result records its handoff', async t => {
+test('final projection precedes launch but a process-only result cannot close the unit', async t => {
   const { stateRoot, store, adapters } = await fixture(t);
   const order = [];
   const outcome = await finishSessionUnit({
@@ -64,12 +65,12 @@ test('final projection precedes a new-session successor and the result records i
     },
   });
   assert.deepEqual(order, ['owner:/work/next', 'tracker:Closed', 'owner:/work/next', 'session:unit-next']);
-  assert.equal(outcome.code, 0);
-  assert.equal(outcome.sessionId, 'child-session');
+  assert.equal(outcome.code, 3);
+  assert.match(outcome.summary, /receipt/);
   const record = await store.read('unit-finish');
-  assert.equal(record.state, 'Closed');
+  assert.equal(record.state, 'Delivered');
   assert.equal(record.next.unit, 'unit-next');
-  assert.equal(record.tracker.projected, true);
+  assert.equal(record.tracker.projected, false);
   const result = await readFile(record.resultRef.path, 'utf8');
   assert.match(result, /단위 종료 — 인계: .*unit-next/);
   assert.equal((await readFile(record.next.handoff.path, 'utf8')).trim(), packet);
@@ -130,10 +131,10 @@ test('unit finish CLI discovers the current owner and dispatches the exact cwd',
     adapters: { ...adapters, session: configuredAdapters.session },
   });
   const result = JSON.parse(output.split('\n').at(-1).slice('RESULT '.length));
-  assert.equal(result.code, 0);
+  assert.equal(result.code, 3);
   assert.deepEqual(observed, ['/work/root with spaces', '/work/root with spaces']);
   assert.deepEqual(started, ['/work/root with spaces']);
-  assert.equal((await store.read('unit-finish')).state, 'Closed');
+  assert.equal((await store.read('unit-finish')).state, 'Delivered');
 });
 
 test('a mismatched current owner prevents session start and leaves the Unit Delivered', async t => {
@@ -258,12 +259,12 @@ test('a real CLI process observes its own cwd before dispatching a distinct succ
   assert.equal(trace[2].event, 'execute');
   assert.equal(trace[2].cwd, cwd);
   assert.notEqual(trace[2].sessionId, trace[0].sessionId);
-  assert.equal(result.code, 0);
-  assert.equal(record.state, 'Closed');
+  assert.equal(result.code, 3);
+  assert.equal(record.state, 'Delivered');
   assert.equal(record.next.unit, 'unit-next');
   const intent = ledger.find(row => row.event === 'intent' && row.effect === 'session.start');
   assert.ok(intent);
-  assert.equal(ledger.find(row => row.event === 'result' && row.seq === intent.seq)?.result?.sessionId, trace[2].sessionId);
+  assert.equal(ledger.some(row => row.event === 'result' && row.seq === intent.seq), false);
 });
 
 test('Delivered retries revalidate accepted head and content before finish, close, or reconcile', async t => {
@@ -317,7 +318,7 @@ test('uncertain start retries preserve original packet and result before reconci
   }
   assert.equal(starts, 1);
   assert.equal(verifications, 0);
-  assert.equal((await finishSessionUnit(input)).code, 0);
+  assert.equal((await finishSessionUnit(input)).code, 3);
   assert.equal(starts, 1);
   assert.equal(verifications, 1);
   assert.equal((await f.store.read('unit-finish')).next.handoff.digest, original.next.handoff.digest);
@@ -344,7 +345,56 @@ test('tracker reconcile and public close cannot close an approved successor befo
   await runUnitCli(['unit', 'close', 'unit-finish'], options);
   assert.equal((await f.store.read('unit-finish')).state, 'Delivered');
   assert.equal(starts, 0);
-  assert.equal((await finishSessionUnit(input)).code, 0);
+  assert.equal((await finishSessionUnit(input)).code, 3);
   assert.equal(starts, 1);
-  assert.equal((await f.store.read('unit-finish')).state, 'Closed');
+  assert.equal((await f.store.read('unit-finish')).state, 'Delivered');
+});
+
+
+test('a legacy completed start is reobserved and supplemented without replacing its original rows', async t => {
+  const f = await fixture(t, false);
+  let starts = 0; let observations = 0;
+  const input = { stateRoot: f.stateRoot, store: f.store, unit: 'unit-finish', resultFields, handoffContent: packet,
+    successor: { approved: true, unit: 'unit-next', cwd: '/work/next' }, parentSessionId: 'parent-session', adapters: f.adapters,
+    sessionAdapter: {
+      async observe({ cwd }) { return { sessionId: 'parent-session', cwd }; },
+      async execute() { starts += 1; throw Error('lost'); },
+      async verify(input) {
+        observations += 1;
+        const identity = { sessionId: 'child', incarnationId: 'native-generation', cwd: input.args.cwd };
+        return { status: 'completed', result: { ...identity, task: { ...identity, schema: 'harness.task-receipt/1', effectKey: input.key,
+          promptDigest: taskDigest('original prompt'), threadId: 'thread', requestId: 'request', turnId: 'turn', activityId: 'activity',
+          packets: [{ path: input.args.handoffPath, digest: input.args.handoffDigest }] } } };
+      },
+    },
+  };
+  await finishSessionUnit(input);
+  const ledger = createLedgerStore(f.stateRoot);
+  const prior = await ledger.withLock('unit-finish', async store => {
+    const [intent] = await store.read();
+    const legacy = { event: 'result', unit: intent.unit, seq: intent.seq, key: intent.key, result: { sessionId: 'child', cwd: '/work/next' }, done_at: f.adapters.now() };
+    await store.append(legacy); return [intent, legacy];
+  });
+  const record = await f.store.read('unit-finish');
+  const originalResult = await readFile(record.resultRef.path);
+  const originalPacket = await readFile(record.next.handoff.path);
+  for (const change of [
+    { handoffContent: packet + '\nchanged' },
+    { resultFields: { ...resultFields, remainingRisk: 'changed risk' } },
+    { successor: { ...input.successor, attempt: 2 } },
+    { successor: { ...input.successor, cwd: '/another' } },
+  ]) {
+    await assert.rejects(finishSessionUnit({ ...input, ...change }), { code: 'EFFECT_UNCERTAIN' });
+    assert.deepEqual(await readFile(record.resultRef.path), originalResult);
+    assert.deepEqual(await readFile(record.next.handoff.path), originalPacket);
+    assert.deepEqual(await f.store.read('unit-finish'), record);
+    assert.deepEqual(await ledger.withLock('unit-finish', store => store.read()), prior);
+  }
+  assert.equal((await finishSessionUnit(input)).code, 3);
+  const rows = await ledger.withLock('unit-finish', store => store.read());
+  assert.deepEqual(rows.slice(0, 2), prior);
+  assert.equal(rows.at(-1).result.task.schema, 'harness.task-receipt/1');
+  assert.equal(rows.filter(row => row.event === 'intent').length, 1);
+  assert.equal(starts, 1); assert.equal(observations, 1);
+  assert.deepEqual(await readFile(record.resultRef.path), originalResult);
 });

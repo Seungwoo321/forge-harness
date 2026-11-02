@@ -40,19 +40,22 @@ async function fixture(t, { state = 'Delivered', runtime = null, mode = 'success
   }));
   const providers = path.join(root, 'adapters.mjs');
   await writeFile(providers, `
-import { appendFile, readFile } from 'node:fs/promises';
+import { appendFile, readFile, writeFile } from 'node:fs/promises';
 import { createSessionRunner } from ${JSON.stringify(runtimeModule)};
+import { taskDigest } from ${JSON.stringify(new URL('./lib/session-task.mjs', import.meta.url).href)};
 export async function createRuntimeAdapters({cwd,adapters}) {
   const trace = x => appendFile(process.env.TEST_TRACE, JSON.stringify(x)+'\\n');
   const parentCwd = process.env.TEST_PARENT;
   const mode = process.env.TEST_MODE;
-  const sessionRunner = process.env.TEST_RUNTIME ? createSessionRunner({runtime:process.env.TEST_RUNTIME,command:adapters.command,
+  const receipt = input => { const identity={sessionId:'child',incarnationId:'child-incarnation',cwd:input.args.cwd,executable:'worker'}; return {...identity,task:{schema:'harness.task-receipt/1',effectKey:input.key,...identity,promptDigest:taskDigest('native prompt'),threadId:'thread',requestId:'request',turnId:'turn',activityId:'activity',packets:['handoff','result'].filter(name=>input.args[name+'Path']).map(name=>({path:input.args[name+'Path'],digest:input.args[name+'Digest']}))}}};
+  const sessionRunner = process.env.TEST_RUNTIME ? createSessionRunner({runtime:process.env.TEST_RUNTIME,command:adapters.command,pollAttempts:1,
+    taskTransport:{async observe({prompt,packets}) {return {state:'started',promptDigest:taskDigest(prompt),threadId:'thread',requestId:'request',turnId:'turn',activityId:'activity',packets}}},
     parent:{sessionId:'parent',incarnationId:${JSON.stringify(incarnationId)},cwd:parentCwd},launch:args=>['worker','--unit',args.unit],
     async runtimeRpc(method,params){const result=await adapters.command('orca-rpc',[method,JSON.stringify(params)],{cwd});if(result.exitCode!==0)throw Error('RPC failed');return JSON.parse(result.stdout)}}) : {
     contractVersion:'harness.session-adapter/1',capabilities:['fix-forward','failure-classification-five-way','retry-limit','ops-e0-only','policy-review'],
-    async observe(input){await trace({event:'observe',...input});const observations=(await readFile(process.env.TEST_TRACE,'utf8')).trim().split('\\n').map(JSON.parse).filter(row=>row.event==='observe').length;return {sessionId:mode==='wrong-parent'||(mode==='late-parent'&&observations>1)?'wrong':'parent',cwd:mode==='wrong-parent-cwd'?cwd:parentCwd,incarnationId:${JSON.stringify(incarnationId)},targetCwd:mode==='wrong-target'?'wrong':input.targetCwd}},
-    async execute(input){await trace({event:'execute',...input});if(mode==='uncertain')throw Error('lost response');return {sessionId:'child',cwd:mode==='wrong-child'?'wrong':input.args.cwd}},
-    async verify(input){await trace({event:'verify',...input});return {status:'unknown'}}
+    async observe(input){await trace({event:'observe',...input});const observations=(await readFile(process.env.TEST_TRACE,'utf8')).trim().split('\\n').map(JSON.parse).filter(row=>row.event==='observe').length;return {sessionId:mode==='wrong-parent'||(mode==='late-parent'&&observations>1)?'wrong':'parent',cwd:mode==='wrong-parent-cwd'?cwd:parentCwd,incarnationId:${JSON.stringify(incarnationId)},targetCwd:mode==='wrong-target'?'wrong':input.targetCwd,...(mode==='finalize'?{closable:true,tty:'tty-owner',worker:{incarnationId:'owner-worker',pid:42,executable:'worker',threadId:'owner-thread'}}:{})}},
+    async execute(input){await trace({event:'execute',...input});if(mode==='finalize'){if(input.effect==='session.close'){await writeFile(process.env.TEST_NATIVE,JSON.stringify({closed:true}));return {closed:true,sessionId:'parent',incarnationId:${JSON.stringify(incarnationId)}}}return receipt(input)}if(mode==='uncertain')throw Error('lost response');return {sessionId:'child',cwd:mode==='wrong-child'?'wrong':input.args.cwd}},
+    async verify(input){await trace({event:'verify',...input});if(mode==='finalize'&&input.effect==='session.close'&&JSON.parse(await readFile(process.env.TEST_NATIVE,'utf8')).closed)return {status:'completed',result:{closed:true,sessionId:'parent',incarnationId:${JSON.stringify(incarnationId)}}};return {status:'unknown'}}
   };
   return {sessionRunner,git:{async inspectUnit({record}) {await trace({event:'inspect',state:record.state,cwd});const inspections=(await readFile(process.env.TEST_TRACE,'utf8')).trim().split('\\n').map(JSON.parse).filter(row=>row.event==='inspect').length;return {head:'head-1',contentFingerprint:mode==='changed'||(mode==='late-close-change'&&inspections>=3)?'changed':'fp-1'}}},
     gates:{async describe(id){await trace({event:'describe',id,cwd});return {id,command:['gate',id],files:[{path:'src/main.mjs',content:'source'}],format:'exec',reportPath:'reports/'+id+'.json'}},
@@ -137,13 +140,13 @@ else if(binary==='cmux'){
   return { root, cwd, parentCwd, store, request, providers, run, rows, ledger };
 }
 
-test('public executable loads configured generic runner and closes only after exact cwd start', async t => {
+test('public executable rejects process-only generic runner completion', async t => {
   const f = await fixture(t);
-  assert.equal(f.run('finish').code, 0);
+  assert.equal(f.run('finish').code, 3);
   const rows = await f.rows();
   assert.equal(rows[0].cwd, f.cwd);
   assert.equal(rows.find(row => row.event === 'execute').args.cwd, f.cwd);
-  assert.equal((await f.store.read('unit-a')).state, 'Closed');
+  assert.equal((await f.store.read('unit-a')).state, 'Delivered');
 });
 
 for (const mode of ['wrong-parent', 'wrong-parent-cwd', 'wrong-target']) {
@@ -186,7 +189,7 @@ for (const runtime of ['cmux', 'orca']) {
   test(`public executable uses native ${runtime} commands with distinct parent and target cwd`, async t => {
     const f = await fixture(t, { runtime, state: 'Accepted', separate: true });
     const result = f.run('finish');
-    assert.equal(result.code, 0, JSON.stringify(result));
+    assert.equal(result.code, 3, JSON.stringify(result));
     const rows = await f.rows();
     const started = rows.find(row => row.binary === runtime && row.args.includes(runtime === 'cmux' ? 'new-workspace' : 'create'));
     assert.equal(started.cwd, f.cwd);
@@ -195,7 +198,7 @@ for (const runtime of ['cmux', 'orca']) {
     assert.deepEqual(rows.filter(row => row.event === 'inspect').map(row => row.state).slice(0, 2), ['Accepted', 'Delivering']);
     const record = await f.store.read('unit-a');
     assert.deepEqual(record.deliveryResult, { level: 'none', head: 'head-1', mergeHead: null, effectRefs: [] });
-    assert.equal(record.state, 'Closed');
+    assert.equal(record.state, 'Delivered');
     assert.equal(result.sessionId, 'child');
   });
   test(`native ${runtime} rejects observed wrong worker cwd without relaunch`, async t => {
@@ -211,8 +214,8 @@ for (const runtime of ['cmux', 'orca']) {
 
 test('native terminal launch accepts a plain acknowledgment and observes the worker inside a wrapper group', async t => {
   const f = await fixture(t, { runtime: 'cmux', mode: 'wrapped', separate: true });
-  assert.equal(f.run('finish').code, 0);
-  assert.equal((await f.store.read('unit-a')).state, 'Closed');
+  assert.equal(f.run('finish').code, 3);
+  assert.equal((await f.store.read('unit-a')).state, 'Delivered');
   const rows = await f.rows();
   assert.ok(rows.some(row => row.binary === 'lsof' && row.args.includes('203')));
   assert.ok(!rows.some(row => row.binary === 'lsof' && row.args.includes('202')));
@@ -223,12 +226,12 @@ test('native terminal reconciles an existing wrapped worker after a lost launch 
   assert.equal(f.run('finish').code, 3);
   const before = await f.ledger();
   assert.equal((await f.store.read('unit-a')).state, 'Delivered');
-  assert.equal(f.run('finish').code, 0);
+  assert.equal(f.run('finish').code, 3);
   const after = await f.ledger();
   assert.deepEqual(after[0], before[0]);
   assert.equal(after.filter(row => row.event === 'intent').length, 1);
   assert.equal((await f.rows()).filter(row => row.binary === 'cmux' && row.args.includes('new-workspace')).length, 1);
-  assert.equal((await f.store.read('unit-a')).state, 'Closed');
+  assert.equal((await f.store.read('unit-a')).state, 'Delivered');
 });
 
 for (const mode of ['wrapped-mismatch', 'wrapped-background', 'wrapped-ambiguous', 'wrapped-late-ambiguous',
@@ -255,12 +258,12 @@ test('public executable injects Git and gate providers and preserves original ev
     assert.equal(evidence.key, `original:${evidence.gate}`);
   }
   assert.ok((await f.rows()).filter(row => row.event === 'gate').every(row => row.cwd === f.cwd));
-  assert.equal(f.run('finish').code, 0);
+  assert.equal(f.run('finish').code, 3);
 });
 
 test('none delivery resumes Delivering and rejects changed accepted content', async t => {
   const resume = await fixture(t, { state: 'Delivering' });
-  assert.equal(resume.run('finish').code, 0);
+  assert.equal(resume.run('finish').code, 3);
   const changed = await fixture(t, { state: 'Accepted', mode: 'changed' });
   assert.equal(changed.run('finish').code, 1);
   assert.equal((await changed.store.read('unit-a')).state, 'SelfGated');
@@ -345,4 +348,18 @@ test('Orca process incarnation change preserves uncertainty and never relaunches
   assert.equal((await f.rows()).filter(row => row.args?.includes('create')).length, 1);
   assert.deepEqual((await f.ledger()).map(row => row.event), ['intent', 'verification']);
   assert.equal((await f.store.read('unit-a')).state, 'Delivered');
+});
+
+
+test('public executable starts a detached finalizer that survives the finish caller exit', async t => {
+  const f = await fixture(t, { mode: 'finalize', separate: true });
+  const output = f.run('finish');
+  assert.equal(output.code, 3);
+  assert.equal(output.finalizePending, true);
+  for (let attempt = 0; attempt < 100 && (await f.store.read('unit-a')).state !== 'Closed'; attempt += 1) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal((await f.store.read('unit-a')).state, 'Closed');
+  const intents = (await f.ledger()).filter(row => row.event === 'intent');
+  assert.deepEqual(intents.map(row => row.effect), ['session.start', 'session.deliver', 'session.close']);
+  assert.equal(f.run('finalize').code, 0);
+  assert.equal((await f.rows()).filter(row => row.event === 'execute' && row.effect === 'session.close').length, 1);
 });

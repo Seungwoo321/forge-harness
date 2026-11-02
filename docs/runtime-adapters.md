@@ -34,7 +34,15 @@ export async function createRuntimeAdapters({ cwd, adapters }) {
 
 게이트의 `describe`는 id/version/command/config, 입력 파일 내용, 도구 버전을 담는다. `run`은 판정과 원 결과 참조를 돌려준다. 정확한 객체 형태와 실제 실행 예는 [공개 CLI 통합 테스트](../scripts/public-control-plane.test.mjs), [실행 파일 통합 테스트](../scripts/unit-executable.test.mjs), [증거 모듈](../scripts/lib/evidence.mjs)이 제공한다. 테스트의 stub 런타임은 실사용 제공자를 대신하지 않는다.
 
-세션 연결에는 패키지의 `scripts/lib/session-runtime.mjs`가 `createSessionRunner({runtime,command,parent,launch,runtimeRpc})`를 제공한다. `runtime`은 `cmux` 또는 `orca`; `parent`는 실제 `sessionId`, `incarnationId`, `cwd`; `launch`는 승인된 후속 실행 argv를 만든다. Orca는 `terminal.inspectProcess`를 제공하는 실제 transport를 `runtimeRpc`로 연결한다. runtime 설정 모듈이 SDK 발견·버전·수명을 소유한다. 호스트 화면이나 입력 전송만으로 실제 착수를 선언하지 않는다.
+세션 연결에는 패키지의 `scripts/lib/session-runtime.mjs`가 `createSessionRunner({runtime,command,parent,launch,runtimeRpc,taskTransport,taskPrompt})`를 제공한다. `runtime`은 `cmux` 또는 `orca`; `parent`는 실제 `sessionId`, `incarnationId`, `cwd`; `launch`는 승인된 후속 실행 argv를 만든다. Orca는 `terminal.inspectProcess`를 제공하는 실제 transport를 `runtimeRpc`로 연결한다. runtime 설정 모듈이 SDK 발견·버전·수명을 소유한다. 호스트 화면이나 입력 전송만으로 실제 착수를 선언하지 않는다.
+
+Codex argv의 마지막 인자는 정확한 초기 prompt다. 기본 Codex transport는 worker PID의 열린 native writer lock으로 thread를 결속하고 별도 `codex app-server --stdio`의 `thread/read`, `thread/turns/list`, `thread/queue/list`로 실제 기록을 읽는다. 지원 프로토콜은 설치된 CLI가 제공해야 하며 누락 시 차단된다. 최초 prompt는 TUI가 자동 제출하므로 startup 중 키를 보내지 않는다. 기존 owner의 결과 전달은 `thread/queue/add`로 한 번 제출하고 exact userMessage와 후속 native 응답·도구 실행을 기다린다. 큐 대기는 미완료다. 새 packet은 digest와 본문을 prompt에 결속하고, 기존 초기 prompt는 동일 packet을 실제 읽은 commandExecution 출력의 digest로 검증한다. 앱 서버 기록을 읽는 프로세스는 기존 thread를 resume하거나 탈취하지 않는다.
+
+다른 worker는 명시적 `taskTransport`를 등록한다. `observe({observed,input,prompt,packets})`는 `startup|modal|ready|prefilled|queued|accepted|started`와 네이티브 근거를 반환한다. `started`에는 promptDigest·threadId·requestId·turnId·activityId·packets가 필요하다. `submit({...request,fence})`는 같은 native readiness fence에서 정확한 입력만 제출하는 원자적/멱등 연산이다. interactive pending 입력의 Enter, busy 입력의 native queue는 이 transport가 처리하며 화면 문구만으로 승인하거나 키를 누르지 않는다. `identity(observed)`는 실제 worker의 threadId를 반환한다. `taskPrompt(args,argv)`는 초기 prompt 형식이 다른 worker에만 필요하다.
+
+자동 종료에는 `parent.workerExecutable`과 `parent.closable: true`가 필요하다. incarnation은 해당 worker의 실제 관찰값이며 wrapper 셸의 PID로 대체하지 않는다. `unit finish`는 결과/인계를 고정한 뒤 exit 3을 반환하고 분리된 finalizer를 기동한다. 그 로그는 `<stateRoot>/units/<unit>/finalization.log`다. finalizer만 결과 수신·착수, close intent, 정확한 worker 신원, 종료 뒤 부재를 확인하고 Closed를 기록한다. `returnTo: {sessionId,incarnationId,cwd,executable}`를 주면 기존 parent로 결과를 돌려보낸다. 수신이 지연되거나 종료가 불확실하면 같은 `unit finalize <unit> --adapters <module>` 또는 원래 finish를 재호출한다. 초기 session.start의 unit·role·attempt·args·key는 변경하지 않는다. 기존 원장·결과 파일을 새 필드에 맞춰 직접 수정하지 않는다.
+
+반환 의무는 tracker 투영 전에 저장되며 public close/reconcile도 이를 우회하지 못한다. 구버전 process-only result는 같은 seq/key의 실제 native 재관찰로 보강하고 원 행을 남긴다. cmux의 마지막 surface 종료에는 종료된 빈 placeholder surface를 먼저 만든다. workspace 전체 종료는 사용하지 않으므로 동시에 추가된 다른 surface는 유지된다. 종료 뒤 해당 workspace에는 빈 surface가 남을 수 있다.
 
 전달 문맥은 `resourceOwned`, `productOwned`, `inScope`, `operational`, `irreversible`, `containsSecret`, `forbiddenCommand`의 boolean을 제공한다. 사용자 지시는 신뢰된 제공자가 검증하며 요청 파일의 자기 신고로 승격하지 않는다. 등록 실패는 구조화된 RESULT로 나오고 필수 제공자가 없는 연산은 차단된다.
 

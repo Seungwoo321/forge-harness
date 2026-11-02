@@ -383,7 +383,11 @@ LLM 이 제어면의 결정을 우회하지 못하도록 두 가지를 둔다: �
 
 부모 세션의 `parentRuntime = {sessionId,cwd,incarnationId}`와 다음 작업의 `successor.cwd`는 서로 다른 경로일 수 있다. 런타임 설정은 부모 신원·cwd를 고정하고 `observe({cwd: parentRuntime.cwd, targetCwd: successor.cwd})`에서 부모의 실제 신원·cwd와 대상 경로를 독립 확인한다. 기동 후에는 다음 세션의 신원·incarnation·대상 cwd를 관찰한다. 기존 parentSessionId 입력은 동일 경로 동작을 유지하며 명시 부모 입력과 충돌하면 기동 전에 거부한다.
 
-네이티브 런타임 바인딩은 `createSessionRunner({runtime,command,parent,launch,runtimeRpc})`로 구성한다. Orca의 `runtimeRpc`는 네이티브 `terminal.inspectProcess` transport이며 설정 모듈이 SDK의 발견·버전·수명을 소유한다. foreground PID·시작 시각·tty·프로세스 그룹을 OS 관찰과 대조하고 실제 프로세스 cwd를 확인한 뒤 네이티브 incarnation·프로세스 fence를 다시 검사한다. 등록 worktree 경로는 실제 프로세스 cwd의 증거가 아니다. cmux는 네이티브 caller·terminal·tty와 OS foreground 프로세스 관찰을 결속한다. 부모는 기동 직전에 재관찰하며, 다음 세션은 설정 launch 실행 파일이 실제 시작된 경우에만 확인된다.
+네이티브 런타임 바인딩은 `createSessionRunner({runtime,command,parent,launch,runtimeRpc,taskTransport,taskPrompt})`로 구성한다. Orca의 `runtimeRpc`는 네이티브 `terminal.inspectProcess` transport이며 설정 모듈이 SDK의 발견·버전·수명을 소유한다. foreground PID·시작 시각·tty·프로세스 그룹을 OS 관찰과 대조하고 실제 프로세스 cwd를 확인한 뒤 네이티브 incarnation·프로세스 fence를 다시 검사한다. 등록 worktree 경로는 실제 프로세스 cwd의 증거가 아니다. cmux는 네이티브 caller·terminal·tty와 OS foreground 프로세스 관찰을 결속한다. 부모는 기동 직전에 재관찰한다.
+
+프로세스 실행만으로 착수를 선언하지 않는다. worker transport는 정확한 prompt digest·packet digest·thread·request·turn·실행 항목을 관찰한다. `harness.task-receipt/1`은 이를 effect key·session·incarnation·cwd와 결속한다. 최초 argv 입력은 자동 제출 여부를 관찰하며 반복 입력하지 않는다. interactive pending 입력은 transport의 readiness fence를 재검사하는 조건부 submit으로 제출한다. busy 큐·composer·startup modal은 착수 증거가 아니다. 네이티브 대화의 실제 응답·도구 실행은 착수 증거이며 이후 interrupted 상태와 구분해 보존한다.
+
+`unit finish`의 `returnTo`는 기존 수신 세션의 정확한 sessionId·incarnationId·cwd·executable이다. 새 successor와 함께 지정하지 않는다. 제어면은 관찰한 owner·recipient·result·handoff를 `sessionFinalization`에 고정한다. 별도 생존 프로세스의 `unit finalize <unit>`가 `session.deliver`로 결과를 한 번 제출하고 실제 수신·착수를 확인한 뒤 `session.close` intent를 기록한다. 공개 finish 실행 파일은 같은 어댑터·상태 루트로 분리된 finalizer를 기동한다. 종료 대상은 런타임 설정의 `parent.closable: true`와 `parent.workerExecutable`로 명시한 worker만이다. 셸·오케스트레이터·수신 세션은 종료하지 않는다. 원 session·incarnation·cwd·native thread를 재검사하고 실제 소멸을 생존 프로세스에서 확인한 뒤에만 Closed로 전이한다. 미수신·실패·불확실성은 Delivered와 같은 intent를 유지하며 `unit finalize` 또는 원래 finish의 재호출로 조사·재개한다.
 
 ### 7.3 단계 계약 (공통 봉투)
 
@@ -571,6 +575,7 @@ E2 이상의 부작용은 수행 전에 의도를, 수행 후 결과를 원장�
 | deployment.apply | E3 | environment, artifactDigest |
 | db.migrate | E3 | database, migrationDigest |
 | session.start | E3 | unit, role, attempt |
+| session.deliver | E3 | session, incarnation, resultDigest |
 | session.close | E3 | session, incarnation |
 | data.delete | E4 | resource, selectionDigest |
 
@@ -929,6 +934,8 @@ CLI 는 사람용 출력의 마지막 줄에 기계용 한 줄 `RESULT {json}` �
 | H-DL-04 | 결과 파일은 30줄 이내이며 마지막 줄이 §8.9 의 세 형식(인계·완료·중단) 중 하나다 | T |
 | H-DL-06 | 동일 검증 트리의 전달 commit은 SHA를 결속하고 내용 변경은 재수용한다. target merge SHA는 단위 head 변경이 아니다 | T |
 | H-DL-07 | merged·closed PR은 새 전달에 재사용하지 않으며 새 head 전달은 새 키를 쓴다 | T |
+| H-DL-08 | 입력 제출과 실제 착수는 정확한 native request·실행 항목·packet·worker incarnation으로 결속하며 큐 대기는 성공이 아니다 | T/L |
+| H-DL-09 | 기존 owner로 결과를 전달하며 별도 생존 프로세스가 원장 intent·정확한 worker 신원·사후 소멸 관찰을 확인한 뒤에만 세션을 종료 완료한다 | T/L |
 | H-DL-05 | 리뷰 없는 수용(`basis: gates`)으로 머지할 때는 `review.mode` 가 `none` 이거나 트리거가 거짓이었음이 Unit Record 에 기록되어 있다 | T |
 | H-EV-09 | 환경·하네스·사용자 영역·불명 실패 후 같은 fingerprint 정상 통과를 비결정으로 분류하지 않는다 | T |
 | H-BD-05 | clock·id stub의 동일 입력은 동일 출력이며 결정 모듈이 시각·난수를 직접 읽지 않는다 | T/S |

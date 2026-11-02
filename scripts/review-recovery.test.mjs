@@ -63,11 +63,11 @@ export function createRuntimeAdapters({ cwd, adapters }) {
     assert.equal(child.status, output.code);
     return output;
   };
-  const submit = async (stage, fields, reviewer = unit, env = {}) => {
-    const input = await read(path.join(stateRoot, 'units', reviewer, 'stages', `${stage}.1.input.json`));
+  const submit = async (stage, fields, reviewer = unit, env = {}, attempt = 1) => {
+    const input = await read(path.join(stateRoot, 'units', reviewer, 'stages', `${stage}.${attempt}.input.json`));
     const output = path.join(root, `${reviewer}-${stage}-output.json`);
     await writeFile(output, JSON.stringify({ inputDigest: input.inputDigest, attempt: input.attempt,
-      submissionId: `${reviewer}-${stage}`, status: 'done', summary: `${stage} completed`, ...fields }));
+      submissionId: `${reviewer}-${stage}-${attempt}`, status: 'done', summary: `${stage} completed`, ...fields }));
     return run(['unit', 'stage', 'submit', reviewer, stage, '--output', output], env);
   };
   const start = async (name = unit, kind = 'impl') => {
@@ -370,6 +370,68 @@ test('review submission rejects missing live Git inspection without recording sh
     'review-a', { TEST_EMPTY_INSPECTION: '1' });
   assert.equal(rejected.error, 'STAGE_STALE');
   assert.deepEqual(await f.record(), before);
+});
+
+for (const legacy of [false, true]) test(`staged lockfile replacement reaches review and survives public fix/reimplement (legacy: ${legacy})`, {
+  skip: legacy && !process.env.FORGE_STAGED_DELETION_CLI,
+}, async t => {
+  const f = await fixture(t, legacy ? process.env.FORGE_STAGED_DELETION_CLI : cli);
+  await writeFile(path.join(f.cwd, 'old.lock'), 'old dependency graph\n');
+  f.git('add', 'old.lock');
+  f.git('commit', '-qm', 'add lockfile');
+  await f.start();
+  assert.equal(f.run(['unit', 'stage', 'open', f.unit, 'scope']).code, 0);
+  assert.equal((await f.submit('scope', { acceptance: [{ id: 'AC-1', text: 'Replace the lockfile' }],
+    scopePaths: ['main.txt', '*.lock'], openDecisions: [] })).code, 0);
+  assert.equal(f.run(['unit', 'stage', 'open', f.unit, 'implement']).code, 0);
+  await writeFile(path.join(f.cwd, 'main.txt'), 'after\n');
+  await writeFile(path.join(f.cwd, 'new.lock'), 'new dependency graph\n');
+  f.git('rm', 'old.lock');
+  f.git('add', '-A');
+  const implementation = { changedPaths: ['main.txt', 'new.lock', 'old.lock'],
+    coverage: [{ acceptanceRef: 'AC-1', evidenceHint: 'replacement verified' }], assumptions: [], openDecisions: [] };
+  assert.equal((await f.submit('implement', implementation)).code, 0);
+  assert.equal(f.run(['unit', 'accept', f.unit]).code, 20);
+  await f.start('review-a', 'review');
+  const firstReview = f.run(['unit', 'stage', 'open', 'review-a', 'review']);
+  assert.equal(firstReview.code, 0, JSON.stringify(firstReview));
+  const firstInput = await f.read(firstReview.input);
+  const firstDiff = await f.read(firstInput.data.diff.path);
+  assert.equal(firstInput.data.changedPaths.includes('old.lock'), !legacy);
+  assert.equal(firstDiff.patch.includes('deleted file mode'), !legacy);
+  assert.equal((await f.submit('review', { findings: [], verdict: 'fix', reviewedHead: firstInput.head }, 'review-a')).code, 0);
+  const before = await f.record();
+  const priorRefs = f.git('show-ref').split('\n');
+  const beforeIndex = await readFile(path.join(f.cwd, '.git', 'index'));
+  const beforeStatus = f.git('status', '--porcelain=v1', '-z');
+  f.upgrade();
+  const reopened = f.run(['unit', 'stage', 'open', f.unit, 'implement']);
+  assert.equal(reopened.code, 0, JSON.stringify(reopened));
+  assert.equal(reopened.attempt, 2);
+  assert.equal((await f.submit('implement', implementation, f.unit, {}, 2)).code, 0);
+  const refreshed = await f.record();
+  assert.deepEqual(refreshed.changedPaths, ['main.txt', 'new.lock', 'old.lock']);
+  assert.deepEqual(refreshed.evidence, before.evidence);
+  assert.deepEqual(refreshed.stages.find(stage => stage.name === 'implement').attempts[0],
+    before.stages.find(stage => stage.name === 'implement').attempts[0]);
+  assert.equal(f.run(['unit', 'accept', f.unit]).code, 20);
+  await f.start('review-b', 'review');
+  const secondReview = f.run(['unit', 'stage', 'open', 'review-b', 'review']);
+  assert.equal(secondReview.code, 0, JSON.stringify(secondReview));
+  const fresh = await f.read(secondReview.input);
+  assert.deepEqual(fresh.data.changedPaths, ['main.txt', 'new.lock', 'old.lock']);
+  const freshDiff = await f.read(fresh.data.diff.path);
+  assert.deepEqual(freshDiff.paths, fresh.data.changedPaths);
+  assert.match(freshDiff.patch, /diff --git a\/old.lock b\/old.lock\ndeleted file mode/);
+  assert.match(freshDiff.patch, /-old dependency graph/);
+  assert.match(freshDiff.patch, /\+new dependency graph/);
+  assert.deepEqual(await f.read(firstReview.input), firstInput);
+  assert.deepEqual(await f.read(firstInput.data.diff.path), firstDiff);
+  for (const ref of priorRefs) assert.ok(f.git('show-ref').split('\n').includes(ref));
+  assert.deepEqual(await readFile(path.join(f.cwd, '.git', 'index')), beforeIndex);
+  assert.equal(f.git('status', '--porcelain=v1', '-z'), beforeStatus);
+  assert.equal((await f.submit('review', { findings: [], verdict: 'ship', reviewedHead: fresh.head }, 'review-b')).code, 0);
+  assert.equal(f.run(['unit', 'accept', f.unit]).code, 0);
 });
 
 test('repeated acceptance cannot rebind a prior ship verdict to changed content at the same head', async t => {

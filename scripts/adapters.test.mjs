@@ -103,6 +103,15 @@ test('checkpoint adapter snapshots the worktree with a temporary index and honor
     assert.equal(git('status', '--porcelain=v1', '-z', '--untracked-files=all'), beforeInspectStatus);
     assert.equal(git('diff', '--cached', '--raw'), beforeInspectIndex);
     assert.equal(await readFile(join(dir, '.env.secret'), 'utf8'), 'secret-change\n');
+    git('rm', '-f', '.env.secret', 'ignored-tracked.txt');
+    git('add', 'new.txt');
+    const deletedSecrets = await adapters.checkpoint.createCheckpoint({ ref: 'refs/harness/U-1/implement.1', exclude: ['**/.env*'] });
+    assert.deepEqual(deletedSecrets.excluded, ['.env.secret', 'ignored-tracked.txt']);
+    assert.equal(deletedSecrets.indexChanged, false);
+    assert.equal(deletedSecrets.worktreeChanged, false);
+    const snapshotFiles = git('ls-tree', '-r', '--name-only', deletedSecrets.commit).split('\n');
+    assert.ok(snapshotFiles.includes('new.txt'));
+    for (const excluded of ['.env.secret', 'ignored-tracked.txt', 'ignored.log']) assert.ok(!snapshotFiles.includes(excluded));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -134,4 +143,37 @@ test('later checkpoints retain previously created references', async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+for (const staged of [false, true]) test(`checkpoint preserves final-file deletion (staged: ${staged}) without changing the real index`, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'checkpoint-deletion-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git('init', '-q');
+  git('config', 'user.name', 'Test');
+  git('config', 'user.email', 'test@example.invalid');
+  await writeFile(join(dir, 'last.txt'), 'remove me\n');
+  git('add', '.');
+  git('commit', '-qm', 'baseline');
+  const adapter = createAdapters({ repositoryRoot: dir }).checkpoint;
+  const baseline = await adapter.createCheckpoint({ ref: 'refs/harness/deletion/scope.1' });
+  await rm(join(dir, 'last.txt'));
+  if (staged) git('add', '-A');
+  const beforeIndex = await readFile(join(dir, '.git', 'index'));
+  const beforeStatus = git('status', '--porcelain=v1', '-z');
+  const changes = await adapter.inspectChanges({ checkpoint: baseline.ref, firstCheckpoint: baseline.ref, paths: ['last.txt'] });
+  assert.deepEqual(changes.firstCheckpointDiff, ['last.txt']);
+  assert.deepEqual(changes.attemptDiff, ['last.txt']);
+  assert.match(changes.patch, /deleted file mode/);
+  assert.match(changes.patch, /-remove me/);
+  const created = await adapter.createCheckpoint({ ref: 'refs/harness/deletion/implement.1' });
+  assert.equal(git('ls-tree', '-r', created.commit), '');
+  assert.equal(created.indexChanged, false);
+  assert.equal(created.worktreeChanged, false);
+  assert.deepEqual(await readFile(join(dir, '.git', 'index')), beforeIndex);
+  assert.equal(git('status', '--porcelain=v1', '-z'), beforeStatus);
 });

@@ -103,7 +103,7 @@ export function createAdapters({ spawn = nodeSpawn, clock = () => new Date(), id
     try {
       const head = (await git(['rev-parse', 'HEAD'], { cwd })).trim();
       await git(['read-tree', head], { cwd, env });
-      const output = await git(['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd, env: { GIT_OPTIONAL_LOCKS: '0' } });
+      const output = await git(['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd, env: { ...env, GIT_OPTIONAL_LOCKS: '0' } });
       const files = output.split('\0').filter(Boolean);
       let ignored = [];
       if (files.length) {

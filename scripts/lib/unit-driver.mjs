@@ -18,6 +18,8 @@ import { classifySessionBoundary } from './classify.mjs';
 import { recordApproval, resolveEffectApproval } from './approvals.mjs';
 import { acceptedDeliveryMetadata, validateDeliveryContext } from './delivery-flow.mjs';
 import { validateAcceptedContent } from './delivery.mjs';
+import { resolveFindings } from './finding-resolution.mjs';
+import { recheckScope } from './scope-recheck.mjs';
 
 const controlPlaneFields = new Set([
   'request', 'unit', 'kind', 'goal', 'policy', 'policySources', 'canon', 'tracker', 'isolation',
@@ -491,7 +493,7 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
   const guard = scopeGuard({
     goalClass: reviewedRecord.policy?.goal?.class,
     scopePaths: output.scopePaths ?? reviewedRecord.scopePaths ?? [],
-    productPaths: reviewedRecord.productPaths ?? reviewedRecord.goal?.productPaths ?? [],
+    productPaths: reviewedRecord.productPaths !== undefined ? reviewedRecord.productPaths : reviewedRecord.goal?.productPaths,
     changedPaths: attributed.changedPaths,
   });
   let diagnosisConfirmed = null;
@@ -839,7 +841,7 @@ async function runAcceptance({ stateRoot, unit, adapters }) {
     acceptance: record.acceptance ?? [], evidence: record.evidence ?? [], requiredGates: profile.gates,
     head: target.head, contentFingerprint: target.contentFingerprint,
     currentHead: checkedTarget?.head, currentContentFingerprint: checkedTarget?.contentFingerprint,
-    reviewRequired: reviewResolution.required, review,
+    reviewRequired: reviewResolution.required, review, findings: record.findings ?? [],
   });
   if (!evaluation.ok && evaluation.nextState === 'SelfGated') {
     record = await store.update(unit, current => {
@@ -889,7 +891,7 @@ async function runAcceptance({ stateRoot, unit, adapters }) {
       acceptance: current.acceptance ?? [], evidence: current.evidence ?? [], requiredGates: profile.gates,
       head: target.head, contentFingerprint: target.contentFingerprint,
       currentHead: finalTarget.head, currentContentFingerprint: finalTarget.contentFingerprint,
-      reviewRequired: currentReviewResolution.required,
+      reviewRequired: currentReviewResolution.required, findings: current.findings ?? [],
       review: current.reviewedHead ? {
         verdict: current.verdict, head: current.reviewedHead, contentFingerprint: current.reviewDecision?.contentFingerprint,
         findings: current.findings ?? [], verdictBy: current.reviewDecision?.by ?? 'session',
@@ -1022,8 +1024,23 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
       return await runEvidenceRerun({ stateRoot: effectiveRoot, unit, gateId: parsed.options.gate, adapters });
     }
-    if (noun !== 'unit' || !['start', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'decision', 'accept', 'progress', 'approval'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
+    if (noun !== 'unit' || !['start', 'scope', 'finding', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'decision', 'accept', 'progress', 'approval'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
     const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
+    if (subcommand === 'finding') {
+      const [action, unit] = rest;
+      if (action !== 'resolve' || rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit finding resolve requires <unit> --request <file> --user-input <ref>');
+      const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'finding resolution request', 'CLI_USAGE');
+      const contract = await readJsonFile(contractFile(contractsDir, 'review'), 'review contract', 'STAGE_CONTRACT_INVALID');
+      const resolution = await resolveFindings({ store: createUnitStateStore(effectiveRoot), stateRoot: effectiveRoot, unit, request,
+        userInputRef: parsed.options['user-input'], adapters, cwd, contract });
+      return formatCliResult({ code: 0, summary: `Findings resolved for ${unit}`, details: { unit, resolution } });
+    }
+    if (subcommand === 'scope') {
+      const [action, unit] = rest;
+      if (action !== 'recheck' || rest.length !== 2 || !unit) usageError('unit scope recheck requires <unit>');
+      const recheck = await recheckScope({ store: createUnitStateStore(effectiveRoot), unit, adapters });
+      return formatCliResult({ code: 0, summary: `Scope rechecked for ${unit}`, details: { unit, recheck } });
+    }
     if (subcommand === 'approval') {
       const [action, unit] = rest;
       if (action !== 'record' || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit approval record requires <unit> --request <file> --user-input <ref>');

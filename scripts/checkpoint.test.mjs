@@ -46,3 +46,12 @@ test('scope guard selects goal-owned paths and never proposes automatic restorat
 test('paths escaping the repository are rejected', () => {
   assert.throws(() => scopeGuard({ goalClass: 'task', scopePaths: ['src/**'], changedPaths: ['../outside'] }), /cannot escape/);
 });
+
+test('prelaunch falls back only when product ownership is absent and remains fail-closed', () => {
+  const input = { goalClass: 'product-prelaunch', scopePaths: ['app/**'], changedPaths: ['app/main.mjs', 'outside.txt'] };
+  assert.deepEqual(scopeGuard(input).finding.paths, ['outside.txt']);
+  assert.deepEqual(scopeGuard({ ...input, productPaths: [] }).finding.paths, input.changedPaths);
+  assert.deepEqual(scopeGuard({ ...input, productPaths: ['outside.txt'] }).finding.paths, ['app/main.mjs']);
+  assert.equal(scopeGuard({ goalClass: 'product-prelaunch', changedPaths: ['anything'] }).ok, false);
+  assert.throws(() => scopeGuard({ ...input, productPaths: null }), /allowed paths/);
+});

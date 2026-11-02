@@ -215,7 +215,7 @@ export async function runGate({ gate, fingerprint, adapter, independent = false 
   return { record, reused: false, pending: parsed.pending === true, nondeterministic: record.nondeterministic === true, error: parsed.ok ? null : parsed.pending ? 'judge is pending' : parsed.reason };
 }
 
-export function evaluateAcceptance({ acceptance = [], evidence = [], requiredGates = [], head, contentFingerprint, currentHead, currentContentFingerprint, reviewRequired = false, review = null } = {}) {
+export function evaluateAcceptance({ acceptance = [], evidence = [], requiredGates = [], head, contentFingerprint, currentHead, currentContentFingerprint, reviewRequired = false, review = null, findings = review?.findings ?? [] } = {}) {
   evidence = currentEvidence(evidence);
   if (typeof head !== 'string' || !head || typeof contentFingerprint !== 'string' || !contentFingerprint) {
     return { ok: false, reason: 'accepted target is incomplete', uncovered: [] };
@@ -230,9 +230,11 @@ export function evaluateAcceptance({ acceptance = [], evidence = [], requiredGat
   if (missing.length) return { ok: false, reason: 'required gates have no valid passing evidence', missing };
   const coverage = acceptanceCoverage(acceptance, evidence);
   if (!coverage.ok) return { ok: false, reason: 'acceptance criteria are uncovered', ...coverage };
-  if (reviewRequired && (!review || review.verdict !== 'ship' || review.head !== head || review.contentFingerprint !== contentFingerprint
-    || (review.findings ?? []).some(finding => finding.severity === 'must-fix' && !finding.resolvedAt))) {
+  if (reviewRequired && (!review || review.verdict !== 'ship' || review.head !== head || review.contentFingerprint !== contentFingerprint)) {
     return { ok: false, reason: 'matching ship review is required' };
+  }
+  if (findings.some(finding => finding.severity === 'must-fix' && !finding.resolvedAt)) {
+    return { ok: false, reason: 'unresolved must-fix findings require explicit resolution' };
   }
   return {
     ok: true,

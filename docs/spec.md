@@ -437,7 +437,11 @@ stage 열거값은 `scope | implement | gates | root-cause | review | handoff`�
 }
 ```
 
-kind는 review/diagnosis/scope-guard/coverage/shared-path, severity는 must-fix/should-fix/nice다. case는 필수다. 제어면의 scope-guard·coverage·shared-path는 must-fix다. scope-guard는 목표별 E1 허용 경로 이탈이며 prelaunch의 제품 소유 경로는 단위 scopePaths 밖이어도 허용된다. classification은 diagnosis만 product/harness/environment/user-domain으로 확정해 돌려준다. 불명 실패는 확정 전 재시도·R을 열지 않는다. Finding은 추가 전용이며 해소는 resolvedAt으로 표시한다.
+kind는 review/diagnosis/scope-guard/coverage/shared-path, severity는 must-fix/should-fix/nice다. case는 필수다. 제어면의 scope-guard·coverage·shared-path는 must-fix다. scope-guard는 목표별 E1 허용 경로 이탈이며 prelaunch의 명시된 제품 소유 경로는 단위 scopePaths 밖이어도 허용된다. productPaths가 없으면 확정된 scopePaths를 사용하며 명시적 빈 productPaths는 허용 경로 없음이다. classification은 diagnosis만 product/harness/environment/user-domain으로 확정해 돌려준다. 불명 실패는 확정 전 재시도·R을 열지 않는다. Finding은 추가 전용이며 해소는 resolvedAt으로 표시한다. `unit scope recheck`는 기존 승인 경로에 모두 포함되는 제어면 생성 scope-guard만 원문·인덱스·digest를 scopeRechecks에 보존하며 해소한다. 경로 권한을 추가하거나 리뷰어 지적을 해소하지 않는다.
+
+`unit finding resolve`는 현재 revision·head·내용 fingerprint, 원 지적 인덱스/digest, 완료된 독립 ship 리뷰의 원본 입력·출력, 실제 리뷰어, 지적별 수정 보고서 바이트 digest와 검증된 사용자 권한에 결속한다. 리뷰어 작성 review/coverage 지적만 해소하며 classification은 원인 분류이고 해소 권한을 대신하지 않는다. provider.verifyUserInput은 정확한 요청 digest와 실제 독립성·출처·수정 증거를 검증한다. 최신 대상·수용 기준·게이트 증거가 다르거나 후속 구현/리뷰가 있으면 거부한다. 원 지적·단계·증거·실패는 보존하고 findingResolutions에 영수증을 추가한다. 같은 요청은 멱등이고 충돌·오래된 revision·부분 오류는 쓰지 않는다.
+
+과거 unresolved must-fix로 수용이 막혀도 현재 대상과 일치하는 ship은 유지한다. 구버전이 지운 ship은 같은 명시적 해소 검증을 통과한 원본 완료 리뷰로만 복원하고 이전 판정을 영수증에 보존한다. ship 자체는 해소가 아니며 unit accept가 게이트·커버리지·남은 지적을 별도로 재판정한다. 공개 요청 형태와 provider 튜플은 [첫 실행 안내](getting-started.md#기존-지적의-명시적-해소)에 정의한다.
 
 ### 7.4 스킬 간 연결 규칙
 
@@ -541,7 +545,7 @@ flowchart TB
 - 재개: StageInput을 검증·저장한 뒤 체크포인트를 만들고 커밋 메시지에 입력 digest를 결속한다. 단계 기록 전 중단되면 같은 공개 stage open 명령이 입력·부모·트리·생성자 일치를 확인하고 기존 ref를 재사용한다. 충돌한 ref는 덮어쓰지 않는다. 구버전의 결속 없는 첫 리뷰 ref는 저장된 reviewDecision과 원래 생성자의 일치까지 확인한 경우에만 복구한다.
 - 용도:
   1. **변경 귀속**: 시도별 diff(`stages[].attempts[].changedPaths`) = 그 시도의 체크포인트 대비 시도 종료 시점의 작업트리 diff. 단위의 `changedPaths` = **단위 첫 체크포인트** 대비 현재 작업트리 diff 이며, 리뷰와 범위 가드는 이것을 쓴다. 시도 1 이 `a.ts`·`b.ts` 를, 시도 2 가 `a.ts` 만 바꿨으면 단위 `changedPaths` 는 `[a.ts, b.ts]` 다. 시도 1 에서 범위를 벗어났다가 시도 2 에서 원래대로 되돌린 경로는 첫 체크포인트와 같아져 diff 에서 빠지므로 다시 이탈로 보지 않는다. `isolation: worktree`(기본)에서는 그대로 쓴다. `isolation: shared` 에서는 같은 작업트리에서 활성 상태인 다른 단위의 `changedPaths` 와 그 단위들의 체크포인트 간 diff 를 뺀 나머지만 이 단위의 변경으로 본다. 두 단위가 같은 경로를 바꿨으면 귀속하지 않고 `shared-path` Finding 으로 양쪽에 알린다.
-  2. **범위 가드**: 바뀐 경로가 목표별 E1 허용 경로(task·live는 scopePaths, prelaunch는 제품 소유 경로) 밖이면 Finding(`scope-guard`, `must-fix`)을 만들고 앞으로 고치게 한다. 자동으로 되돌리지 않는다.
+  2. **범위 가드**: 바뀐 경로가 목표별 E1 허용 경로(task·live는 scopePaths, prelaunch는 명시된 productPaths 또는 부재 시 scopePaths) 밖이면 Finding(`scope-guard`, `must-fix`)을 만들고 앞으로 고치게 한다. 자동으로 되돌리지 않는다.
   3. **읽기 참조**: 이전 상태가 필요하면 `git show <ref>:<path>` 로 읽고 현재 트리를 고친다.
   4. **리뷰 입력**: 리뷰 세션이 단계별 diff 를 본다.
 - 복원 명령(`git reset`, `git checkout <ref> -- <path>`, `git restore --source`)은 제어면이 실행하지 않는다. 사용자가 "git"을 명시한 경우에 한해 사용자 지시로만 쓴다.
@@ -905,7 +909,7 @@ CLI 는 사람용 출력의 마지막 줄에 기계용 한 줄 `RESULT {json}` �
 | H-FL-08 | 인증·한도·권한·사용자 결정 실패에는 해결 세션이 만들어지지 않는다 | T |
 | **체크포인트·원장** | | |
 | H-CP-01 | 단계 시작마다 작업트리·실제 인덱스를 바꾸지 않는 체크포인트 ref 가 생성된다 | T |
-| H-CP-02 | 단위 changedPaths가 목표별 E1 허용 경로(task·live는 scopePaths, prelaunch는 제품 소유 경로) 밖이면 `scope-guard` Finding(`must-fix`)이 생성되고 자동 복원은 일어나지 않는다. 시도 안에서 되돌린 경로는 다시 이탈로 보지 않는다 | T |
+| H-CP-02 | 단위 changedPaths가 목표별 E1 허용 경로(task·live는 scopePaths, prelaunch는 명시된 productPaths 또는 부재 시 scopePaths) 밖이면 `scope-guard` Finding(`must-fix`)이 생성되고 자동 복원은 일어나지 않는다. 시도 안에서 되돌린 경로는 다시 이탈로 보지 않는다 | T |
 | H-CP-02a | 시도별 diff 는 `stages[].attempts[].changedPaths` 에, 단위 diff 는 `changedPaths` 에 따로 기록되며 리뷰는 단위 diff 를 읽는다 | T |
 | H-CP-03 | 다른 작업자의 변경은 어떤 경로로도 되돌려지지 않는다 | T |
 | H-CP-04 | 하네스는 체크포인트 ref 를 삭제하지 않는다 (`checkpoint.retain` 기본 `keep`) | T |
@@ -934,6 +938,9 @@ CLI 는 사람용 출력의 마지막 줄에 기계용 한 줄 `RESULT {json}` �
 | H-BD-02 | 제어면 모듈은 LLM 을 호출하지 않는다 | S |
 | H-BD-03 | 공개 산출물(브랜치·커밋·PR·주석)에 개인 도구 이름·ID·홈 경로가 들어가지 않는다 | S |
 | H-BD-04 | 하네스 코어와 이 문서의 규범 문장은 특정 작업관리 도구·경로·조직 이름을 전제하지 않고 어댑터 ID 와 정책 값으로만 참조한다 | S |
+
+| H-RC-01 | 공개 fix→implement→review→finding resolve→accept가 원 기록을 보존하며 완료된다. 오래된 대상·무권한·후속 리뷰·증거 변경·상충 재호출은 해소를 거부한다 | T |
+| H-RC-02 | prelaunch의 productPaths 부재 시 scopePaths를 검사한다. 공개 scope recheck는 기존 허용 경로의 자동 생성 지적만 정정하고 실제 이탈·리뷰어 지적은 보존한다 | T |
 
 ## 13. 정책 기본값 요약
 

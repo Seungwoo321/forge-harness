@@ -130,11 +130,17 @@ export async function projectTerminalUnit({ store, unit, adapter, queue, now, gi
   return { projected: true, record };
 }
 
-export async function commitTerminalClose({ store, unit, git, sessionStart }) {
+export async function commitTerminalClose({ store, unit, git, sessionStart, sessionClose }) {
   const record = await revalidateTerminalTarget({ store, unit, git });
   if (record?.state === 'SelfGated') return record;
   return await store.update(unit, current => {
+    if (current.state === 'Closed' && current.sessionFinalization && sessionClose?.result?.closed === true
+      && sessionClose.result.sessionId === current.sessionFinalization.owner.sessionId
+      && sessionClose.result.incarnationId === current.sessionFinalization.owner.incarnationId) return current;
     if (current.state !== 'Delivered') throw errorWithCode('INVALID_TRANSITION', 'terminal close requires a Delivered unit');
+    if (current.sessionFinalization && (!['completed', 'duplicate', 'reconciled'].includes(sessionClose?.status)
+      || sessionClose.result?.closed !== true || sessionClose.result.sessionId !== current.sessionFinalization.owner.sessionId
+      || sessionClose.result.incarnationId !== current.sessionFinalization.owner.incarnationId)) throw errorWithCode('SESSION_CLOSE_PENDING', 'exact owner closure must be verified');
     if (current.next?.handoff && (!['completed', 'duplicate', 'reconciled'].includes(sessionStart?.status) || !sessionStart.result?.sessionId)) throw errorWithCode('SUCCESSOR_PENDING', 'successor start must be confirmed before close');
     if ((current.acceptance ?? []).some(item => item.status === 'deferred')) throw errorWithCode('DEFERRED_ACCEPTANCE', 'deferred acceptance criteria prevent close');
     if (current.tracker && !current.terminalProjection) throw errorWithCode('INVALID_TRANSITION', 'terminal projection intent is missing');
@@ -148,7 +154,7 @@ export async function commitTerminalClose({ store, unit, git, sessionStart }) {
 
 export async function closeDeliveredUnit({ store, unit, adapter, queue, now, git }) {
   const record = await revalidateTerminalTarget({ store, unit, git });
-  if (record?.next?.handoff || record?.state === 'SelfGated') return { ...record, closePending: true };
+  if (record?.next?.handoff || record?.sessionFinalization || record?.state === 'SelfGated') return { ...record, closePending: true };
   const projected = await projectTerminalUnit({ store, unit, adapter, queue, now, git });
   if (!projected.projected) return { ...projected.record, closePending: true };
   const closed = await commitTerminalClose({ store, unit, git });
@@ -175,7 +181,7 @@ export async function reconcileProjectionQueue({ queue, store, adapter, now, git
         const current = await store.read(entry.unit);
         if (current?.state === 'Delivered' && current.terminalProjection?.revision === entry.projection.revision) {
           await store.update(entry.unit, record => ({ ...record, tracker: { ...record.tracker, projected: true, projectionRevision: entry.projection.revision } }));
-          if (!current.next?.handoff) await commitTerminalClose({ store, unit: entry.unit, git });
+          if (!current.next?.handoff && !current.sessionFinalization) await commitTerminalClose({ store, unit: entry.unit, git });
         }
       }
       outcomes.push({ id: entry.id, status: 'projected' });

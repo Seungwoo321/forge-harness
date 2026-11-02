@@ -141,6 +141,18 @@ export async function executeEffect({
           && await retryResolved({ intent: priorIntent, result: result.result });
         if (!retry) return { status: 'uncertain', key: prepared.key, seq: priorIntent.seq, verification: checked?.verify ?? null };
       }
+      if (result && effect === 'session.start' && !retry) {
+        const checked = await verify({ effect, args: priorIntent.args, key: priorIntent.key, seq: priorIntent.seq, priorResult: result.result });
+        if (checked?.status !== 'completed' || !Object.hasOwn(checked, 'result')) {
+          await ledger.append({ event: 'verification', unit, seq: priorIntent.seq, key: prepared.key,
+            status: checked?.status ?? 'unknown', verify: checked?.verify ?? null, checked_at: adapter.now() });
+          return { status: 'uncertain', key: prepared.key, seq: priorIntent.seq, verification: checked?.verify ?? null };
+        }
+        const changed = JSON.stringify(checked.result) !== JSON.stringify(result.result);
+        if (changed) await ledger.append({ event: 'result', unit, seq: priorIntent.seq, key: prepared.key,
+          result: checked.result, done_at: adapter.now(), verify: checked.verify ?? null });
+        return { status: changed ? 'reconciled' : 'duplicate', key: prepared.key, result: checked.result, seq: priorIntent.seq };
+      }
       if (result && effect !== 'pr.create' && !retry) return { status: 'duplicate', key: prepared.key, result: result.result, seq: result.seq };
       if (result && effect === 'pr.create' && !retry) {
         const verification = await verify({ effect, args, key: priorIntent.key, seq: priorIntent.seq, priorResult: result.result });
@@ -156,7 +168,8 @@ export async function executeEffect({
         closedPr = true;
       }
       if (!retry && (!result || !closedPr)) {
-        const verification = await verify({ effect, args: priorIntent.args, key: priorIntent.key, seq: priorIntent.seq });
+        const verification = await verify({ effect, args: priorIntent.args, key: priorIntent.key, seq: priorIntent.seq,
+          verificationCount: records.filter(row => row.event === 'verification' && row.seq === priorIntent.seq).length });
         if (verification?.status === 'completed' && effect !== 'pr.create'
           || effect === 'pr.create' && matchingOpenPr(verification, priorIntent.args)) {
           if (!Object.hasOwn(verification, 'result')) throw errorWithCode('LEDGER_VERIFY_INVALID', 'completed verification requires a result');

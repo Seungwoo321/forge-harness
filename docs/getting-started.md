@@ -62,6 +62,8 @@ implement 스킬이 계약에 맞는 출력을 반환하면 같은 `stage submit
 
 수용 후 `unit finish <unit> --request finish.json --adapters <module>`가 전달과 후속 처리를 수행한다. finish 요청·세션 identity 계약은 [명세 §7](spec.md#7-스킬-구성과-계약)에 있다. 결과만 쓰고 종료·전달을 가장하지 않는다. `unit fail`, `unit retry`, `unit resume`는 저장된 실패와 시도 상한을 사용하며 상태 파일을 수동 수정하지 않는다.
 
+세션 인계의 finish는 정확한 요청 착수 후 분리된 finalizer를 기동하며 그동안 exit 3/Delivered다. 기존 세션으로 돌아갈 때는 새 successor 대신 `returnTo`를 지정한다. finalizer는 결과 수신·착수와 실제 owner 종료를 확인한 뒤 Closed를 기록한다. 대기 중 재개는 같은 roots와 `--adapters`로 `unit finalize <unit>`를 실행한다. 네이티브 제출·종료 설정은 [런타임 연결](runtime-adapters.md)을 따른다.
+
 각 CLI는 사람이 읽는 요약 뒤 한 줄 `RESULT { ... }`를 출력한다. 키는 RESULT 최상위에 있다. exit 0은 해당 명령의 성공, 1은 검사 실패, 2는 입력/계약 오류, 3은 정책/권한/결정 대기, 4는 필수 어댑터 부재, 20은 리뷰 필요다.
 
 ## 기존 지적의 명시적 해소

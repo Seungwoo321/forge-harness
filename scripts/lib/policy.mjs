@@ -19,6 +19,7 @@ const effects = {
   'deployment.apply': ['E3', ['environment', 'artifactDigest']],
   'db.migrate': ['E3', ['database', 'migrationDigest']],
   'session.start': ['E3', ['unit', 'role', 'attempt']],
+  'session.deliver': ['E3', ['session', 'incarnation', 'resultDigest']],
   'session.close': ['E3', ['session', 'incarnation']],
   'data.delete': ['E4', ['resource', 'selectionDigest']],
 };

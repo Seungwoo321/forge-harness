@@ -10,7 +10,7 @@ import { createUnitStateStore, transitionRecord } from './unit-state.mjs';
 import { resolveReview, selectProfile, validateRiskAssessment } from './profile.mjs';
 import { closeDeliveredUnit, createProjectionQueue, projectUnit, reconcileProjectionQueue } from './tracker.mjs';
 import { createRecoveryStore, resumeUnitFailure } from './recovery-store.mjs';
-import { finishSessionUnit } from './session-flow.mjs';
+import { finishSessionUnit, finalizeSessionUnit } from './session-flow.mjs';
 import { createDecisionStore, validateDecision } from './decisions.mjs';
 import { acceptanceCoverage, evaluateAcceptance, gateFingerprint, hasInvalidEvidence, runGate } from './evidence.mjs';
 import { attributeChanges, createCheckpoint, scopeGuard } from './checkpoint.mjs';
@@ -48,7 +48,7 @@ function targetState(record, stage, output) {
   if (stage === 'scope') return 'Implementing';
   if (stage === 'implement') return 'SelfGated';
   if (stage === 'review') return record.kind === 'review' ? 'Closed' : (output.verdict === 'ship' ? 'Accepted' : 'Implementing');
-  if (stage === 'handoff') return 'Closed';
+  if (stage === 'handoff') return record.state;
   return record.state;
 }
 
@@ -739,7 +739,7 @@ async function runSessionFinish({ stateRoot, unit, options, adapters }) {
     trackerAdapter: adapters.tracker, sessionAdapter: adapters.session, adapters,
   });
   const { code, summary, ...details } = outcome;
-  return { code, summary, details };
+  return { code, summary, details: { ...details, stateRoot } };
 }
 
 function gateEvidenceAdapter(store, unit, adapters, record) {
@@ -1024,7 +1024,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
       return await runEvidenceRerun({ stateRoot: effectiveRoot, unit, gateId: parsed.options.gate, adapters });
     }
-    if (noun !== 'unit' || !['start', 'scope', 'finding', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'decision', 'accept', 'progress', 'approval'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
+    if (noun !== 'unit' || !['start', 'scope', 'finding', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
     const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
     if (subcommand === 'finding') {
       const [action, unit] = rest;
@@ -1064,6 +1064,12 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       if (!unit) usageError('unit retry requires <unit>');
       const result = await runRetry({ stateRoot: effectiveRoot, unit, options: parsed.options });
       return formatCliResult(result);
+    }
+    if (subcommand === 'finalize') {
+      const [unit] = rest;
+      if (!unit || rest.length !== 1) usageError('unit finalize requires <unit>');
+      const { code, summary, ...details } = await finalizeSessionUnit({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, adapters });
+      return formatCliResult({ code, summary, details });
     }
     if (subcommand === 'finish') {
       const [unit] = rest;

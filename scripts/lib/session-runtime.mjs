@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import { createCodexTaskTransport } from './codex-task.mjs';
+import { observeTask, taskPackets } from './session-task.mjs';
 
 function invalid(message) {
   return Object.assign(new Error(message), { code: 'SESSION_OBSERVATION_INVALID' });
@@ -14,7 +16,7 @@ function terminals(tree) {
     (workspace.panes ?? []).flatMap(pane => (pane.surfaces ?? []).map(surface => ({ ...surface, workspaceId: workspace.id, windowId: window.id })))));
 }
 
-export function createSessionRunner({ runtime, command, parent, launch, runtimeRpc }) {
+export function createSessionRunner({ runtime, command, parent, launch, runtimeRpc, taskTransport, taskPrompt, pollAttempts = 30 }) {
   if (!['cmux', 'orca'].includes(runtime) || typeof command !== 'function' || typeof launch !== 'function'
     || !parent || typeof parent.sessionId !== 'string' || !parent.sessionId || typeof parent.incarnationId !== 'string' || !parent.incarnationId
     || typeof parent.cwd !== 'string' || !path.isAbsolute(parent.cwd)
@@ -22,6 +24,7 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     throw new TypeError('session runtime requires cmux or orca, command, launch, and an exact parent identity');
   }
   parent = Object.freeze({ ...parent });
+  if (!Number.isSafeInteger(pollAttempts) || pollAttempts < 1 || pollAttempts > 60) throw new TypeError('invalid observation bound');
 
   async function invoke(binary, args, cwd) {
     const result = await command(binary, args, { cwd });
@@ -78,7 +81,7 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     if (confirmed.length !== 1 || confirmed[0].type !== 'terminal' || confirmed[0].tty !== target.tty
       || confirmed[0].workspaceId !== target.workspaceId || confirmed[0].windowId !== target.windowId
       || confirmedStart !== started || JSON.stringify(current) !== JSON.stringify(observed)) throw invalid('cmux terminal changed during observation');
-    return { sessionId, cwd, incarnationId: `${target.tty}:${pid}:${started}`, executable: observed.executable, runtime, workspaceId: target.workspaceId };
+    return { sessionId, cwd, incarnationId: `${target.tty}:${pid}:${started}`, executable: observed.executable, pid: observed.pid, tty: target.tty, runtime, workspaceId: target.workspaceId };
   }
 
   async function inspectOrca(sessionId, cwd) {
@@ -123,12 +126,21 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     const confirmed = (await orca(['terminal', 'show', '--terminal', sessionId], cwd)).terminal;
     if (confirmed?.handle !== sessionId || confirmed.incarnationId !== terminal.incarnationId || confirmed.worktreePath !== terminal.worktreePath
       || confirmed.connected !== true || confirmed.writable !== true || confirmed.orphaned === true) throw invalid('Orca terminal changed during observation');
-    return { sessionId: terminal.handle, cwd: paths[0], incarnationId: terminal.incarnationId, executable, runtime, worktreeId: terminal.worktreeId };
+    return { sessionId: terminal.handle, cwd: paths[0], incarnationId: terminal.incarnationId, executable, pid: foreground.pid, tty, runtime, worktreeId: terminal.worktreeId };
   }
 
   const inspect = runtime === 'cmux' ? inspectCmux : inspectOrca;
+  const transportFor = executable => taskTransport ?? (path.basename(executable) === 'codex' ? createCodexTaskTransport({ command, executable }) : null);
+  async function workerIdentity(worker) {
+    const transport = transportFor(worker.executable);
+    if (typeof transport?.identity !== 'function') throw invalid('worker identity provider is unavailable');
+    const identity = await transport.identity(worker);
+    if (typeof identity?.threadId !== 'string' || !identity.threadId) throw invalid('native worker identity is unavailable');
+    return { ...worker, threadId: identity.threadId };
+  }
 
-  async function findStarted({ args, key }) {
+  async function findStarted(input) {
+    const { args, key } = input;
     const title = marker(key);
     let matches;
     if (runtime === 'cmux') {
@@ -145,13 +157,86 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     const observed = await inspect(matches[0], args.cwd, argv[0]);
     if (!observed.executable
       || path.basename(observed.executable) !== path.basename(argv[0])) throw invalid('configured worker executable has not started');
-    return observed;
+    const packets = await taskPackets(args);
+    const prompt = taskPrompt ? await taskPrompt(args, argv) : argv.at(-1);
+    const transport = transportFor(argv[0]);
+    const result = await observeTask({ transport, observed, input, prompt, packets, submit: true });
+    if (JSON.stringify(await inspect(matches[0], args.cwd, argv[0])) !== JSON.stringify(observed)) throw invalid('worker changed during task observation');
+    return result;
+  }
+
+  async function deliver(input, submission) {
+    const { recipient } = input.args;
+    if (!recipient || recipient.sessionId === parent.sessionId) throw invalid('result recipient must be distinct from the closing owner');
+    const observed = await inspect(recipient.sessionId, recipient.cwd, recipient.executable);
+    if (observed.incarnationId !== recipient.incarnationId) throw invalid('result recipient incarnation changed');
+    const packets = await taskPackets(input.args);
+    const prompt = `Receive the completed work result and continue its authorized next action.\n${packets.map(packet => `${packet.path}\n${packet.digest}\n${packet.content}`).join('\n')}`;
+    const workerTransport = transportFor(observed.executable);
+    const transport = workerTransport && { ...workerTransport, async submit(request) {
+      if (!submission || submission.attempted) throw invalid('result submission is uncertain; observation only');
+      submission.attempted = true;
+      return workerTransport.submit(request);
+    } };
+    const result = await observeTask({ transport, observed, input, prompt, packets, submit: Boolean(submission) && !submission.attempted });
+    if (JSON.stringify(await inspect(recipient.sessionId, recipient.cwd, recipient.executable)) !== JSON.stringify(observed)) throw invalid('recipient changed during delivery');
+    return result;
+  }
+
+  async function close(input, verifyOnly) {
+    const { owner, recipient } = input.args;
+    if (parent.closable !== true || !owner || !recipient || owner.sessionId !== parent.sessionId || owner.incarnationId !== parent.incarnationId
+      || owner.cwd !== parent.cwd || owner.sessionId === recipient.sessionId || !owner.worker?.executable || !owner.worker.incarnationId || !owner.worker.threadId) throw invalid('session close ownership is not authorized');
+    const callerTty = (await invoke('ps', ['-p', String(process.pid), '-o', 'tty='], owner.cwd)).trim();
+    if (!callerTty || callerTty === owner.tty) throw invalid('session close requires a surviving external supervisor');
+    const present = runtime === 'cmux'
+      ? terminals(await cmux(['tree', '--all'], owner.cwd)).filter(item => item.id === owner.sessionId)
+      : (await orca(['terminal', 'list', '--worktree', `path:${owner.cwd}`], owner.cwd)).terminals.filter(item => item.handle === owner.sessionId);
+    if (present.length === 0 && verifyOnly) return { sessionId: owner.sessionId, incarnationId: owner.incarnationId, closed: true };
+    if (present.length !== 1) throw invalid('close target is missing or ambiguous');
+    const receiver = await inspect(recipient.sessionId, recipient.cwd, recipient.executable);
+    if (receiver.incarnationId !== recipient.incarnationId) throw invalid('result recipient changed before close');
+    const current = await inspect(owner.sessionId, owner.cwd, parent.workerExecutable);
+    const worker = await workerIdentity(await inspect(owner.sessionId, owner.cwd, owner.worker.executable));
+    if (current.incarnationId !== owner.incarnationId || worker.incarnationId !== owner.worker.incarnationId
+      || worker.pid !== owner.worker.pid || worker.executable !== owner.worker.executable || worker.threadId !== owner.worker.threadId) throw invalid('close target identity changed');
+    if (verifyOnly) return { sessionId: owner.sessionId, incarnationId: owner.incarnationId, closed: false };
+    if (runtime === 'cmux') {
+      const inventory = terminals(await cmux(['tree', '--all'], owner.cwd));
+      const owned = inventory.filter(item => item.workspaceId === current.workspaceId);
+      const target = inventory.filter(item => item.id === owner.sessionId);
+      if (target.length !== 1 || target[0].workspaceId !== current.workspaceId || target[0].tty !== current.tty) throw invalid('close target moved before mutation');
+      // Keep an exited placeholder when needed: workspace-wide close has no atomic inventory fence.
+      if (owned.length === 1 && owned[0].id === owner.sessionId) {
+        await invoke('cmux', ['new-surface', '--workspace', current.workspaceId, '--type', 'terminal', '--command', '/usr/bin/true', '--focus', 'false'], owner.cwd);
+        const after = await workerIdentity(await inspect(owner.sessionId, owner.cwd, owner.worker.executable));
+        if (after.incarnationId !== owner.worker.incarnationId || after.threadId !== owner.worker.threadId || after.workspaceId !== current.workspaceId) throw invalid('owner changed while preparing surface closure');
+      }
+      await invoke('cmux', ['close-surface', '--workspace', current.workspaceId, '--surface', owner.sessionId], owner.cwd);
+    }
+    else await orca(['terminal', 'close', '--terminal', owner.sessionId], owner.cwd);
+    return close(input, true);
+  }
+
+  async function poll(action) {
+    let failure;
+    for (let attempt = 0; attempt < pollAttempts; attempt += 1) {
+      try { return await action(); } catch (error) { failure = error; }
+      if (attempt + 1 < pollAttempts) await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    throw failure;
   }
 
   return Object.freeze({
     contractVersion: 'harness.session-adapter/1',
     capabilities: ['fix-forward', 'failure-classification-five-way', 'retry-limit', 'ops-e0-only', 'policy-review'],
-    async observe({ cwd, targetCwd = cwd }) {
+    async observe({ cwd, targetCwd = cwd, recipient }) {
+      if (recipient) {
+        if (recipient.sessionId === parent.sessionId || !recipient.executable || !recipient.incarnationId) throw invalid('invalid return recipient');
+        const observed = await inspect(recipient.sessionId, recipient.cwd, recipient.executable);
+        if (observed.incarnationId !== recipient.incarnationId) throw invalid('return recipient changed');
+        return observed;
+      }
       if (cwd !== parent.cwd || !path.isAbsolute(targetCwd)) throw invalid('parent or successor cwd is invalid');
       if (runtime === 'cmux') {
         const identity = await cmux(['identify'], cwd);
@@ -161,11 +246,15 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       }
       const target = (await invoke('pwd', ['-P'], targetCwd)).trim();
       if (target !== targetCwd) throw invalid('successor directory does not match the exact target cwd');
-      const current = await inspect(parent.sessionId, cwd);
+      const current = await inspect(parent.sessionId, cwd, parent.workerExecutable);
       if (current.incarnationId !== parent.incarnationId) throw invalid('parent incarnation changed');
-      return { ...current, targetCwd: target };
+      const executable = parent.workerExecutable;
+      const worker = executable ? await workerIdentity(await inspect(parent.sessionId, cwd, executable)) : undefined;
+      return { ...current, targetCwd: target, ...(worker ? { worker } : {}), closable: parent.closable === true };
     },
     async execute(input) {
+      if (input.effect === 'session.deliver') { const submission = {}; return poll(() => deliver(input, submission)); }
+      if (input.effect === 'session.close') return close(input, false);
       if (input.effect !== 'session.start' || !path.isAbsolute(input.args?.cwd ?? '')) throw invalid('unsupported session effect');
       const argv = await launch(input.args);
       if (!Array.isArray(argv) || !argv.length || argv.some(value => typeof value !== 'string' || !value || value.includes('\0'))) throw invalid('launch must return a nonempty argument vector');
@@ -176,11 +265,14 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       } else {
         await orca(['terminal', 'create', '--worktree', `path:${input.args.cwd}`, '--title', marker(input.key), '--command', text], input.args.cwd);
       }
-      return findStarted(input);
+      return poll(() => findStarted(input));
     },
     async verify(input) {
-      try { return { status: 'completed', result: await findStarted(input) }; }
-      catch { return { status: 'unknown' }; }
+      try {
+        const result = await (input.effect === 'session.close' ? close(input, true) : input.effect === 'session.deliver' ? deliver(input) : findStarted(input));
+        return { status: input.effect === 'session.close' && !result.closed ? 'not-applied' : 'completed', result };
+      }
+      catch (error) { return { status: 'unknown', verify: { code: error.code ?? 'SESSION_OBSERVATION_INVALID', message: error.message } }; }
     },
   });
 }

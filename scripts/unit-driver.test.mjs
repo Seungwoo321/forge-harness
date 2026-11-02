@@ -688,3 +688,17 @@ test('impl-risk acceptance requires named passing risk-gate evidence and a stabl
   assert.equal((await changed.store.read(changed.unit)).state, 'SelfGated');
   assert.equal((await changed.store.read(changed.unit)).accepted, null);
 });
+
+test('handoff prose cannot bypass verified session finalization', async t => {
+  const f = await fixture(t);
+  await f.store.update(f.unit, record => ({ ...record, state: 'Delivered', acceptance: [], evidence: [], changedPaths: [], next: { unit: 'next' },
+    sessionFinalization: { owner: { sessionId: 'owner' } } }));
+  const context = { stateRoot: f.stateRoot, contractsDir: path.join(repo, 'skills'), adapters: f.adapters };
+  const opened = result(await runUnitCli(['unit', 'stage', 'open', f.unit, 'handoff'], context));
+  assert.equal(opened.code, 0, JSON.stringify(opened));
+  const input = JSON.parse(await readFile(opened.input, 'utf8'));
+  const output = path.join(f.root, 'handoff-output.json');
+  await writeFile(output, JSON.stringify({ inputDigest: input.inputDigest, attempt: input.attempt, submissionId: 'handoff-draft', status: 'done', summary: 'Prepared result draft', handoff: {} }));
+  assert.equal(result(await runUnitCli(['unit', 'stage', 'submit', f.unit, 'handoff', '--output', output], context)).code, 0);
+  assert.equal((await f.store.read(f.unit)).state, 'Delivered');
+});

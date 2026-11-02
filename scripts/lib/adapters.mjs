@@ -1,6 +1,6 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, open } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -8,6 +8,43 @@ const sessionAdapterContract = 'harness.session-adapter/1';
 const sessionAdapterCapabilities = [
   'fix-forward', 'failure-classification-five-way', 'retry-limit', 'ops-e0-only', 'policy-review',
 ];
+
+// The subprocess owns the protocol connection; callers only receive native responses.
+export async function withJsonRpcProcess(binary, args, action, { cwd, timeoutMs = 15000 } = {}) {
+  const child = nodeSpawn(binary, args, { cwd, stdio: ['pipe', 'pipe', 'ignore'] });
+  const pending = new Map();
+  let sequence = 0;
+  let buffer = '';
+  const fail = error => { for (const entry of pending.values()) entry.reject(error); pending.clear(); };
+  const timer = setTimeout(() => { fail(new Error('worker protocol timeout')); child.kill(); }, timeoutMs);
+  child.on('error', fail);
+  child.on('exit', () => fail(new Error('worker protocol exited')));
+  child.stdin.on('error', fail);
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', chunk => {
+    buffer += chunk;
+    let end;
+    while ((end = buffer.indexOf('\n')) !== -1) {
+      const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
+      let message;
+      try { message = JSON.parse(line); } catch { fail(new Error('invalid worker protocol JSON')); continue; }
+      const entry = pending.get(message.id);
+      if (!entry) continue;
+      pending.delete(message.id);
+      if (message.error) entry.reject(new Error(message.error.message)); else entry.resolve(message.result);
+    }
+  });
+  const rpc = (method, params) => new Promise((resolve, reject) => {
+    const id = ++sequence;
+    pending.set(id, { resolve, reject });
+    child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+  });
+  try {
+    await rpc('initialize', { clientInfo: { name: 'session_transport', version: '1' }, capabilities: { experimentalApi: true } });
+    child.stdin.write(`${JSON.stringify({ method: 'initialized' })}\n`);
+    return await action(rpc);
+  } finally { clearTimeout(timer); child.kill(); }
+}
 
 function registerSessionRunner(runner) {
   if (runner === undefined || runner === null) return null;
@@ -209,6 +246,15 @@ export function createAdapters({ spawn = nodeSpawn, clock = () => new Date(), id
 
   return Object.freeze({
     command,
+    async detach(binary, args, { cwd, logPath }) {
+      const log = await open(logPath, 'a', 0o600);
+      try {
+        const child = spawn(binary, args, { cwd, detached: true, stdio: ['ignore', log.fd, log.fd] });
+        await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+        child.unref();
+        return { pid: child.pid };
+      } finally { await log.close(); }
+    },
     checkpoint,
     session: registerSessionRunner(sessionRunner),
     now() {

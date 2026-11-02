@@ -4,7 +4,8 @@ import path from 'node:path';
 import { authorizeDelivery } from './delivery.mjs';
 import { executeEffect, createLedgerStore } from './ledger.mjs';
 import { formatUnitResult, prepareSuccessor, validateHandoffPacket, writeUnitResult } from './report.mjs';
-import { resolvePolicy } from './policy.mjs';
+import { prepareEffect, resolvePolicy } from './policy.mjs';
+import { taskPackets, validateTaskReceipt } from './session-task.mjs';
 import { commitTerminalClose, createProjectionQueue, projectTerminalUnit } from './tracker.mjs';
 import { executeDelivery } from './delivery-flow.mjs';
 
@@ -42,19 +43,20 @@ async function writeHandoff(stateRoot, slug, content) {
 
 export async function finishSessionUnit({
   stateRoot, store, unit, resultFields, handoffContent, successor = null, goalComplete = false,
-  parentSessionId, parentRuntime, requestedDelivery = 'none', delivery, trackerAdapter, sessionAdapter, adapters,
+  parentSessionId, parentRuntime, returnTo, requestedDelivery = 'none', delivery, trackerAdapter, sessionAdapter, adapters,
 }) {
   let record = await store.read(unit);
+  if (record?.sessionFinalization) return { code: 3, state: record.state, finalizePending: true, summary: 'Session finalization requires surviving supervisor verification' };
   if (!record || !['Accepted', 'Delivering', 'Delivered'].includes(record.state)) throw Object.assign(new Error('session finish requires an Accepted, Delivering, or Delivered Unit Record'), { code: 'INVALID_TRANSITION' });
+  if ((parentRuntime || parentSessionId) && !successor?.approved && !returnTo) throw Object.assign(new Error('session completion requires an exact result recipient'), { code: 'SESSION_OWNER_MISMATCH' });
   if (!adapters || typeof adapters.now !== 'function') throw new TypeError('session flow adapters are required');
   if (!['execute', 'verify'].every(name => typeof sessionAdapter?.[name] === 'function')) {
-    if (successor?.approved) throw Object.assign(new Error('session start adapter is unavailable'), { code: 'ADAPTER_MISSING' });
+    if (successor?.approved || returnTo) throw Object.assign(new Error('session adapter is unavailable'), { code: 'ADAPTER_MISSING' });
   }
-  const unresolved = await createLedgerStore(stateRoot).withLock(unit, async ledger => {
-    const entries = await ledger.read();
-    const complete = new Set(entries.filter(row => row.event === 'result').map(row => row.seq));
-    return entries.filter(row => row.event === 'intent' && !complete.has(row.seq));
-  });
+  const entries = await createLedgerStore(stateRoot).withLock(unit, ledger => ledger.read());
+  const complete = new Set(entries.filter(row => row.event === 'result').map(row => row.seq));
+  const unresolved = entries.filter(row => row.event === 'intent' && !complete.has(row.seq));
+  const existingStart = entries.findLast(row => row.event === 'intent' && row.effect === 'session.start');
   const pendingSessionStart = successor?.approved && unresolved.length === 1
     && unresolved[0].effect === 'session.start'
     && unresolved[0].args?.unit === successor.unit
@@ -66,9 +68,11 @@ export async function finishSessionUnit({
     throw Object.assign(new Error('unresolved effect intent prevents session handoff'), { code: 'EFFECT_UNCERTAIN' });
   }
   let pendingFiles = null;
-  if (pendingSessionStart) {
+  if (existingStart) {
     try {
-      const args = unresolved[0].args;
+      const args = existingStart.args;
+      if (!successor?.approved || args.unit !== successor.unit || args.role !== (successor.role ?? 'implementation')
+        || args.attempt !== (successor.attempt ?? 1) || args.cwd !== successor.cwd) throw new Error('successor binding changed');
       const handoff = record.next?.handoff;
       const resultRef = record.resultRef;
       const digest = `sha256:${createHash('sha256').update(handoffContent.replace(/\r\n/g, '\n').replace(/\n*$/, '\n')).digest('hex')}`;
@@ -82,7 +86,7 @@ export async function finishSessionUnit({
         || resultBytes.toString('utf8') !== `${resultContent}\n` || record.result !== resultContent) throw new Error('pending handoff or result changed');
       pendingFiles = { handoff, resultContent, resultPath: resultRef.path, resultDigest: resultRef.digest };
     } catch (cause) {
-      throw Object.assign(new Error('unresolved session start requires its original handoff and result', { cause }), { code: 'EFFECT_UNCERTAIN' });
+      throw Object.assign(new Error('existing session start requires its original handoff and result', { cause }), { code: 'EFFECT_UNCERTAIN' });
     }
   }
   const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
@@ -99,16 +103,26 @@ export async function finishSessionUnit({
     parentSessionId = parentRuntime.sessionId;
   }
   if ((record.openDecisions ?? []).length) throw Object.assign(new Error('unresolved decisions prevent session finish'), { code: 'USER_DECISION_REQUIRED' });
+  let owner;
   const observeParent = async () => {
-    const parentCwd = parentRuntime?.cwd ?? successor.cwd;
-    const owner = await sessionAdapter.observe({ cwd: parentCwd, targetCwd: successor.cwd });
+    const parentCwd = parentRuntime?.cwd ?? successor?.cwd;
+    const targetCwd = successor?.cwd ?? parentCwd;
+    owner = await sessionAdapter.observe({ cwd: parentCwd, targetCwd });
     if (owner?.sessionId !== parentSessionId || owner?.cwd !== parentCwd
       || (parentRuntime?.incarnationId !== undefined && owner?.incarnationId !== parentRuntime.incarnationId)
-      || (owner?.targetCwd !== undefined && owner.targetCwd !== successor.cwd)) {
+      || (owner?.targetCwd !== undefined && owner.targetCwd !== targetCwd)) {
       throw Object.assign(new Error('current session owner does not match the requested cwd and parent'), { code: 'SESSION_OWNER_MISMATCH' });
     }
     return owner;
   };
+  if (returnTo) {
+    if (successor?.approved) throw new TypeError('choose an existing return recipient or a new successor');
+    await observeParent();
+    const recipient = await sessionAdapter.observe({ recipient: returnTo });
+    if (recipient.sessionId !== returnTo.sessionId || recipient.incarnationId !== returnTo.incarnationId || recipient.cwd !== returnTo.cwd) throw new Error('return recipient mismatch');
+    returnTo = recipient;
+    if (owner.closable !== true || !owner.incarnationId || !owner.worker?.incarnationId) throw Object.assign(new Error('return requires a runtime-authorized closable worker'), { code: 'SESSION_OWNER_MISMATCH' });
+  }
   if (successor?.approved) {
     validateHandoffPacket(handoffContent);
     lineValue(successor.unit, 'successor unit');
@@ -137,15 +151,27 @@ export async function finishSessionUnit({
     result: resultContent,
     resultRef: { path: resultPath, digest: resultDigest },
     next: handoff ? { unit: successor.unit, handoff } : null,
+    ...(returnTo ? { sessionFinalization: { owner, recipient: returnTo, resultPath, resultDigest, sessionStart: null } } : {}),
   }));
+  const prepareFinalization = async (recipient, sessionStart = null) => {
+    if (!owner?.incarnationId || owner.closable !== true || !owner.worker?.incarnationId || owner.sessionId === recipient.sessionId) {
+      return { code: 3, state: 'Delivered', resultPath, resultDigest, handoff, sessionId: recipient.sessionId, summary: 'A runtime-authorized closable worker owner is required' };
+    }
+    await store.update(unit, current => current.sessionFinalization ? current : ({ ...current, sessionFinalization: {
+      owner, recipient, resultPath, resultDigest, ...(handoff ? { handoffPath: handoff.path, handoffDigest: handoff.digest } : {}), sessionStart,
+    } }));
+    return { code: 3, state: 'Delivered', resultPath, resultDigest, handoff, sessionId: recipient.sessionId, finalizePending: true,
+      summary: 'Recipient task verified; result delivery and exact owner closure are pending' };
+  };
   const projected = await projectTerminalUnit({
     store, unit, adapter: trackerAdapter, queue: createProjectionQueue(stateRoot, adapters), now: () => adapters.now(), git: adapters.git,
   });
-  if (!projected.projected) return { code: 3, state: 'Delivered', resultPath, resultDigest, handoff, delivery: authorized, successor: null, summary: 'Final tracker projection is queued; successor session has not started' };
-  if (!successor?.approved) {
+  if (!projected.projected) return { code: 3, state: 'Delivered', resultPath, resultDigest, handoff, delivery: authorized, successor: null, ...(returnTo ? { finalizePending: true } : {}), summary: 'Final tracker projection is queued; successor session has not started' };
+  if (!successor?.approved && !returnTo) {
     const closed = await commitTerminalClose({ store, unit, git: adapters.git });
     return { code: closed.state === 'Closed' ? 0 : 1, state: closed.state, resultPath, resultDigest, delivery: authorized, successor: null, summary: 'Unit completed' };
   }
+  if (returnTo) return prepareFinalization(returnTo);
   const current = await store.read(unit);
   const preparation = prepareSuccessor({
     record: { ...current, tracker: current.tracker ? { ...current.tracker, projected: true } : null },
@@ -153,12 +179,12 @@ export async function finishSessionUnit({
     successor: { ...successor, handoffPath: handoff.path, handoffDigest: handoff.digest }, parentSessionId,
   });
 
-  const validateWorker = result => {
+  const validateWorker = (result, input) => {
     if (typeof result?.sessionId !== 'string' || !result.sessionId || result.sessionId === parentSessionId
       || (result.cwd !== undefined && result.cwd !== successor.cwd)) {
       throw Object.assign(new Error('successor runtime identity or cwd is unverified'), { code: 'SESSION_OBSERVATION_INVALID' });
     }
-    return result;
+    return validateTaskReceipt(result, input);
   };
   const started = await executeEffect({
     unit,
@@ -172,22 +198,81 @@ export async function finishSessionUnit({
       now: () => adapters.now(),
       async execute(input) {
         await observeParent();
-        return validateWorker(await sessionAdapter.execute(input));
+        return validateWorker(await sessionAdapter.execute(input), input);
       },
       async verify(input) {
         const verified = await sessionAdapter.verify(input);
         if (verified?.status === 'completed') {
-          try { validateWorker(verified.result); } catch { return { status: 'unknown' }; }
+          try { validateWorker(verified.result, input); } catch { return { status: 'unknown' }; }
         }
         return verified;
       },
     },
   });
+  const startArgs = { unit: preparation.unit, role: successor.role ?? 'implementation', attempt: successor.attempt ?? 1, cwd: successor.cwd, handoffPath: handoff.path, handoffDigest: handoff.digest };
+  try { validateWorker(started.result, { key: prepareEffect('session.start', startArgs).key, args: startArgs }); }
+  catch { return { code: 3, state: 'Delivered', session: started, summary: 'Successor request/start receipt is missing or mismatched' }; }
   const sessionId = started.result?.sessionId;
   if (!['completed', 'duplicate', 'reconciled'].includes(started.status) || typeof sessionId !== 'string' || !sessionId || sessionId === parentSessionId
     || (started.result?.cwd !== undefined && started.result.cwd !== successor.cwd)) {
     return { code: 3, state: 'Delivered', resultPath, resultDigest, handoff, delivery: authorized, successor: preparation, session: started, summary: 'Successor session start is unresolved or did not create a new session' };
   }
-  const closed = await commitTerminalClose({ store, unit, git: adapters.git, sessionStart: started });
-  return { code: closed.state === 'Closed' ? 0 : 1, state: closed.state, resultPath, resultDigest, handoff, delivery: authorized, successor: preparation, sessionId, summary: 'Successor started in a new session' };
+  return prepareFinalization(started.result, started);
+}
+
+export async function finalizeSessionUnit({ stateRoot, store, unit, adapters }) {
+  const record = await store.read(unit);
+  const plan = record?.sessionFinalization;
+  if (!plan || !['Delivered', 'Closed'].includes(record.state)) throw Object.assign(new Error('no durable session finalization plan'), { code: 'INVALID_TRANSITION' });
+  await taskPackets(plan);
+  if (record.state === 'Delivered') {
+    const projection = await projectTerminalUnit({ store, unit, adapter: adapters.tracker, queue: createProjectionQueue(stateRoot, adapters), now: adapters.now, git: adapters.git });
+    if (!projection.projected) return { code: 3, state: (await store.read(unit)).state, finalizePending: true, summary: 'Terminal tracker projection is pending' };
+  }
+  const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
+  const ledger = createLedgerStore(stateRoot);
+  const recipient = plan.recipient;
+  const deliveryArgs = { ...plan, cwd: recipient.cwd, session: recipient.sessionId, incarnation: recipient.incarnationId };
+  const delivered = await executeEffect({ unit, effect: 'session.deliver', args: deliveryArgs, policy,
+    context: { explicitUserInstruction: true, productOwned: true }, store: ledger,
+    adapter: { now: adapters.now, async execute(input) { return validateTaskReceipt(await adapters.session.execute(input), input); },
+      async verify(input) { const value = await adapters.session.verify(input); if (value?.status === 'completed') validateTaskReceipt(value.result, input); return value; } },
+  });
+  const pending = summary => ({ code: 3, state: record.state, summary, finalizePending: true });
+  if (!['completed', 'reconciled', 'duplicate'].includes(delivered.status)) return pending('Result is queued or its acceptance/start is unverified');
+  validateTaskReceipt(delivered.result, { args: deliveryArgs, key: prepareEffect('session.deliver', deliveryArgs).key });
+  if (delivered.result.sessionId !== recipient.sessionId || delivered.result.incarnationId !== recipient.incarnationId) return pending('Result recipient identity changed');
+  if (record.state !== 'Closed') {
+    const current = await adapters.git.inspectUnit({ unit, record });
+    if (current.head !== record.accepted.head || current.contentFingerprint !== record.accepted.contentFingerprint) return pending('Accepted content changed before session close');
+  }
+  const closeArgs = { owner: plan.owner, recipient, session: plan.owner.sessionId, incarnation: plan.owner.incarnationId,
+    resultDigest: plan.resultDigest, deliveryKey: delivered.key };
+  const validateClose = result => {
+    if (result?.closed !== true || result.sessionId !== plan.owner.sessionId || result.incarnationId !== plan.owner.incarnationId) throw new Error('unverified close result');
+    return result;
+  };
+  const closeEffect = { unit, effect: 'session.close', args: closeArgs, policy,
+    context: { explicitUserInstruction: true, productOwned: true }, store: ledger,
+    adapter: { now: adapters.now, async execute(input) { return validateClose(await adapters.session.execute(input)); },
+      async verify(input) {
+        const result = await adapters.session.verify(input);
+        if (result?.status === 'not-applied' && result.result?.sessionId === plan.owner.sessionId
+          && result.result.incarnationId === plan.owner.incarnationId && input.verificationCount + 1 < policy.retry.maxPerSignature) {
+          return { status: 'completed', result: validateClose(await adapters.session.execute(input)) };
+        }
+        if (result?.status === 'completed') validateClose(result.result);
+        return result;
+      } },
+  };
+  let closed = await executeEffect(closeEffect);
+  // The closing terminal may drop the command response. The survivor checks the same intent immediately.
+  if (closed.status === 'uncertain') closed = await executeEffect(closeEffect);
+  if (!['completed', 'reconciled', 'duplicate'].includes(closed.status) || closed.result?.closed !== true
+    || closed.result.sessionId !== plan.owner.sessionId || closed.result.incarnationId !== plan.owner.incarnationId) return pending('Exact owner closure is unverified');
+  const checked = await adapters.session.verify({ effect: 'session.close', args: closeArgs, key: closed.key, seq: closed.seq });
+  if (checked?.status !== 'completed') return pending('Post-exit observation is unavailable');
+  validateClose(checked.result);
+  const current = record.state === 'Closed' ? record : await commitTerminalClose({ store, unit, git: adapters.git, sessionStart: plan.sessionStart, sessionClose: closed });
+  return { code: current.state === 'Closed' ? 0 : 3, state: current.state, summary: 'Result accepted and owner session closure verified', resultPath: plan.resultPath };
 }

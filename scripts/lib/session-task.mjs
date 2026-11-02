@@ -42,7 +42,9 @@ export async function observeTask({ transport, observed, input, prompt, packets,
     await transport.submit({ ...request, fence: evidence.fence });
     evidence = await transport.observe(request);
   }
-  if (evidence?.state !== 'started' || evidence.promptDigest !== taskDigest(prompt)) throw taskError('request has not started');
+  if (evidence?.state !== 'started' || evidence.promptDigest !== taskDigest(prompt)) {
+    throw Object.assign(taskError('request has not started'), { taskState: evidence?.state, notApplied: evidence?.state === 'ready' && evidence.notApplied === true && Boolean(evidence.fence) });
+  }
   return validateTaskReceipt({ ...observed, task: {
     ...evidence, schema: 'harness.task-receipt/1', effectKey: input.key,
     sessionId: observed.sessionId, incarnationId: observed.incarnationId, cwd: observed.cwd,

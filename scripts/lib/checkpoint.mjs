@@ -101,13 +101,12 @@ function globRegex(pattern) {
   return new RegExp(`${out}$`);
 }
 
-export function scopeGuard({ changedPaths, scopePaths = [], productPaths = [], goalClass }) {
+export function scopeGuard({ changedPaths, scopePaths = [], productPaths, goalClass }) {
   if (!['task', 'product-live', 'product-prelaunch'].includes(goalClass)) throw new TypeError(`unsupported goal class: ${goalClass}`);
-  const allowedPaths = goalClass === 'product-prelaunch' ? productPaths : scopePaths;
+  const allowedPaths = goalClass === 'product-prelaunch' && productPaths !== undefined ? productPaths : scopePaths;
   if (!Array.isArray(allowedPaths)) throw new TypeError('allowed paths must be an array');
   const paths = attemptChangedPaths(changedPaths);
-  const allowed = goalClass === 'product-prelaunch' ? allowedPaths : allowedPaths;
-  const patterns = allowed.map(globRegex);
+  const patterns = allowedPaths.map(globRegex);
   const outside = paths.filter(file => !patterns.some(pattern => pattern.test(file)));
   return outside.length
     ? { ok: false, finding: { kind: 'scope-guard', severity: 'must-fix', paths: outside, resolvedAt: null } }

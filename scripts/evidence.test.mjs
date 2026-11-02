@@ -158,6 +158,8 @@ test('acceptance requires current passing gates, complete coverage, and matching
   assert.equal(evaluateAcceptance({ ...target, requiredGates: ['tests'], acceptance: [{ id: 'AC-1', status: 'open' }], evidence }).ok, true);
   assert.equal(evaluateAcceptance({ ...target, requiredGates: ['tests'], acceptance: [{ id: 'AC-1', status: 'open' }], evidence: [{ ...evidence[0], judge: { status: 'pending' }, status: 'pending' }] }).reason, 'gate judgment is pending');
   assert.equal(evaluateAcceptance({ ...target, requiredGates: ['tests'], acceptance: [{ id: 'AC-1', status: 'open' }], evidence, reviewRequired: true }).reason, 'matching ship review is required');
+  assert.equal(evaluateAcceptance({ ...target, requiredGates: ['tests'], acceptance: [{ id: 'AC-1', status: 'open' }], evidence,
+    findings: [{ kind: 'scope-guard', severity: 'must-fix', resolvedAt: null }] }).reason, 'unresolved must-fix findings require explicit resolution');
   assert.equal(evaluateAcceptance({ ...target, currentHead: 'new', requiredGates: ['tests'], acceptance: [{ id: 'AC-1', status: 'open' }], evidence }).nextState, 'SelfGated');
 });
 

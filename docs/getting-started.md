@@ -64,4 +64,41 @@ implement 스킬이 계약에 맞는 출력을 반환하면 같은 `stage submit
 
 각 CLI는 사람이 읽는 요약 뒤 한 줄 `RESULT { ... }`를 출력한다. 키는 RESULT 최상위에 있다. exit 0은 해당 명령의 성공, 1은 검사 실패, 2는 입력/계약 오류, 3은 정책/권한/결정 대기, 4는 필수 어댑터 부재, 20은 리뷰 필요다.
 
+## 기존 지적의 명시적 해소
+
+prelaunch의 공개 scope도 `scopePaths`를 권한 경계로 사용한다. 별도로 기록된 `productPaths`가 있을 때만 그 경계를 사용하며, 명시적인 빈 배열은 모든 경로를 거부한다. 경로를 추가하지 않고 기존 자동 생성 범위 지적을 다시 검사한다:
+
+```sh
+node "$PLUGIN_ROOT/scripts/unit.mjs" unit scope recheck greeting --adapters runtime.mjs
+```
+
+현재 승인 경로에 모두 포함되는 자동 생성 지적만 해소한다. 원문·인덱스·digest·검사 범위는 `scopeRechecks`에 보존되고, 실제 범위 이탈이나 리뷰어 지적은 남는다. 재호출은 변경 없이 빈 resolved 배열을 반환한다.
+
+리뷰어의 과거 지적은 별도 명시적 요청으로 해소한다. 수정 후 완료된 독립 ship 리뷰와 지적별 수정 증거가 필요하며 ship만으로는 해소되지 않는다. `finding-fixes.json`은 다음 형태다:
+
+```json
+{
+  "id": "verified-fixes-1",
+  "expectedRevision": 18,
+  "head": "<current head>",
+  "contentFingerprint": "<current content fingerprint>",
+  "findings": [{"index": 0, "digest": "sha256:<original finding digest>"}],
+  "review": {"unit": "greeting-review", "attempt": 1, "outputPath": "review-output.json", "outputDigest": "sha256:<output object digest>"},
+  "reviewer": "<actual independent reviewer identity>",
+  "evidence": {"path": "independent-verification.json", "digest": "sha256:<report byte digest>"},
+  "reason": "Independent verification demonstrates the specified fixes"
+}
+```
+
+revision은 범위 재검사 후 원 단위의 값이다. finding과 output의 digest는 패키지 `scripts/lib/approvals.mjs`의 `effectArgsDigest`로 전체 객체를 정규화해 계산한다. 보고서는 원 바이트의 SHA256이다. 실제 값과 원본 파일을 사용하며 상태·신원·증거를 만들어 채우지 않는다.
+
+```sh
+node "$PLUGIN_ROOT/scripts/unit.mjs" unit finding resolve greeting --request finding-fixes.json --user-input actual-authorization-reference --adapters runtime.mjs
+node "$PLUGIN_ROOT/scripts/unit.mjs" unit accept greeting --adapters runtime.mjs
+```
+
+trusted `provider.verifyUserInput`은 `{unit,userInputRef,effect:'finding.resolve',argsDigest,head,contentFingerprint,reviewer,independent:true,reason}` 전체를 검증하고 같은 필드와 `verified:true`를 반환한다. `argsDigest`는 `{request,userInputRef}`의 `effectArgsDigest`다. provider는 요청 파일의 선언을 승인으로 반사하지 않고 실제 사용자 권한, 리뷰어와 모든 구현자의 독립성, 리뷰어가 작성한 원 지적과 지적별 수정 증거를 확인한다. 이 입력을 검증할 신뢰 연결이 없으면 exit 3이며 해소하지 않는다.
+
+완료된 리뷰와 현재 대상·수용 기준·게이트 증거가 일치해야 한다. 후속 구현이나 리뷰가 있으면 이전 리뷰로 해소할 수 없다. 구버전 accept가 ship 필드를 지운 경우에도 이 검증을 통과한 원본 ship만 복원하며 영수증에 이전 필드를 보존한다. 같은 요청의 재호출은 기존 영수증을 반환하고, 다른 payload·오래된 revision·소스/증거 변경은 거부한다. 기존 단계·지적·실패·게이트 증거는 삭제하지 않으며 마지막 accept가 수용을 별도로 판정한다.
+
 구버전에서 `REVIEW_TARGET_INVALID`로 멈춘 InReview 단위는 새 패키지와 같은 런타임 어댑터로 기존 리뷰 단위의 `unit stage open <review-unit> review`를 다시 실행한다. 제어면은 저장된 reviewDecision을 현재 내용과 대조하고 실제 diff·구현 인계를 생성한다. 단위나 증거 파일을 직접 수정하지 않는다. 내용이 바뀌면 열기·제출을 거부하므로 대상 단위에서 `unit accept <unit>`로 다시 검증하고 현재 대상을 리뷰한다. 같은 입력의 게이트 증거는 재사용한다.

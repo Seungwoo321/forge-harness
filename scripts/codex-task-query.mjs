@@ -4,8 +4,18 @@ import { withJsonRpcProcess } from './lib/adapters.mjs';
 let source = '';
 for await (const chunk of process.stdin) source += chunk;
 try {
-  const { executable, threadId, operation, prompt, clientId } = JSON.parse(source);
+  const { executable, threadId, threadIds, cwd, operation, prompt, clientId } = JSON.parse(source);
   const result = await withJsonRpcProcess(executable, ['app-server', '--stdio'], async rpc => {
+    if (operation === 'identify') {
+      const candidates = [];
+      for (const id of threadIds) {
+        const { thread } = await rpc('thread/read', { threadId: id, includeTurns: false });
+        if (thread.id !== id) throw new Error('thread metadata identity changed');
+        if (thread.cwd === cwd && ['cli', 'exec'].includes(thread.source)) candidates.push(thread.id);
+      }
+      if (candidates.length !== 1) throw new Error('worker primary thread is missing or ambiguous');
+      return { threadId: candidates[0] };
+    }
     const { thread } = await rpc('thread/read', { threadId, includeTurns: false });
     const turns = [];
     let cursor = null;

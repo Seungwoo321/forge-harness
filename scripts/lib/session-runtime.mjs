@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { createCodexTaskTransport } from './codex-task.mjs';
 import { observeTask, taskPackets } from './session-task.mjs';
+import { codexComposerMatches, submitCodexComposer } from './codex-composer.mjs';
 
 function invalid(message) {
   return Object.assign(new Error(message), { code: 'SESSION_OBSERVATION_INVALID' });
@@ -130,7 +131,24 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
   }
 
   const inspect = runtime === 'cmux' ? inspectCmux : inspectOrca;
-  const transportFor = executable => taskTransport ?? (path.basename(executable) === 'codex' ? createCodexTaskTransport({ command, executable }) : null);
+  const transportFor = executable => taskTransport ?? (path.basename(executable) === 'codex' ? createCodexTaskTransport({ command, executable,
+    ...(runtime === 'cmux' ? { submitInput: async (request, verifyNative) => {
+      const { observed, prompt } = request;
+      const target = ['--workspace', observed.workspaceId, '--surface', observed.sessionId];
+      const viewport = await cmux(['rpc', 'terminal.viewport', JSON.stringify({ workspace_id: observed.workspaceId, surface_id: observed.sessionId })], observed.cwd);
+      if (viewport.surface_id !== observed.sessionId || !Number.isSafeInteger(viewport.columns)
+        || Buffer.byteLength(prompt, 'utf8') + 2 > viewport.columns) throw invalid('packet reference does not fit the exact composer viewport');
+      await submitCodexComposer({ prompt,
+        read: () => invoke('cmux', ['read-screen', ...target], observed.cwd),
+        paste: text => invoke('cmux', ['rpc', 'surface.send_text', JSON.stringify({ workspace_id: observed.workspaceId, surface_id: observed.sessionId, text })], observed.cwd),
+        enter: () => invoke('cmux', ['send-key', ...target, 'Return'], observed.cwd),
+        verify: async () => {
+          if (JSON.stringify(await inspect(observed.sessionId, observed.cwd, observed.executable)) !== JSON.stringify(observed)) throw invalid('worker changed before input');
+          await verifyNative();
+        },
+      });
+    } } : {}),
+  }) : null);
   async function workerIdentity(worker) {
     const transport = transportFor(worker.executable);
     if (typeof transport?.identity !== 'function') throw invalid('worker identity provider is unavailable');
@@ -171,14 +189,30 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     const observed = await inspect(recipient.sessionId, recipient.cwd, recipient.executable);
     if (observed.incarnationId !== recipient.incarnationId) throw invalid('result recipient incarnation changed');
     const packets = await taskPackets(input.args);
-    const prompt = `Receive the completed work result and continue its authorized next action.\n${packets.map(packet => `${packet.path}\n${packet.digest}\n${packet.content}`).join('\n')}`;
+    const interactive = runtime === 'cmux' && path.basename(observed.executable) === 'codex' && !taskTransport;
+    const legacyPrompt = `Receive the completed work result and continue its authorized next action.\n${packets.map(packet => `${packet.path}\n${packet.digest}\n${packet.content}`).join('\n')}`;
+    const prompt = interactive
+      ? `Read ${input.args.resultPath} (${input.args.resultDigest}); follow its referenced handoffs.`
+      : legacyPrompt;
     const workerTransport = transportFor(observed.executable);
     const transport = workerTransport && { ...workerTransport, async submit(request) {
       if (!submission || submission.attempted) throw invalid('result submission is uncertain; observation only');
       submission.attempted = true;
       return workerTransport.submit(request);
     } };
-    const result = await observeTask({ transport, observed, input, prompt, packets, submit: Boolean(submission) && !submission.attempted });
+    let result;
+    if (interactive) {
+      try { result = await observeTask({ transport, observed, input, prompt: legacyPrompt, packets }); }
+      catch (error) { if (error.taskState !== 'ready') throw error; }
+    }
+    try { result ??= await observeTask({ transport, observed, input, prompt, packets, submit: Boolean(submission) && !submission.attempted }); }
+    catch (error) {
+      if (!submission && error.notApplied === true && runtime === 'cmux' && !taskTransport
+        && codexComposerMatches(await invoke('cmux', ['read-screen', '--workspace', observed.workspaceId, '--surface', observed.sessionId], observed.cwd), prompt)) {
+        error.pendingComposer = true;
+      }
+      throw error;
+    }
     if (JSON.stringify(await inspect(recipient.sessionId, recipient.cwd, recipient.executable)) !== JSON.stringify(observed)) throw invalid('recipient changed during delivery');
     return result;
   }
@@ -272,7 +306,13 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
         const result = await (input.effect === 'session.close' ? close(input, true) : input.effect === 'session.deliver' ? deliver(input) : findStarted(input));
         return { status: input.effect === 'session.close' && !result.closed ? 'not-applied' : 'completed', result };
       }
-      catch (error) { return { status: 'unknown', verify: { code: error.code ?? 'SESSION_OBSERVATION_INVALID', message: error.message } }; }
+      catch (error) {
+        if (input.effect === 'session.deliver' && error.pendingComposer === true) {
+          return { status: 'not-applied', result: { sessionId: input.args.recipient.sessionId, incarnationId: input.args.recipient.incarnationId },
+            verify: { nativeRequestAbsent: true, exactPendingComposer: true } };
+        }
+        return { status: 'unknown', verify: { code: error.code ?? 'SESSION_OBSERVATION_INVALID', message: error.message } };
+      }
     },
   });
 }

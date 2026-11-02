@@ -236,7 +236,16 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters }) 
   const delivered = await executeEffect({ unit, effect: 'session.deliver', args: deliveryArgs, policy,
     context: { explicitUserInstruction: true, productOwned: true }, store: ledger,
     adapter: { now: adapters.now, async execute(input) { return validateTaskReceipt(await adapters.session.execute(input), input); },
-      async verify(input) { const value = await adapters.session.verify(input); if (value?.status === 'completed') validateTaskReceipt(value.result, input); return value; } },
+      async verify(input) {
+        const value = await adapters.session.verify(input);
+        if (value?.status === 'not-applied' && value.verify?.nativeRequestAbsent === true && value.verify.exactPendingComposer === true
+          && value.result?.sessionId === recipient.sessionId && value.result.incarnationId === recipient.incarnationId
+          && input.verificationCount + 1 < policy.retry.maxPerSignature) {
+          return { status: 'completed', result: validateTaskReceipt(await adapters.session.execute(input), input) };
+        }
+        if (value?.status === 'completed') validateTaskReceipt(value.result, input);
+        return value;
+      } },
   });
   const pending = summary => ({ code: 3, state: record.state, summary, finalizePending: true });
   if (!['completed', 'reconciled', 'duplicate'].includes(delivered.status)) return pending('Result is queued or its acceptance/start is unverified');

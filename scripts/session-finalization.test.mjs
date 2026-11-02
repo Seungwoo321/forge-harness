@@ -21,7 +21,8 @@ async function setup(t, mode = 'success') {
   const recipient = { sessionId: 'existing-parent', incarnationId: 'recipient-generation', cwd: root, executable: 'worker' };
   const events = [];
   let closed = false;
-  let accepted = mode !== 'queued';
+  let accepted = !['queued', 'prefilled', 'delivery-failed'].includes(mode);
+  let deliveryAttempts = 0;
   const receipt = input => ({ ...recipient, task: { schema: 'harness.task-receipt/1', effectKey: input.key,
     sessionId: recipient.sessionId, incarnationId: recipient.incarnationId, cwd: root, promptDigest: taskDigest('native request'),
     threadId: 'thread', requestId: 'request', turnId: 'turn', activityId: 'activity',
@@ -33,6 +34,8 @@ async function setup(t, mode = 'success') {
       events.push(input.effect);
       if (input.effect === 'session.start') throw Error('must return to existing owner');
       if (input.effect === 'session.deliver') {
+        deliveryAttempts += 1;
+        if (mode === 'prefilled' && deliveryAttempts === 2) accepted = true;
         if (!accepted) throw Error('queued, not yet consumed');
         const result = receipt(input);
         if (mode === 'bad-receipt') result.task.incarnationId = 'stale';
@@ -48,6 +51,9 @@ async function setup(t, mode = 'success') {
     async verify(input) {
       events.push(`verify:${input.effect}`);
       if (input.effect === 'session.deliver' && accepted) return { status: 'completed', result: receipt(input) };
+      if (input.effect === 'session.deliver' && ['prefilled', 'delivery-failed'].includes(mode)) return {
+        status: 'not-applied', result: recipient, verify: { nativeRequestAbsent: true, exactPendingComposer: true },
+      };
       if (input.effect === 'session.close' && closed) return { status: 'completed', result: { closed: true, sessionId: owner.sessionId, incarnationId: owner.incarnationId } };
       if (input.effect === 'session.close' && mode === 'close-failed') return { status: 'not-applied', result: { closed: false, sessionId: owner.sessionId, incarnationId: owner.incarnationId } };
       return { status: 'unknown' };
@@ -125,6 +131,20 @@ test('definitely failed native close retries remain bounded across public finali
   assert.equal((await f.run('finalize')).code, 3);
   assert.equal((await f.run('finalize')).code, 3);
   assert.equal(f.events.filter(event => event === 'session.close').length, 2);
+});
+
+test('exact pending composer resumes on the original delivery intent and retries are bounded', async t => {
+  for (const mode of ['prefilled', 'delivery-failed']) {
+    const f = await setup(t, mode);
+    await f.run('finish');
+    assert.equal((await f.run('finalize')).code, 3);
+    const original = (await f.ledger())[0];
+    assert.equal((await f.run('finalize')).code, mode === 'prefilled' ? 0 : 3);
+    await f.run('finalize');
+    assert.equal(f.events.filter(event => event === 'session.deliver').length, 2);
+    assert.deepEqual((await f.ledger())[0], original);
+    assert.equal((await f.ledger()).filter(row => row.event === 'intent' && row.effect === 'session.deliver').length, 1);
+  }
 });
 
 

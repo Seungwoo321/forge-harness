@@ -29,7 +29,7 @@ export function checkpointRef({ unit, stage, attempt }) {
   return `refs/harness/${unit}/${stage}.${attempt}`;
 }
 
-export async function createCheckpoint({ unit, stage, attempt, exclude = [], head, adapter }) {
+export async function createCheckpoint({ unit, stage, attempt, exclude = [], head, inputDigest, legacy = false, adapter }) {
   const ref = checkpointRef({ unit, stage, attempt });
   if (!Array.isArray(exclude) || exclude.some(pattern => typeof pattern !== 'string' || !pattern)) {
     throw new TypeError('exclude must contain non-empty glob patterns');
@@ -37,7 +37,7 @@ export async function createCheckpoint({ unit, stage, attempt, exclude = [], hea
   if (!adapter || typeof adapter.createCheckpoint !== 'function') {
     throw new TypeError('checkpoint adapter must implement createCheckpoint');
   }
-  const result = await adapter.createCheckpoint({ ref, exclude: [...new Set(exclude)], respectGitignore: true, head });
+  const result = await adapter.createCheckpoint({ ref, exclude: [...new Set(exclude)], respectGitignore: true, head, inputDigest, legacy });
   if (!result || typeof result.commit !== 'string' || !result.commit) throw new Error('checkpoint adapter did not return a commit');
   if (result.worktreeChanged !== false || result.indexChanged !== false) {
     throw new Error('checkpoint adapter changed the worktree or real index');

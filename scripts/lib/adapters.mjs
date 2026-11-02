@@ -131,7 +131,7 @@ export function createAdapters({ spawn = nodeSpawn, clock = () => new Date(), id
   }
 
   const checkpoint = Object.freeze({
-    async createCheckpoint({ ref, exclude = [], head: expectedHead }) {
+    async createCheckpoint({ ref, exclude = [], head: expectedHead, inputDigest, legacy = false }) {
       const cwd = repositoryRoot;
       const readonly = { cwd, env: { GIT_OPTIONAL_LOCKS: '0' } };
       const beforeStatus = await git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], readonly);
@@ -145,15 +145,37 @@ export function createAdapters({ spawn = nodeSpawn, clock = () => new Date(), id
           error.code = 'CHECKPOINT_STALE';
           throw error;
         }
-        const commit = (await git(['-c', 'user.name=Forge Harness', '-c', 'user.email=forge-harness@localhost', 'commit-tree', snapshot.tree, '-p', snapshot.head, '-m', `Checkpoint ${ref}`], { cwd })).trim();
+        const message = `Checkpoint ${ref}${inputDigest ? `\n\nStageInput ${inputDigest}` : ''}\n`;
+        const existing = await command('git', ['show-ref', '--verify', '--quiet', ref], { cwd });
+        let commit;
+        if (existing.exitCode === 0) {
+          commit = (await git(['rev-parse', '--verify', ref], { cwd })).trim();
+          const raw = await git(['cat-file', 'commit', commit], { cwd });
+          const boundary = raw.indexOf('\n\n');
+          const headers = raw.slice(0, boundary).split('\n');
+          const parents = headers.filter(line => line.startsWith('parent '));
+          const identity = /^(author|committer) Forge Harness <forge-harness@localhost> \d+ [+-]\d{4}$/;
+          const knownMessage = raw.slice(boundary + 2) === message
+            || legacy && raw.slice(boundary + 2) === `Checkpoint ${ref}\n`;
+          if ((!inputDigest && !legacy) || !knownMessage || parents.length !== 1 || parents[0] !== `parent ${snapshot.head}`
+            || headers[0] !== `tree ${snapshot.tree}` || headers.length !== 4
+            || !identity.test(headers[2]) || !identity.test(headers[3])) {
+            throw Object.assign(new Error('existing checkpoint does not match the stage input, head, tree or provenance'), { code: 'CHECKPOINT_CONFLICT' });
+          }
+        } else {
+          if (existing.exitCode !== 1) throw Object.assign(new Error('checkpoint reference inspection failed'), { code: 'ADAPTER_GIT_FAILED' });
+          commit = (await git(['-c', 'user.name=Forge Harness', '-c', 'user.email=forge-harness@localhost', 'commit-tree', snapshot.tree, '-p', snapshot.head, '-m', message], { cwd })).trim();
+        }
         const currentHead = (await git(['rev-parse', 'HEAD'], { cwd })).trim();
         if (currentHead !== snapshot.head) {
           const error = new Error('repository head changed during checkpoint creation');
           error.code = 'CHECKPOINT_STALE';
           throw error;
         }
-        const zero = '0'.repeat(commit.length);
-        await git(['update-ref', ref, commit, zero], { cwd });
+        if (existing.exitCode !== 0) await git(['update-ref', ref, commit, '0'.repeat(commit.length)], { cwd });
+        else if ((await git(['rev-parse', '--verify', ref], { cwd })).trim() !== commit) {
+          throw Object.assign(new Error('checkpoint reference changed during recovery'), { code: 'CHECKPOINT_CONFLICT' });
+        }
         const afterStatus = await git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], readonly);
         const afterIndex = await git(['diff', '--cached', '--raw'], readonly);
         const afterIndexBytes = await readFile(path.resolve(cwd, indexPath));
@@ -166,7 +188,7 @@ export function createAdapters({ spawn = nodeSpawn, clock = () => new Date(), id
         await rm(snapshot.temp, { recursive: true, force: true });
       }
     },
-    async inspectChanges({ checkpoint: attempt, firstCheckpoint, exclude = [], head: expectedHead }) {
+    async inspectChanges({ checkpoint: attempt, firstCheckpoint, exclude = [], head: expectedHead, paths }) {
       const current = await snapshotTree(exclude);
       try {
         if (expectedHead && current.head !== expectedHead) {
@@ -176,7 +198,9 @@ export function createAdapters({ spawn = nodeSpawn, clock = () => new Date(), id
         }
         const diff = async commit => (await git(['diff', '--name-only', '-z', commit, current.tree], { cwd: current.cwd }))
           .split('\0').filter(Boolean);
-        return { head: current.head, firstCheckpointDiff: await diff(firstCheckpoint), attemptDiff: await diff(attempt) };
+        const patch = paths === undefined ? {} : { patch: paths.length
+          ? await git(['--literal-pathspecs', 'diff', '--binary', '--no-ext-diff', '--no-textconv', firstCheckpoint, current.tree, '--', ...paths], { cwd: current.cwd }) : '' };
+        return { head: current.head, tree: current.tree, firstCheckpointDiff: await diff(firstCheckpoint), attemptDiff: await diff(attempt), ...patch };
       } finally {
         await rm(current.temp, { recursive: true, force: true });
       }

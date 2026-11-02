@@ -58,8 +58,10 @@ node "$PLUGIN_ROOT/scripts/unit.mjs" unit progress greeting
 
 implement 스킬이 계약에 맞는 출력을 반환하면 같은 `stage submit` 경로로 제출한다. SelfGated에서 `unit accept <unit> --adapters <module>`가 게이트를 실행하고 증거·커버리지·정책을 판정한다. gates는 LLM 출력 단계가 아니다.
 
-기본 패키지는 환경별 게이트·원격·작업관리·세션을 임의로 선택하지 않는다. [런타임 연결](runtime-adapters.md)을 먼저 구성한다. 리뷰가 필요하면 exit 20/InReview가 반환된다. 새 독립 세션에서 `kind: review`, `targetUnit`을 지정한 요청으로 리뷰 단위를 시작하고 review 계약을 제출한다. 사람 리뷰 정책이면 `stage submit ... review --by user`를 사용한다.
+기본 패키지는 환경별 게이트·원격·작업관리·세션을 임의로 선택하지 않는다. [런타임 연결](runtime-adapters.md)을 먼저 구성한다. 리뷰가 필요하면 관찰한 head·내용 fingerprint를 저장하고 exit 20/InReview가 반환된다. 새 독립 세션에서 `kind: review`, `targetUnit`을 지정한 요청으로 리뷰 단위를 시작하고 review 계약을 제출한다. 사람 리뷰 정책이면 `stage submit ... review --by user`를 사용한다.
 
 수용 후 `unit finish <unit> --request finish.json --adapters <module>`가 전달과 후속 처리를 수행한다. finish 요청·세션 identity 계약은 [명세 §7](spec.md#7-스킬-구성과-계약)에 있다. 결과만 쓰고 종료·전달을 가장하지 않는다. `unit fail`, `unit retry`, `unit resume`는 저장된 실패와 시도 상한을 사용하며 상태 파일을 수동 수정하지 않는다.
 
 각 CLI는 사람이 읽는 요약 뒤 한 줄 `RESULT { ... }`를 출력한다. 키는 RESULT 최상위에 있다. exit 0은 해당 명령의 성공, 1은 검사 실패, 2는 입력/계약 오류, 3은 정책/권한/결정 대기, 4는 필수 어댑터 부재, 20은 리뷰 필요다.
+
+구버전에서 `REVIEW_TARGET_INVALID`로 멈춘 InReview 단위는 새 패키지와 같은 런타임 어댑터로 기존 리뷰 단위의 `unit stage open <review-unit> review`를 다시 실행한다. 제어면은 저장된 reviewDecision을 현재 내용과 대조하고 실제 diff·구현 인계를 생성한다. 단위나 증거 파일을 직접 수정하지 않는다. 내용이 바뀌면 열기·제출을 거부하므로 대상 단위에서 `unit accept <unit>`로 다시 검증하고 현재 대상을 리뷰한다. 같은 입력의 게이트 증거는 재사용한다.

@@ -119,6 +119,58 @@ function firstCheckpoint(record) {
   return (record.stages ?? []).flatMap(stage => attemptsFor(record, stage.name)).find(attempt => attempt.checkpoint)?.checkpoint;
 }
 
+function reviewSnapshot(record) {
+  if (record?.state === 'InReview' && record.head === undefined && record.contentFingerprint === undefined
+    && record.reviewDecision?.required && record.diff === null && record.handoff === null) {
+    return { ...record, head: record.reviewDecision.head, contentFingerprint: record.reviewDecision.contentFingerprint };
+  }
+  return record;
+}
+
+async function prepareReviewInput({ record, adapters, stateRoot }) {
+  const baseline = firstCheckpoint(record);
+  if (typeof adapters.git?.inspectUnit !== 'function') {
+    throw Object.assign(new Error('review input preparation requires Git inspection'), { code: 'ADAPTER_MISSING' });
+  }
+  const target = await adapters.git.inspectUnit({ unit: record.unit, record });
+  if (!record.head || !record.contentFingerprint || target.head !== record.head || target.contentFingerprint !== record.contentFingerprint) {
+    throw Object.assign(new Error('review content changed since acceptance validation'), { code: 'STAGE_STALE' });
+  }
+  if (record.diff != null && record.handoff != null) return record;
+  if (!baseline || typeof adapters.checkpoint?.inspectChanges !== 'function') {
+    throw Object.assign(new Error('review input preparation requires a unit checkpoint'), { code: 'ADAPTER_MISSING' });
+  }
+  const inspected = await adapters.checkpoint.inspectChanges({
+    checkpoint: baseline, firstCheckpoint: baseline, head: record.head,
+    exclude: record.policy?.checkpoint?.exclude ?? [], paths: record.changedPaths ?? [],
+  });
+  if (typeof inspected.patch !== 'string') throw Object.assign(new Error('checkpoint adapter must return the review patch'), { code: 'ADAPTER_INVALID' });
+  const diffContent = { base: baseline, head: record.head, paths: record.changedPaths ?? [], patch: inspected.patch };
+  const file = path.join(stateRoot, 'units', record.unit, 'stages', `review.${record.revision}.diff.json`);
+  let priorDiff;
+  let diffBytes;
+  try { diffBytes = await readFile(file, 'utf8'); priorDiff = JSON.parse(diffBytes); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (priorDiff && digest(priorDiff) !== digest(diffContent)) {
+    throw Object.assign(new Error('review diff changed before checkpoint recovery'), { code: 'STAGE_STALE' });
+  }
+  if (!priorDiff) {
+    await atomicWrite(file, diffContent);
+    diffBytes = `${JSON.stringify(diffContent, null, 2)}\n`;
+  }
+  const diff = { path: file, digest: `sha256:${createHash('sha256').update(diffBytes).digest('hex')}` };
+  const handoff = {
+    request: record.request, acceptance: record.acceptance, canon: record.canon,
+    changedPaths: record.changedPaths, diff,
+    implementation: attemptsFor(record, 'implement').filter(attempt => attempt.endedAt).map(attempt => ({
+      attempt: attempt.n, summary: attempt.summary ?? null, outputDigest: attempt.outputDigest,
+      changedPaths: attempt.changedPaths ?? [],
+    })),
+    coverage: record.coverage ?? [], evidence: record.evidence ?? [],
+    assumptions: record.assumptions ?? [], openDecisions: record.openDecisions ?? [], next: record.next ?? null,
+  };
+  return { ...record, diff, handoff };
+}
+
 async function otherActiveUnits(stateRoot, currentUnit, adapters) {
   const root = path.join(stateRoot, 'units');
   const names = await readdir(root).catch(error => error.code === 'ENOENT' ? [] : Promise.reject(error));
@@ -241,8 +293,9 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
     let opened;
     await store.update(unit, async current => {
       assertStageState(current, stage);
-      const target = stage === 'review' && current.kind === 'review'
+      let target = stage === 'review' && current.kind === 'review'
         ? (typeof current.targetUnit === 'string' ? await store.read(current.targetUnit) : null) : current;
+      if (stage === 'review') target = reviewSnapshot(target);
       if (stage === 'review' && current.kind === 'review'
         && (!target || target.state !== 'InReview' || !target.head || !target.contentFingerprint)) {
         const error = new Error('review target must exist in InReview with a current head and content fingerprint');
@@ -263,9 +316,10 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
         error.code = 'ADAPTER_MISSING';
         throw error;
       }
-      const checkpoint = await createCheckpoint({
-        unit, stage, attempt, head: target.head, exclude: target.policy?.checkpoint?.exclude ?? [], adapter: adapters.checkpoint,
-      });
+      const legacy = stage === 'review' && current.kind !== 'review' && attempt === 1
+        && current.diff === null && current.handoff === null
+        && current.reviewDecision?.head === target.head && current.reviewDecision?.contentFingerprint === target.contentFingerprint;
+      if (stage === 'review') target = await prepareReviewInput({ record: target, adapters, stateRoot });
       let inputRecord = target;
       if (stage === 'root-cause') {
         const references = target.failures ?? [];
@@ -308,7 +362,22 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
         throw error;
       }
       const file = path.join(stateRoot, 'units', unit, 'stages', `${stage}.${attempt}.input.json`);
-      await atomicWrite(file, created.input);
+      let pending;
+      try { pending = JSON.parse(await readFile(file, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (pending && digest(pending) !== digest(created.input)) {
+        throw Object.assign(new Error('pending stage input changed before checkpoint recovery'), { code: 'STAGE_STALE' });
+      }
+      if (!pending) await atomicWrite(file, created.input);
+      const checkpoint = await createCheckpoint({
+        unit, stage, attempt, head: target.head, inputDigest: inputCore.inputDigest, legacy,
+        exclude: target.policy?.checkpoint?.exclude ?? [], adapter: adapters.checkpoint,
+      });
+      if (stage === 'review') {
+        const checked = await adapters.git.inspectUnit({ unit: target.unit, record: target });
+        if (checked.head !== target.head || checked.contentFingerprint !== target.contentFingerprint) {
+          throw Object.assign(new Error('review content changed during checkpoint creation'), { code: 'STAGE_STALE' });
+        }
+      }
       opened = { attempt, file, inputRevision, inputDigest: inputCore.inputDigest, checkpoint: checkpoint.ref };
       const nextAttempts = [...attempts, {
         n: attempt, checkpoint: checkpoint.ref, checkpointCommit: checkpoint.commit, checkpointHead: checkpoint.head,
@@ -318,7 +387,10 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
       const stages = entry
         ? (current.stages ?? []).map(item => item.name === stage ? { ...item, attempts: nextAttempts } : item)
         : [...(current.stages ?? []), { name: stage, attempts: nextAttempts }];
-      return { ...current, stages };
+      return { ...current, ...(stage === 'review' ? {
+        ...(current.kind !== 'review' ? { head: target.head, contentFingerprint: target.contentFingerprint } : {}),
+        diff: target.diff, handoff: target.handoff,
+      } : {}), stages };
     });
     return { code: 0, summary: `Opened ${stage} stage for ${unit}`, details: { unit, stage, attempt: opened.attempt, input: opened.file, checkpoint: opened.checkpoint, profile: profile.kind } };
   }
@@ -356,7 +428,7 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
     throw error;
   }
   const reviewTarget = stage === 'review' && current.kind === 'review'
-    ? (typeof current.targetUnit === 'string' ? await store.read(current.targetUnit) : null) : null;
+    ? reviewSnapshot(typeof current.targetUnit === 'string' ? await store.read(current.targetUnit) : null) : null;
   if (stage === 'review' && current.kind === 'review' && !reviewTarget) {
     const error = new Error(`review target not found: ${current.targetUnit ?? '<missing>'}`);
     error.code = 'REVIEW_TARGET_INVALID';
@@ -364,6 +436,12 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
   }
   const reviewedRecord = reviewTarget ?? current;
   if (stage === 'review') {
+    if (reviewedRecord.state !== 'InReview' || !reviewedRecord.head || !reviewedRecord.contentFingerprint || input.targetUnit !== reviewedRecord.unit
+      || input.head !== reviewedRecord.head || input.contentFingerprint !== reviewedRecord.contentFingerprint) {
+      const error = new Error('review target changed after the review StageInput was opened');
+      error.code = 'STAGE_STALE';
+      throw error;
+    }
     if (output.reviewedHead !== reviewedRecord.head) {
       const error = new Error('reviewedHead must match the current review target head');
       error.code = 'STAGE_CONTRACT_INVALID';
@@ -376,11 +454,12 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
       error.issues = [{ path: '$.verdict', keyword: 'finding', message: 'must-fix findings block ship' }];
       throw error;
     }
-    if (reviewTarget && (reviewTarget.state !== 'InReview' || !reviewTarget.head || !reviewTarget.contentFingerprint || input.targetUnit !== reviewTarget.unit
-      || input.head !== reviewTarget.head || input.contentFingerprint !== reviewTarget.contentFingerprint)) {
-      const error = new Error('review target changed after the review StageInput was opened');
-      error.code = 'STAGE_STALE';
-      throw error;
+    if (typeof adapters.git?.inspectUnit !== 'function') {
+      throw Object.assign(new Error('review submission requires Git inspection'), { code: 'ADAPTER_MISSING' });
+    }
+    const live = await adapters.git.inspectUnit({ unit: reviewedRecord.unit, record: reviewedRecord });
+    if (live?.head !== input.head || live?.contentFingerprint !== input.contentFingerprint) {
+      throw Object.assign(new Error('review content changed after the StageInput was opened'), { code: 'STAGE_STALE' });
     }
   }
   if (Array.isArray(output.openDecisions)) {
@@ -452,6 +531,7 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
   let targetUpdated = null;
   if (reviewTarget && output.status === 'done') {
     targetUpdated = await store.update(reviewTarget.unit, target => {
+      target = reviewSnapshot(target);
       if (target.state !== 'InReview' || target.head !== input.head || target.contentFingerprint !== input.contentFingerprint) {
         const error = new Error('review target changed before the verdict could be recorded');
         error.code = 'STAGE_STALE';
@@ -487,7 +567,7 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
       attempts: (item.attempts ?? []).map(attempt => attempt.n === active.n ? {
         ...attempt,
         ...(output.status === 'needs-decision' ? {} : { endedAt: adapters.now() }),
-        result: output.status, outputDigest: digest(output), submissionId: output.submissionId,
+        result: output.status, summary: output.summary, outputDigest: digest(output), submissionId: output.submissionId,
         changedPaths: attributed.attemptPaths,
       } : attempt),
     });
@@ -500,7 +580,8 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
     if (Array.isArray(writes.findings)) writes.findings = [...(next.findings ?? []), ...writes.findings];
     if (Array.isArray(writes.openDecisions)) writes.openDecisions = writes.openDecisions.map(item => ({ ...item, notifiedAt: null, answer: null }));
     const findings = [...(writes.findings ?? next.findings ?? []), ...attributed.findings, ...(guard.finding ? [guard.finding] : [])];
-    const candidate = { ...next, ...writes, stages, changedPaths: attributed.changedPaths, findings };
+    const candidate = { ...next, ...writes, ...(stage === 'implement' ? { diff: null, handoff: null } : {}),
+      stages, changedPaths: attributed.changedPaths, findings };
     return to === next.state ? candidate : transitionRecord(candidate, to);
   });
   let resolverCompleted = null;
@@ -768,14 +849,14 @@ async function runAcceptance({ stateRoot, unit, adapters }) {
     return formatCliResult({ code: 1, summary: 'Accepted target changed and requires revalidation', details: { unit, state: record.state, reason: evaluation.reason } });
   }
   if (reviewResolution.required && evaluation.reason === 'matching ship review is required') {
-    if (record.state === 'SelfGated' || record.state === 'Accepted') {
-      record = await store.update(unit, current => {
-        const updated = { ...current, reviewDecision, accepted: null };
-        const inReview = current.state === 'Accepted' ? transitionRecord(transitionRecord(updated, 'SelfGated'), 'InReview') : transitionRecord(updated, 'InReview');
-        return inReview;
-      });
-    }
-    else record = await store.update(unit, current => ({ ...current, reviewDecision }));
+    record = await store.update(unit, current => {
+      const updated = { ...current, head: target.head, contentFingerprint: target.contentFingerprint,
+        ...(current.head !== target.head || current.contentFingerprint !== target.contentFingerprint ? { diff: null, handoff: null } : {}),
+        reviewDecision, reviewedHead: null, verdict: null, accepted: null };
+      if (current.state === 'InReview') return updated;
+      return current.state === 'Accepted'
+        ? transitionRecord(transitionRecord(updated, 'SelfGated'), 'InReview') : transitionRecord(updated, 'InReview');
+    });
     return formatCliResult({ code: 20, summary: `Independent ${reviewResolution.by} review is required`, details: { unit, state: record.state, reviewDecision } });
   }
   if (!evaluation.ok) {

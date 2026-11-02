@@ -538,6 +538,7 @@ flowchart TB
 단계 시작 전에 제어면이 작업트리의 읽기 전용 체크포인트를 만든다. (이 문서 전체를 가리키는 "TO-BE 스냅샷"과 무관한, 하네스의 실행 기능이다.)
 
 - 방식: 임시 인덱스에 추적·미추적 파일을 담아 트리 객체와 커밋 객체를 만들고 `refs/harness/<unit>/<stage>.<attempt>` 에 기록한다. `.gitignore` 대상과 `checkpoint.exclude`(비밀 파일 패턴, §5.2)는 담지 않는다. 작업트리와 실제 인덱스는 바꾸지 않는다. `.git` 에 객체와 ref 를 쓰는 연산이므로 "읽기 전용"은 작업트리·인덱스 기준이다.
+- 재개: StageInput을 검증·저장한 뒤 체크포인트를 만들고 커밋 메시지에 입력 digest를 결속한다. 단계 기록 전 중단되면 같은 공개 stage open 명령이 입력·부모·트리·생성자 일치를 확인하고 기존 ref를 재사용한다. 충돌한 ref는 덮어쓰지 않는다. 구버전의 결속 없는 첫 리뷰 ref는 저장된 reviewDecision과 원래 생성자의 일치까지 확인한 경우에만 복구한다.
 - 용도:
   1. **변경 귀속**: 시도별 diff(`stages[].attempts[].changedPaths`) = 그 시도의 체크포인트 대비 시도 종료 시점의 작업트리 diff. 단위의 `changedPaths` = **단위 첫 체크포인트** 대비 현재 작업트리 diff 이며, 리뷰와 범위 가드는 이것을 쓴다. 시도 1 이 `a.ts`·`b.ts` 를, 시도 2 가 `a.ts` 만 바꿨으면 단위 `changedPaths` 는 `[a.ts, b.ts]` 다. 시도 1 에서 범위를 벗어났다가 시도 2 에서 원래대로 되돌린 경로는 첫 체크포인트와 같아져 diff 에서 빠지므로 다시 이탈로 보지 않는다. `isolation: worktree`(기본)에서는 그대로 쓴다. `isolation: shared` 에서는 같은 작업트리에서 활성 상태인 다른 단위의 `changedPaths` 와 그 단위들의 체크포인트 간 diff 를 뺀 나머지만 이 단위의 변경으로 본다. 두 단위가 같은 경로를 바꿨으면 귀속하지 않고 `shared-path` Finding 으로 양쪽에 알린다.
   2. **범위 가드**: 바뀐 경로가 목표별 E1 허용 경로(task·live는 scopePaths, prelaunch는 제품 소유 경로) 밖이면 Finding(`scope-guard`, `must-fix`)을 만들고 앞으로 고치게 한다. 자동으로 되돌리지 않는다.

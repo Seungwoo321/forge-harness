@@ -27,6 +27,7 @@ async function fixture(t) {
     command: async () => ({ exitCode: 0, stdout: `${root}/.git\n` }),
     now: () => '2026-01-01T00:00:00.000Z',
     id: () => 'failure-1',
+    git: { async inspectUnit() { return { head: 'head-1', contentFingerprint: 'sha256:content' }; } },
     checkpoint: {
       async createCheckpoint({ ref }) { return { commit: `commit:${ref}`, worktreeChanged: false, indexChanged: false, excluded: [] }; },
       async inspectChanges({ unit: changedUnit }) { return checkpointChanges.get(changedUnit) ?? { firstCheckpointDiff: [], attemptDiff: [] }; },

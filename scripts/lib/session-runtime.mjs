@@ -41,29 +41,44 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
   const orca = (args, cwd) => json('orca', [...args, '--json'], cwd);
   const marker = key => `handoff-${createHash('sha256').update(key).digest('hex')}`;
 
-  async function inspectCmux(sessionId, cwd) {
-    const found = terminals(await cmux(['tree', '--all'], cwd)).filter(item => item.id === sessionId && item.type === 'terminal');
-    if (found.length !== 1 || typeof found[0].tty !== 'string' || !/^[A-Za-z0-9/]+$/.test(found[0].tty)) throw invalid('cmux terminal is missing or ambiguous');
+  async function inspectCmux(sessionId, cwd, expectedExecutable) {
+    const found = terminals(await cmux(['tree', '--all'], cwd)).filter(item => item.id === sessionId);
+    if (found.length !== 1 || found[0].type !== 'terminal' || typeof found[0].tty !== 'string' || !/^[A-Za-z0-9/]+$/.test(found[0].tty)) throw invalid('cmux terminal is missing or ambiguous');
     const target = found[0];
-    const processes = await invoke('ps', ['-t', target.tty, '-o', 'pid=,pgid=,tpgid='], cwd);
-    const rows = processes.trim().split('\n').map(line => line.trim().split(/\s+/).map(Number));
-    const leaders = rows.filter(([pid, pgid, tpgid]) => Number.isSafeInteger(pid) && pid > 0 && pid === pgid && pid === tpgid);
-    if (leaders.length !== 1) throw invalid('cmux foreground process is missing or ambiguous');
-    const pid = String(leaders[0][0]);
-    const observed = await invoke('lsof', ['-a', '-p', pid, '-d', 'cwd', '-Fn'], cwd);
-    const directories = observed.split('\n').filter(line => line.startsWith('n')).map(line => line.slice(1));
-    if (directories.length !== 1 || directories[0] !== cwd) throw invalid('cmux foreground cwd differs from successor cwd');
+    const foreground = async () => {
+      const processes = await invoke('ps', ['-t', target.tty, '-o', 'pid=,pgid=,tpgid=,comm='], cwd);
+      const rows = processes.trim().split('\n').map(line => {
+        const [pid, pgid, tpgid, ...command] = line.trim().split(/\s+/);
+        return { pid: Number(pid), pgid: Number(pgid), tpgid: Number(tpgid), executable: command.join(' ') };
+      });
+      const leaders = rows.filter(row => Number.isSafeInteger(row.pid) && row.pid > 0 && row.pid === row.pgid && row.pid === row.tpgid);
+      if (leaders.length !== 1) throw invalid('cmux foreground process is missing or ambiguous');
+      const leader = leaders[0];
+      const candidates = expectedExecutable === undefined ? leaders : rows.filter(row =>
+        Number.isSafeInteger(row.pid) && row.pid > 0 && row.pgid === leader.pid && row.tpgid === leader.pid
+        && path.basename(row.executable) === path.basename(expectedExecutable));
+      if (candidates.length !== 1 || !candidates[0].executable) throw invalid('configured worker executable is missing or ambiguous');
+      return { ...candidates[0], leader: leader.pid };
+    };
+    const observed = await foreground();
+    const pid = String(observed.pid);
     const started = (await invoke('ps', ['-p', pid, '-o', 'lstart='], cwd)).trim();
     if (!started) throw invalid('cmux foreground incarnation is unavailable');
-    const confirmed = terminals(await cmux(['tree', '--all'], cwd)).filter(item => item.id === sessionId && item.tty === target.tty);
+    const directory = async () => {
+      const paths = (await invoke('lsof', ['-a', '-p', pid, '-d', 'cwd', '-Fn'], cwd))
+        .split('\n').filter(line => line.startsWith('n')).map(line => line.slice(1));
+      if (paths.length !== 1 || paths[0] !== cwd) throw invalid('cmux foreground cwd differs from successor cwd');
+      return paths[0];
+    };
+    await directory();
+    const confirmed = terminals(await cmux(['tree', '--all'], cwd)).filter(item => item.id === sessionId);
+    const current = await foreground();
+    await directory();
     const confirmedStart = (await invoke('ps', ['-p', pid, '-o', 'lstart='], cwd)).trim();
-    const foreground = await invoke('ps', ['-t', target.tty, '-o', 'pid=,pgid=,tpgid='], cwd);
-    const sameLeader = foreground.trim().split('\n').map(line => line.trim().split(/\s+/))
-      .filter(([processId, pgid, tpgid]) => processId === pgid && processId === tpgid);
-    if (confirmed.length !== 1 || confirmedStart !== started || sameLeader.length !== 1 || sameLeader[0][0] !== pid) throw invalid('cmux terminal changed during observation');
-    const executable = (await invoke('ps', ['-p', pid, '-o', 'comm='], cwd)).trim();
-    if (!executable) throw invalid('cmux foreground executable is unavailable');
-    return { sessionId, cwd: directories[0], incarnationId: `${target.tty}:${pid}:${started}`, executable, runtime, workspaceId: target.workspaceId };
+    if (confirmed.length !== 1 || confirmed[0].type !== 'terminal' || confirmed[0].tty !== target.tty
+      || confirmed[0].workspaceId !== target.workspaceId || confirmed[0].windowId !== target.windowId
+      || confirmedStart !== started || JSON.stringify(current) !== JSON.stringify(observed)) throw invalid('cmux terminal changed during observation');
+    return { sessionId, cwd, incarnationId: `${target.tty}:${pid}:${started}`, executable: observed.executable, runtime, workspaceId: target.workspaceId };
   }
 
   async function inspectOrca(sessionId, cwd) {
@@ -125,9 +140,10 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       matches = (result.terminals ?? []).filter(item => item.title === title).map(item => item.handle);
     }
     if (matches.length !== 1 || matches[0] === parent.sessionId) throw invalid('successor target is missing or ambiguous');
-    const observed = await inspect(matches[0], args.cwd);
     const argv = await launch(args);
-    if (!Array.isArray(argv) || typeof argv[0] !== 'string' || !observed.executable
+    if (!Array.isArray(argv) || typeof argv[0] !== 'string' || !argv[0]) throw invalid('configured worker executable is missing');
+    const observed = await inspect(matches[0], args.cwd, argv[0]);
+    if (!observed.executable
       || path.basename(observed.executable) !== path.basename(argv[0])) throw invalid('configured worker executable has not started');
     return observed;
   }
@@ -155,7 +171,8 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       if (!Array.isArray(argv) || !argv.length || argv.some(value => typeof value !== 'string' || !value || value.includes('\0'))) throw invalid('launch must return a nonempty argument vector');
       const text = `cd -- ${quote(input.args.cwd)} && exec ${argv.map(quote).join(' ')}`;
       if (runtime === 'cmux') {
-        await cmux(['new-workspace', '--name', marker(input.key), '--cwd', input.args.cwd, '--command', text, '--focus', 'false'], input.args.cwd);
+        // Mutation acknowledgments can be plain text; completion requires live observation below.
+        await invoke('cmux', ['--json', '--id-format', 'uuids', 'new-workspace', '--name', marker(input.key), '--cwd', input.args.cwd, '--command', text, '--focus', 'false'], input.args.cwd);
       } else {
         await orca(['terminal', 'create', '--worktree', `path:${input.args.cwd}`, '--title', marker(input.key), '--command', text], input.args.cwd);
       }

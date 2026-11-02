@@ -67,8 +67,31 @@ const binary=path.basename(process.argv[1]);const args=process.argv.slice(2);
 appendFileSync(process.env.TEST_TRACE,JSON.stringify({binary,args,cwd:process.cwd()})+'\\n');
 let s=JSON.parse(readFileSync(process.env.TEST_NATIVE));const child=s.child;
 const output=x=>process.stdout.write(JSON.stringify(x));
-if(binary==='ps'){const child=args.includes('202')||args.includes('ttys2');process.stdout.write(args.includes('lstart=')?'START\\n':args.includes('tty=,pgid=,comm=')?(child?'ttys2 202 worker\\n':'ttys1 101 worker\\n'):args.includes('comm=')?'worker\\n':child?'202 202 202\\n':'101 101 101\\n')}
-else if(binary==='lsof'){process.stdout.write('p1\\nn'+(process.env.TEST_MODE==='native-wrong-child'&&args.includes('202')?'/wrong':process.cwd())+'\\n')}
+if(binary==='ps'){
+ const child=args.includes('202')||args.includes('203')||args.includes('ttys2');const mode=process.env.TEST_MODE;
+ if(args.includes('pid=,pgid=,tpgid=,comm=')){
+  if(child){s.scans=(s.scans??0)+1;writeFileSync(process.env.TEST_NATIVE,JSON.stringify(s))}
+  let rows=child?'202 202 202 worker\\n':'101 101 101 worker\\n';
+  if(child&&mode.startsWith('wrapped')){
+   rows='202 202 202 /usr/bin/login\\n203 202 202 /bin/worker\\n';
+   if(mode==='wrapped-mismatch')rows=rows.replace('/bin/worker','/bin/shell');
+   if(mode==='wrapped-background')rows=rows.replace('203 202 202','203 203 202');
+   if(mode==='wrapped-ambiguous'||(mode==='wrapped-late-ambiguous'&&s.scans>1))rows+='204 202 202 /bin/worker\\n';
+   if(mode==='wrapped-changed'&&s.scans>1)rows=rows.replace('203 202 202','204 202 202');
+   if(mode==='wrapped-exec-changed'&&s.scans>1)rows=rows.replace('/bin/worker','/other/worker');
+  }
+  process.stdout.write(rows);
+ }else if(args.includes('lstart=')){
+  if(child){s.starts=(s.starts??0)+1;writeFileSync(process.env.TEST_NATIVE,JSON.stringify(s))}
+  process.stdout.write(child&&mode==='wrapped-reused'&&s.starts>1?'CHANGED\\n':'START\\n');
+ }else process.stdout.write(args.includes('tty=,pgid=,comm=')?(child?'ttys2 202 worker\\n':'ttys1 101 worker\\n'):'worker\\n');
+}
+else if(binary==='lsof'){
+ const child=args.includes('202')||args.includes('203');const mode=process.env.TEST_MODE;
+ if(child){s.directories=(s.directories??0)+1;writeFileSync(process.env.TEST_NATIVE,JSON.stringify(s))}
+ const wrong=child&&(mode==='native-wrong-child'||mode==='wrapped-wrong-cwd'||(mode==='wrapped-cwd-changed'&&s.directories>1));
+ process.stdout.write('p1\\nn'+(wrong?'/wrong':process.cwd())+'\\n');
+}
 else if(binary==='orca-rpc'){
  const params=JSON.parse(args[1]);const child=params.terminal==='child';
  s.epoch=(s.epoch??0)+1;writeFileSync(process.env.TEST_NATIVE,JSON.stringify(s));
@@ -80,8 +103,14 @@ else if(binary==='orca-rpc'){
 }
 else if(binary==='cmux'){
  if(args.includes('identify'))output({caller:{surface_id:'parent'}});
- else if(args.includes('new-workspace')){s.child=true;s.title=args[args.indexOf('--name')+1];writeFileSync(process.env.TEST_NATIVE,JSON.stringify(s));output({workspace_id:'new'})}
- else {output({windows:[{id:'window',workspaces:[{id:'parent-workspace',title:'parent',panes:[{surfaces:[{id:'parent',type:'terminal',tty:'ttys1'}]}]},...(child?[{id:'child-workspace',title:s.title,panes:[{surfaces:[{id:'child',type:'terminal',tty:'ttys2'}]}]}]:[])]}]})}
+ else if(args.includes('new-workspace')){s.child=true;s.title=args[args.indexOf('--name')+1];writeFileSync(process.env.TEST_NATIVE,JSON.stringify(s));process.stdout.write('OK workspace:42\\n');if(process.env.TEST_MODE==='wrapped-lost-response')process.exitCode=1}
+ else {
+  if(child){s.trees=(s.trees??0)+1;writeFileSync(process.env.TEST_NATIVE,JSON.stringify(s))}
+  const mode=process.env.TEST_MODE;
+  const duplicate=child&&((mode==='wrapped-terminal-duplicate-initial'&&s.trees>=2)||((mode==='wrapped-terminal-duplicate-confirmed'||mode==='wrapped-terminal-type-duplicate')&&s.trees>=3));
+  const extra=duplicate?[{id:'child',type:mode==='wrapped-terminal-type-duplicate'?'browser':'terminal',tty:'ttys3'}]:[];
+  output({windows:[{id:'window',workspaces:[{id:'parent-workspace',title:'parent',panes:[{surfaces:[{id:'parent',type:'terminal',tty:'ttys1'}]}]},...(child?[{id:'child-workspace',title:s.title,panes:[{surfaces:[{id:'child',type:'terminal',tty:'ttys2'},...extra]}]}]:[])]}]});
+ }
 } else {
  const terminal=id=>({handle:id,incarnationId:id+'-incarnation',worktreePath:id==='parent'?'/registered/coordinator-root':process.env.TEST_PRODUCT,connected:true,writable:true,title:s.title,worktreeId:'worktree',executionHostId:'local'});
  if(args.includes('create')){s.child=true;s.title=args[args.indexOf('--title')+1];writeFileSync(process.env.TEST_NATIVE,JSON.stringify(s));output({ok:true,result:{terminal:terminal('child')}})}
@@ -177,6 +206,39 @@ for (const runtime of ['cmux', 'orca']) {
     assert.equal(launches.length, 1);
     assert.deepEqual((await f.ledger()).map(row => row.event), ['intent', 'verification']);
     assert.equal((await f.store.read('unit-a')).state, 'Delivered');
+  });
+}
+
+test('native terminal launch accepts a plain acknowledgment and observes the worker inside a wrapper group', async t => {
+  const f = await fixture(t, { runtime: 'cmux', mode: 'wrapped', separate: true });
+  assert.equal(f.run('finish').code, 0);
+  assert.equal((await f.store.read('unit-a')).state, 'Closed');
+  const rows = await f.rows();
+  assert.ok(rows.some(row => row.binary === 'lsof' && row.args.includes('203')));
+  assert.ok(!rows.some(row => row.binary === 'lsof' && row.args.includes('202')));
+});
+
+test('native terminal reconciles an existing wrapped worker after a lost launch response without starting another', async t => {
+  const f = await fixture(t, { runtime: 'cmux', mode: 'wrapped-lost-response', separate: true });
+  assert.equal(f.run('finish').code, 3);
+  const before = await f.ledger();
+  assert.equal((await f.store.read('unit-a')).state, 'Delivered');
+  assert.equal(f.run('finish').code, 0);
+  const after = await f.ledger();
+  assert.deepEqual(after[0], before[0]);
+  assert.equal(after.filter(row => row.event === 'intent').length, 1);
+  assert.equal((await f.rows()).filter(row => row.binary === 'cmux' && row.args.includes('new-workspace')).length, 1);
+  assert.equal((await f.store.read('unit-a')).state, 'Closed');
+});
+
+for (const mode of ['wrapped-mismatch', 'wrapped-background', 'wrapped-ambiguous', 'wrapped-late-ambiguous',
+  'wrapped-changed', 'wrapped-exec-changed', 'wrapped-reused', 'wrapped-wrong-cwd', 'wrapped-cwd-changed',
+  'wrapped-terminal-duplicate-initial', 'wrapped-terminal-duplicate-confirmed', 'wrapped-terminal-type-duplicate']) {
+  test(`native terminal fails closed for ${mode}`, async t => {
+    const f = await fixture(t, { runtime: 'cmux', mode, separate: true });
+    assert.equal(f.run('finish').code, 3);
+    assert.equal((await f.store.read('unit-a')).state, 'Delivered');
+    assert.equal((await f.ledger()).filter(row => row.event === 'result').length, 0);
   });
 }
 

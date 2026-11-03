@@ -78,6 +78,7 @@ export function validatePolicy(policy) {
     'goal.class', 'goal.defaults', 'authority.allow', 'authority.deny', 'retry.maxPerSignature',
     'retry.maxResolver', 'review.mode', 'review.by', 'review.triggers', 'delivery',
     'checkpoint.retain', 'checkpoint.exclude', 'escalation.canonReviewAt', 'isolation',
+    'session.runtime', 'session.provider', 'session.account', 'session.model', 'session.effort', 'session.argv', 'session.roles',
   ]);
   for (const dotted of known) {
     const value = get(policy, dotted);
@@ -93,6 +94,17 @@ export function validatePolicy(policy) {
     if (dotted === 'review.by' && !['session', 'user'].includes(value)) throw new TypeError(`invalid review.by: ${value}`);
     if (['authority.allow', 'authority.deny', 'review.triggers', 'checkpoint.exclude'].includes(dotted)
       && !Array.isArray(value)) throw new TypeError(`${dotted} must be an array`);
+    if (dotted === 'session.runtime' && !['cmux', 'orca'].includes(value)) throw new TypeError('invalid session.runtime');
+    if (dotted === 'session.provider' && !['codex', 'claude'].includes(value)) throw new TypeError('invalid session.provider');
+    if (['session.account', 'session.model', 'session.effort'].includes(dotted) && (typeof value !== 'string' || !value.trim() || value.includes('\0'))) throw new TypeError(`invalid ${dotted}`);
+    if (dotted === 'session.roles') {
+      if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(role => !['implementation','review','diagnosis','resolver'].includes(role))) throw new TypeError('invalid session.roles');
+      for (const overrides of Object.values(value)) {
+        if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides) || Object.hasOwn(overrides,'roles')) throw new TypeError('invalid session role overrides');
+        validatePolicy({session:overrides});
+      }
+    }
+    if (dotted === 'session.argv' && (!Array.isArray(value) || !value.length || value.some(item => typeof item !== 'string' || !item || item.includes('\0')))) throw new TypeError('invalid session.argv');
     if (dotted === 'isolation' && !['worktree', 'shared'].includes(value)) throw new TypeError(`invalid isolation: ${value}`);
     if (['authority.allow', 'authority.deny'].includes(dotted)
       && value.some(item => typeof item !== 'string' || (!effects[item] && !levels.includes(item)))) {
@@ -111,12 +123,12 @@ export function validatePolicy(policy) {
       }
     }
   }
-  const allowedTop = new Set(['goal', 'authority', 'retry', 'review', 'delivery', 'checkpoint', 'escalation', 'isolation']);
+  const allowedTop = new Set(['goal', 'authority', 'retry', 'review', 'delivery', 'checkpoint', 'escalation', 'isolation', 'session']);
   if (!policy || typeof policy !== 'object' || Array.isArray(policy)
     || Object.keys(policy).some(key => !allowedTop.has(key))) throw new TypeError('policy contains unsupported fields');
   const allowedChildren = {
     goal: new Set(['class', 'defaults']), authority: new Set(['allow', 'deny']), retry: new Set(['maxPerSignature', 'maxResolver']),
-    review: new Set(['mode', 'by', 'triggers']), checkpoint: new Set(['retain', 'exclude']), escalation: new Set(['canonReviewAt']),
+    review: new Set(['mode', 'by', 'triggers']), session: new Set(['runtime', 'provider', 'account', 'model', 'effort', 'argv', 'roles']), checkpoint: new Set(['retain', 'exclude']), escalation: new Set(['canonReviewAt']),
   };
   for (const [key, fields] of Object.entries(allowedChildren)) {
     const value = policy[key];
@@ -143,6 +155,7 @@ export function resolvePolicy({ global = {}, workspace = {}, project = {}, unit 
     'goal.class', 'authority.allow', 'authority.deny', 'retry.maxPerSignature', 'retry.maxResolver',
     'review.mode', 'review.by', 'review.triggers', 'delivery', 'checkpoint.retain',
     'checkpoint.exclude', 'escalation.canonReviewAt', 'isolation',
+    'session.runtime', 'session.provider', 'session.account', 'session.model', 'session.effort', 'session.argv', 'session.roles',
   ];
 
   for (const field of fields) {

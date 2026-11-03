@@ -2,6 +2,8 @@
 
 이 문서는 하네스의 최종 모습을 현재형으로 정의한다. 현재 구현과의 비교, 진행 상태, 이력은 담지 않는다. 구현 갭은 §12 의 적합성 목록(H-ID)을 기준으로 별도 스캔한 결과에서 도출한다.
 
+제품의 전체 목표와 경계는 [Forge Harness 목표 상태](goals/forge-harness.md)다. 특정 외부 애플리케이션이나 별도 엔진의 설계는 정본이 아니다.
+
 ## 1. 목적과 범위
 
 하네스는 **개발 작업을 항상 같은 절차와 같은 품질 기준으로 처리**한다. 같은 종류의 작업(`kind`)은 같은 단계, 같은 게이트, 같은 증거 형식, 같은 보고 형식을 거친다. 일관성의 대상은 문서 한 장이 아니라 **작업 단위의 수명주기 전체**다: 범위 확정, 구현, 자체 게이트, 독립 리뷰, 전달(commit·push·PR·merge), 작업관리 기록, 다음 단위 인계.
@@ -130,7 +132,7 @@ stateDiagram-v2
 |---|---|---|---|
 | Scoped | 요청·정본 등록, scope가 범위·AC 고정 | scope + 제어면 | 구현 시작, ops 읽기 완료 |
 | Implementing | tracker 투영 요청 기록 (실제 반영 성공 불필요) | implement · 작업트리 변경 | 구현 완료 |
-| SelfGated | 마지막 변경 이후 검증 | Gate Runner · 증거 | 필수 게이트·활성 AC 커버리지 통과 |
+| SelfGated | 마지막 변경 이후 검증 | Gate Runner · 증거 | 적용되는 필수 게이트·활성 AC 커버리지 통과 |
 | InReview | 검증 완료, 정책이 리뷰 요구 | 독립 review · findings·verdict·reviewedHead | ship 또는 fix |
 | Accepted | 게이트·AC 충족, 필요시 ship, 검증 대상 고정 | 제어면 · accepted | Delivering |
 | Delivering | 수용된 내용으로 정책 delivery 실행 | 제어면 · Effect Ledger | 해당 수준 완료 시 Delivered |
@@ -142,12 +144,12 @@ stateDiagram-v2
 규칙:
 1. 전이·수용·복귀 필드는 제어면만 쓴다. stage 이름과 상태 이름은 구분한다(§7.3).
 2. `head`는 **단위 브랜치의 tip SHA**다. accepted는 head와 검증 대상 내용 fingerprint를 고정한다. 수용 후 내용·단위 head가 바뀌면 SelfGated부터 재수용한다. 단, 제어면의 전달 commit이 검증 내용과 동일한 트리임을 확인한 경우 §8.6의 SHA 결속으로 수용을 유지한다. target 브랜치의 merge SHA는 deliveryResult.mergeHead에 기록하며 그 자체로 단위 head 변경이 아니다.
-3. Accepted는 모든 필수 게이트와 deferred·dropped 외 모든 AC의 통과 증거를 요구한다. 리뷰가 필요하면 같은 대상의 ship 판정도 요구한다. basis는 추가 리뷰 판정 유무다.
+3. Accepted는 적용되는 모든 필수 게이트와 deferred·dropped 외 모든 AC의 통과 증거를 요구한다. 검증된 적용 불가 상태는 통과가 아니며 §5.1의 처리와 리뷰를 따른다. 리뷰가 필요하면 같은 대상의 ship 판정도 요구한다. basis는 추가 리뷰 판정 유무다.
 4. unresolved must-fix가 있으면 ship은 거부한다. should-fix·nice만 있으면 리뷰어의 ship/fix 판정을 따른다. fix는 Implementing, ship은 Accepted다. reviewedHead·내용 fingerprint가 현재 대상과 다르면 판정을 거부하고 SelfGated로 간다.
 5. openDecisions[].blocks의 AC만 deferred다. Scoped·Implementing에서 보류되지 않은 작업이 없으면 Stopped다. SelfGated 이후에는 활성 기준을 검증하고 Delivered까지 진행해 기다린다. 결정 도착 시 Implementing부터 보류 기준을 처리한다. 전달·권한 등 필수 행위 자체가 막히면 blocks가 비어도 Stopped이며 미전달 상태를 Closed로 만들지 않는다.
 6. tracker는 선택 사항이다. 동기화 실패는 큐로 남기고 계속한다. tracker가 있으면 Closed 직전에 최종 투영을 확인하며 실패 시 Delivered에 머문다. ops·review는 자기 종료 직전 상태에 머문다. 가용성은 그 외 전이 조건이 아니다.
 7. Blocked·Stopped는 모든 kind에 포함한다. 복귀 상태는 해당 kind의 허용 활동 상태여야 한다. 원장 불확실성과 검증 대상 변경을 먼저 검사한다. Blocked는 종료 문구를 쓰지 않는다.
-8. 한 세션은 단위 하나다. Closed 뒤 승인된 다음 단위는 새 세션에서 시작한다.
+8. 한 세션은 합의된 작업 범위를 맡는다. 같은 범위 안의 단위 완료, 계획 조정, 구현·검증 전환과 자동 압축만으로 세션을 나누지 않는다. 범위·권한·독립 리뷰 책임이 실제로 바뀌면 목표와 인계를 다음 세션에 전달한다.
 
 review kind는 대상 X의 InReview를 수행한다. 자기 정상 경로는 [*]→InReview→Closed이고 공통 Blocked·Stopped도 허용한다. 출력은 X의 review attempt·head에 결속하며 제어면이 X에 반영하고 자기 레코드에는 출력 참조를 쓴다. 두 레코드 갱신은 X 잠금 다음 review 잠금 순서이며 같은 제출 ID 재처리는 멱등이다. 계약 검사는 X의 입력 스냅샷 기준이다.
 
@@ -177,6 +179,10 @@ AC 커버리지는 변경이 있는 모든 kind(`chore`·`impl`·`impl-risk`·`d
 
 게이트 결과는 입력 fingerprint(대상 소스·lockfile·명령·설정·도구 버전의 내용 해시)가 같으면 재사용하고, 하나라도 바뀌면 무효다. fingerprint 를 확인할 수 없으면 재실행한다. 재사용은 통과 증거에만 적용하며, **실패 증거는 같은 fingerprint 라도 재실행한다**. 같은 fingerprint의 두 유효 실행이 다른 결과를 내면 비결정 게이트로 분류한다(§8.4). environment·harness·user-domain·unknown 실패는 비교에서 제외하고 product 실패와 정상 완료만 비교한다. 리뷰 세션은 `evidence rerun --gate <id>` 로 통과 증거도 독립 재실행할 수 있고, 그 결과가 다르면 같은 분류를 받는다.
 
+저장소에 실제로 구성되지 않은 검사에는 `not-applicable`을 기록한다. 이는 통과·실패·미실행과 구분하며 AC 커버리지를 제공하지 않는다. 적용 여부는 프로젝트 정본과 수용 대상의 불변 스냅샷에 결속된 근거로 제어면이 검증하고, 정책이 요구하는 독립 리뷰가 확인한다. 사용자 정책이 리뷰를 금지한 경우 해당 상태로 수용하지 않으며 실제 검사를 구성하거나 명시적 정책 변경을 적용할 수 있도록 안내한다. 검사 명령이 구성돼 있거나 정본·증거가 없고 달라졌거나 실패한 경우 적용 불가로 처리하지 않는다.
+
+제어면은 제공자가 반환한 입력을 현재 프로젝트의 실제 바이트와 독립적으로 대조하고, 검사 실행 대상과 그 결과를 동일한 불변 스냅샷에 결속한다. 실행 전후와 수용 직전에 모든 게이트 입력·대상을 다시 확인한다. 실행 도중 변경됐다 복원된 입력도 성공 근거가 되지 않도록 실행에 사용한 스냅샷을 고정하거나 동등한 무결성을 증명한다. 확인이 불가능하거나 경합이 생기면 결과는 미확정이며 재관찰·재검증한다.
+
 **AC 커버리지**는 수용 기준마다 통과한 검증 증거가 하나 이상 연결됐는지 보는 결정적 게이트다. 연결은 다음 규약으로 만든다.
 
 1. 게이트 설정은 테스트별 결과 보고 형식(TAP·JUnit 등), 보고서 위치와 테스트 이름의 AC ID 정규식을 선언한다.
@@ -193,6 +199,8 @@ AC 커버리지는 변경이 있는 모든 kind(`chore`·`impl`·`impl-risk`·`d
 
 정책은 명시 사용자 변경 > 현재 단위 > 프로젝트 > workspace > global 순으로 **필드별** 상속한다. 각 값의 출처 수준을 Unit Record 의 `policySources: {<field>: <level>}` 에 남긴다.
 
+사용자가 이미 진행 중인 단위의 정책 변경을 명시하면 공개 제어면이 변경 요청·사용자 입력 출처·이전 정책·새 정책·적용 revision을 기록한다. 안전한 단계 경계에서 적용하고, 수용·승인·전달 대상이나 권한이 달라지면 기존 증거를 재평가한다. 실행 중인 효과의 인자·대상·멱등 키는 바꾸지 않으며 불확실한 효과를 먼저 재관찰한다. 프로젝트 기본값의 변경만으로 과거 단위 기록을 소급 편집하지 않는다.
+
 | 필드 | 값 | 기본값 | 설명 |
 |---|---|---|---|
 | `goal.class` | `task` \| `product-prelaunch` \| `product-live` | 없음 (§5.5 초기 설정; 비대화형만 `task` 를 `unconfirmed-default` 로) | 최종 목표 유형 (§5.3) |
@@ -208,6 +216,7 @@ AC 커버리지는 변경이 있는 모든 kind(`chore`·`impl`·`impl-risk`·`d
 | `checkpoint.exclude` | glob 목록 | `**/.env*`, `**/*.pem`, `**/*.key`, `**/id_*` | `.gitignore` 에 없어도 체크포인트에 담지 않는 경로 (§8.5) |
 | `escalation.canonReviewAt` | 정수 | 5 | 같은 정본(경로 기준) 아래 사용자 알림이 이 수에 이르면 정본 재검토 권고. 정본 내용이 바뀌면 0 으로 돌아간다 (§8.10) |
 | `isolation` | `worktree` \| `shared` | `worktree` | 단위가 전용 작업트리를 갖는지. `shared` 면 변경 귀속에 §8.5 의 병행 제외 규칙을 쓴다 |
+| `session` | runtime·provider·계정·명령·모델·effort와 역할별 선택 정책 | 없음 | 세션 시작 시 실제 정책과 가용 모델로 결정. 고정된 모델 목록이나 세션 도중 모델 변경을 전제하지 않음 |
 
 정책 파일 위치:
 
@@ -259,7 +268,7 @@ AC 커버리지는 변경이 있는 모든 kind(`chore`·`impl`·`impl-risk`·`d
 
 - `none`: 리뷰 단계를 건너뛴다. 수용은 게이트 증거와 AC 커버리지로 한다(`basis: gates`). 세부 리뷰는 열지 않고, 사용자에게 알릴 실제 이슈만 §8.10 으로 올린다.
 - `conditional`: 트리거 조건이 하나라도 참일 때만 리뷰를 연다.
-- `required`: 항상 연다. unproven-gate 리뷰는 필수 게이트 미통과·AC 미커버를 면제하지 않는다.
+- `required`: 항상 연다. unproven-gate 리뷰는 적용되는 필수 게이트 미통과·AC 미커버를 면제하지 않는다. 검증된 적용 불가는 통과와 구분해 검토한다.
 - 트리거 정의: `risk-kind` 는 `kind` 가 `impl-risk`, `out-of-scope` 는 이 단위의 이력에 `scope-guard` Finding 이 하나라도 있었음(해소 여부 무관), `unproven-gate` 는 필수 게이트에 결정적 증거가 없는 항목 존재, `repeated-signature` 는 같은 서명이 재발한 이력 존재. 이력 기반 트리거는 Unit Record 의 `findings`(추가 전용, `resolvedAt` 로 해소 표시)와 `failures` 에서 읽는다.
 
 ### 5.5 정책 초기 설정 (policy-setup)
@@ -372,6 +381,12 @@ LLM 이 제어면의 결정을 우회하지 못하도록 두 가지를 둔다: �
 | review | Stage | InReview | X의 인계·diff·증거·기준 | findings·verdict·reviewedHead |
 | handoff | Stage | Delivered 종료 준비 | 다음 단위·결과·검증 | 인계 초안 |
 | gates | Driver | SelfGated | 게이트 설정 | Evidence Record |
+| goal-register / goal-add-work | Driver | 전체 목표 | 승인된 목표·계획 | 목표와 남은 작업 기록 |
+| goal-block / goal-resume | Driver | 차단·복귀 | 기록된 원인·해결 근거 | 차단 상태·재개 기록 |
+| session-start | Driver | 세션 기동 | 목표·정책·불변 인계 | native 목표·착수 영수증 |
+| session-finish / session-stop / session-return | Driver | 완료·차단·리뷰 반환 | 결과·소유자·선택적 수신자 | 실제 이전 시 수신 확인, 허용된 종료 시 정확한 소멸 확인 |
+
+각 Driver는 한 lifecycle 동작만 수행하고 해당 제어면 스크립트를 호출한다. 스킬 자체가 상태·원장·증거를 직접 쓰지 않는다. 스크립트는 순수 결정, 파일 저장, 호스트·실행기 부작용을 구분한다.
 
 실제 인계 기동·인수·착수·종료 확인은 세션 어댑터가 맡는다. 외부 개인 스킬은 구성 요소가 아니다. 공개 실행 파일은 `--adapters <module>`의 named export `createRuntimeAdapters({cwd, adapters})`를 호출한다. 명시된 모듈은 제품 cwd와 불변 core 서비스를 받아 `git`·`gates`·`tracker`·`sessionRunner`와 선택적 `repository`·`provider`·`effect`·`effectContext`를 등록한다. `effect`의 `execute`·`verify`와 함수 `effectContext`는 함께 등록하며, 문맥은 전달과 같은 소유권·범위·환경·불가역성·비밀·명령 안전 boolean을 검증한다. 공개 E4 요청은 Accepted 또는 Delivering의 정확한 저장 승인과 현재 수용 대상을 재검증하고 원장으로 실행한다. 모듈 로딩·등록 실패도 구조화된 RESULT로 반환한다. 형제 프로젝트 연결은 단위 시작 요청의 `policyOverrides`를 사용하며 workspace 정책 루트로 해석하지 않는다.
 
@@ -379,15 +394,21 @@ LLM 이 제어면의 결정을 우회하지 못하도록 두 가지를 둔다: �
 
 `none` 이외의 수용은 Git 관찰의 `repo`·`branch`·`tree`·`indexTree`·`headTree`·`base`를 accepted에 고정한다. 작업트리의 검증 tree와 기존 HEAD의 headTree는 서로 다를 수 있다. finish 요청의 `delivery`는 `repo`·`branch`·`base` 기대값과 `message`·`title`·`body` 표시값, 선택적 `approvalRef`를 담는다. 기대값은 수용 대상을 덮어쓰지 않는다. Unit의 `deliveryPlan`은 전달 수준·대상·표시값을 고정하며 Delivering 재개에서 바꾸지 않는다.
 
-`unit finish`는 Accepted→Delivering→Delivered를 각각 저장한다. `none`은 외부 효과 없이 `deliveryResult = {level:"none",head:accepted.head,mergeHead:null,effectRefs:[]}`를 기록한다. Delivering 재개에서도 Git 어댑터로 수용 head·내용을 다시 검사하며 변경 시 SelfGated로 돌아간다. 게이트 제공자가 반환한 원 verdict·path·key 참조는 제품 cwd에서 해석되는 원형으로 증거에 보존한다.
+`unit finish`는 Accepted→Delivering→Delivered를 각각 저장한다. `none`은 외부 효과 없이 `deliveryResult = {level:"none",head:accepted.head,mergeHead:null,effectRefs:[]}`를 기록한다. Delivering 재개에서도 Git 어댑터로 수용 head·내용을 다시 검사하며 변경 시 SelfGated로 돌아간다. 게이트 제공자가 반환한 원 verdict·path·key 참조는 제품 cwd에서 해석되는 원형으로 증거에 보존한다. 승인된 다음 작업을 같은 세션이 계속하면 단위 결과와 남은 목표를 기록하고 해당 단위를 닫는다. 이 경로는 `session.start`, `session.deliver`, `session.close` 또는 종료 finalizer를 만들지 않는다.
 
 부모 세션의 `parentRuntime = {sessionId,cwd,incarnationId}`와 다음 작업의 `successor.cwd`는 서로 다른 경로일 수 있다. 런타임 설정은 부모 신원·cwd를 고정하고 `observe({cwd: parentRuntime.cwd, targetCwd: successor.cwd})`에서 부모의 실제 신원·cwd와 대상 경로를 독립 확인한다. 기동 후에는 다음 세션의 신원·incarnation·대상 cwd를 관찰한다. 기존 parentSessionId 입력은 동일 경로 동작을 유지하며 명시 부모 입력과 충돌하면 기동 전에 거부한다.
 
-네이티브 런타임 바인딩은 `createSessionRunner({runtime,command,parent,launch,runtimeRpc,taskTransport,taskPrompt})`로 구성한다. Orca의 `runtimeRpc`는 네이티브 `terminal.inspectProcess` transport이며 설정 모듈이 SDK의 발견·버전·수명을 소유한다. foreground PID·시작 시각·tty·프로세스 그룹을 OS 관찰과 대조하고 실제 프로세스 cwd를 확인한 뒤 네이티브 incarnation·프로세스 fence를 다시 검사한다. 등록 worktree 경로는 실제 프로세스 cwd의 증거가 아니다. cmux는 네이티브 caller·terminal·tty와 OS foreground 프로세스 관찰을 결속한다. 부모는 기동 직전에 재관찰한다.
+네이티브 런타임 바인딩은 `createSessionRunner({runtime,command,parent,launch,runtimeRpc,taskTransport,taskPrompt})`로 구성한다. Orca는 설치된 CLI에 동봉된 런타임 클라이언트로 `terminal.inspectProcess`를 호출하며 명시적 `runtimeRpc`가 있으면 이를 사용한다. foreground PID·시작 시각·tty·프로세스 그룹을 OS 관찰과 대조하고 실제 프로세스 cwd를 확인한 뒤 네이티브 incarnation·프로세스 fence를 다시 검사한다. 등록 worktree 경로는 실제 프로세스 cwd의 증거가 아니다. cmux는 네이티브 caller·terminal·tty와 OS foreground 프로세스 관찰을 결속한다. 부모는 기동 직전에 재관찰한다.
 
-프로세스 실행만으로 착수를 선언하지 않는다. worker transport는 정확한 prompt digest·packet digest·thread·request·turn·실행 항목을 관찰한다. `harness.task-receipt/1`은 이를 effect key·session·incarnation·cwd와 결속한다. 최초 argv 입력은 자동 제출 여부를 관찰하며 반복 입력하지 않는다. interactive pending 입력은 transport의 readiness fence를 재검사하는 조건부 submit으로 제출한다. 동일 worker의 여러 native lock은 root-session metadata로 유일한 주 thread에 결속한다. cmux의 busy 수신자는 settled composer와 별도 Return의 steering 경로로 입력을 소비하며 다음 turn 큐에만 의존하지 않는다. busy 큐·composer·startup modal은 착수 증거가 아니다. 네이티브 대화의 실제 응답·도구 실행은 착수 증거이며 이후 interrupted 상태와 구분해 보존한다.
+관리 세션은 선택된 호스트의 네이티브 목표를 먼저 설정한다. Codex와 Claude Code의 `/goal` 또는 동등한 공개 목표 API를 사용하며 일반 argv 프롬프트는 목표를 대신하지 않는다. 목표에는 전체 목적·완료 조건·정책·인계 참조·종료 스킬·차단 시 행동이 포함된다. cmux는 식별된 빈 입력란에 명령과 내용을 넣고 준비 상태를 재확인한 뒤 별도 제출한다. Orca는 native 기동·입력 API의 동일 요청 식별자와 재시도 계약을 따른다. paste·Enter 전송·큐 수락은 목표 설정이나 작업 착수의 증거가 아니다.
 
-`unit finish`의 `returnTo`는 기존 수신 세션의 정확한 sessionId·incarnationId·cwd·executable이다. 새 successor와 함께 지정하지 않는다. 제어면은 관찰한 owner·recipient·result·handoff를 `sessionFinalization`에 고정한다. 별도 생존 프로세스의 `unit finalize <unit>`가 `session.deliver`로 결과를 한 번 제출하고 실제 수신·착수를 확인한 뒤 `session.close` intent를 기록한다. 공개 finish 실행 파일은 같은 어댑터·상태 루트로 분리된 finalizer를 기동한다. 종료 대상은 런타임 설정의 `parent.closable: true`와 `parent.workerExecutable`로 명시한 worker만이다. 셸·오케스트레이터·수신 세션은 종료하지 않는다. 원 session·incarnation·cwd·native thread를 재검사하고 실제 소멸을 생존 프로세스에서 확인한 뒤에만 Closed로 전이한다. 미수신·실패·불확실성은 Delivered와 같은 intent를 유지하며 `unit finalize` 또는 원래 finish의 재호출로 조사·재개한다.
+제어면은 native 목표 상태에서 정확한 목표와 활성 상태를 확인하고, 정확한 요청과 그 뒤 실제 응답 또는 도구 실행을 각각 관찰한다. worker transport는 목표·prompt·packet digest와 thread·request·turn·실행 항목을 effect key·session·incarnation·cwd에 결속한다. 불변 인계는 실제로 읽었거나 native 목표 입력에 정확한 본문이 포함됐음을 확인한다. 최초 입력이 이미 제출됐거나 결과가 불확실하면 동일 intent를 재관찰하며 재입력·재기동하지 않는다. 동일 worker의 여러 native lock은 root-session metadata로 유일한 주 thread에 결속한다. busy 큐·composer·startup modal은 착수 증거가 아니다. 작업 착수 이후 interrupted 상태도 구분해 보존한다.
+
+실행기 또는 호스트가 목표 상태·훅 신뢰를 관찰할 수 없으면 미검증으로 남는다. 신뢰 우회 플래그를 자동으로 쓰지 않는다. 사용자 중단과 host의 목표 일시중지·반복 제한을 존중하며, 미완료 목표가 중단될 때는 남은 작업과 재개 조건을 보고한다.
+
+실제 소유권 이전이나 리뷰 반환의 `returnTo`는 기존 수신 세션의 정확한 sessionId·incarnationId·cwd·executable이다. 새 successor와 함께 지정하지 않는다. 제어면은 관찰한 owner·recipient·result·handoff를 `sessionFinalization`에 고정한다. 별도 생존 프로세스의 `unit finalize <unit>`가 `session.deliver`로 결과를 한 번 제출하고 실제 수신·착수를 확인한 뒤 `session.close` intent를 기록한다. 종료 대상은 런타임 설정의 `parent.closable: true`와 `parent.workerExecutable`로 명시한 worker만이다. 셸·오케스트레이터·수신 세션은 종료하지 않는다. 원 session·incarnation·cwd·native thread를 재검사하고 실제 소멸을 생존 프로세스에서 확인한 뒤에만 소유자 종료를 확정한다. 미수신·실패·불확실성은 원래 intent를 유지하며 재관찰한다.
+
+전체 목표 완료 또는 수신자가 없는 실제 차단·사용자 일시중지에는 successor나 returnTo를 만들지 않는다. 목표 완료 근거 또는 Stopped 상태·원인·객관적인 재개 조건과 결과를 영속 기록해 사용자에게 보고한다. 수신자가 없으므로 native 수신·목표 활성·착수 영수증을 요구하지 않는다. 허용된 관리 worker의 자동 종료가 요청된 경우에만 생존 제어면이 정확한 소유자의 소멸을 별도로 확인한다. 허용되지 않은 셸·오케스트레이터와 사용자 소유 terminal은 유지한다.
 
 ### 7.3 단계 계약 (공통 봉투)
 
@@ -630,7 +651,7 @@ E2 이상의 부작용은 수행 전에 의도를, 수행 후 결과를 원장�
 | 모든 단계 | 인증·한도·권한 | 사용자 영역 | R 없이 알림. 필수 단계·전달 차단이면 blocks가 비어도 Stopped | 조건 충족 후 복귀 |
 | 모든 단계 | 작업관리 도구 동기화 실패 | 하네스/환경 | 큐에 보존하고 작업 계속. 종료 직전만 최종 반영 확인 | 최종 반영 미완료 보고 |
 
-실패가 아닌 **재개 사건**: 세션 종료·자동 컨텍스트 압축·사용자 `/clear` 는 실패로 분류하지 않고 서명·상한·해결 세션의 대상이 아니다. 단위 경계이며, 새 세션이 §8.8 로 Unit Record 와 원장에서 같은 지점을 재개한다. 대화에서 복원하지 않는다.
+실패가 아닌 **재개 사건**: 세션 종료·자동 컨텍스트 압축·사용자 `/clear` 는 실패로 분류하지 않고 서명·상한·해결 세션의 대상이 아니다. 자동 압축은 세션이나 단위 경계가 아니며 목표·결정·변경·검증·남은 일을 보존해 같은 세션에서 계속한다. 세션이 실제로 바뀌는 경우 새 세션이 §8.8의 Unit Record·원장·인계에서 같은 지점을 재개한다.
 
 ### 8.8 재개 판정
 
@@ -657,7 +678,7 @@ fingerprint 가 달라진 증거는 무효이고 해당 게이트부터 다시 �
 | 재개 조건 | 객관적으로 검사 가능한 조건 |
 | 다음 소유자 | 사용자 또는 해결 세션 |
 
-결과 파일의 마지막 줄은 다음 셋 중 하나다. 세션 어댑터는 이 종료 계약을 사용한다. Blocked는 복구 중이므로 종료 결과를 내지 않는다.
+실제 세션 종료 시 결과 파일의 마지막 줄은 다음 셋 중 하나다. 단위 완료 후 같은 범위의 작업을 같은 세션에서 계속하면 단위 결과를 기록하되 세션 종료를 발생시키지 않는다. 세션 어댑터는 실제 종료에만 이 계약을 사용한다. Blocked는 복구 중이므로 종료 결과를 내지 않는다.
 
 | 상황 | 마지막 줄 |
 |---|---|
@@ -743,6 +764,8 @@ fingerprint 가 달라진 증거는 무효이고 해당 게이트부터 다시 �
 | approvals[] | §8.6의 사용자 승인 레코드 |
 | next | null 또는 `{unit,handoff}`. handoff는 path·digest 참조 |
 
+전체 목표는 Unit Record와 구분된 제어면 정본에 목적·완료 기준·승인 범위·남은 작업·정책 참조·revision·상태와 차단/해소 이력을 보존한다. 세션 custody와 native 목표·요청·착수 영수증은 해당 목표·단위·effect·incarnation에 결속된다. 목표의 완료는 마지막 단위의 수용만으로 추정하지 않고 각 전체 목표 기준의 유효한 근거와 남은 작업 부재를 확인한다. 목표·원장·잠금의 프로세스 중단 복구는 데이터 손실이나 동시 소유자를 만들지 않는다.
+
 단위 위치는 `<stateRoot>/units/<unit>/unit.json`이다. 단위별 배타 잠금 안에서 최신 revision 읽기→수정→revision 증가→임시 파일 후 교체한다. 같은 제출 ID는 멱등 처리한다. stage 충돌은 inputDigest·attempt·검증 대상 기준이며 무관 필드 갱신은 최신 값에 병합한다. 소유자 종료를 확인하지 못하면 시간 경과만으로 잠금을 빼앗지 않는다. 큐·카운터·causeRegistry·원장·기동 예약도 자원 잠금으로 직렬화한다.
 
 request는 검증된 요청 텍스트 또는 불변 path·digest 참조와 사용자 입력 출처다. tracker.projected는 최신 투영 성공 여부다. 실패는 `<stateRoot>/projection-queue.ndjson`에 남기며 최종 투영 전에는 Closed가 되지 않는다. 종료 시 제어면은 terminal 의도와 projectionRevision을 먼저 큐에 저장하고 원격 반영 성공 뒤 원 활동 상태에서 Closed로 간다. 그 사이 중단돼도 같은 revision으로 재생하며 새 terminal 의도를 만들지 않는다. task·대화·인계 파일은 단위 상태의 근거가 아니라 투영 또는 입력이다.
@@ -790,7 +813,7 @@ Failure Record는 `<stateRoot>/units/<unit>/failures/<id>.json`에 불변 기록
 
 | 산출물 | 형식 | 소비자 |
 |---|---|---|
-| 단위 결과 파일 `<stateRoot>/handoff/<slug>-result.md` | 30줄 이내, 마지막 줄은 §8.9 의 세 형식 중 하나 | 다음 세션, 디스패처 |
+| 단위 결과 파일 `<stateRoot>/handoff/<slug>-result.md` | 30줄 이내, 같은 세션의 계속 작업은 남은 목표와 다음 행동을 기록하고 실제 세션 종료만 §8.9 마지막 줄을 사용 | 현재 소유자, 다음 세션, 디스패처 |
 | 인계 파일 | 목표·수용 기준·작업관리·결정·변경·검증·남은 일·다음 첫 행동 | 새 세션 |
 | 리뷰 보고 | `이 변경이 하는 일` → 반드시 고침 / 고치는 게 좋음 / 있으면 좋음 → `판정` → `군살` → `확인 못 함` | 사용자, 제어면 |
 | 완료 보고 | 바꾼 것, 실행한 검증과 결과, 마지막 한두 줄에 하지 않은 것·위험 | 사용자 |
@@ -930,8 +953,8 @@ CLI 는 사람용 출력의 마지막 줄에 기계용 한 줄 `RESULT {json}` �
 | **전달·인계** | | |
 | H-DL-01 | delivery 수준(none/commit/push/PR/merge)이 정책 값을 넘어 실행되지 않는다 | T |
 | H-DL-02 | 머지는 `Accepted` 가 고정한 head 에서만 수행된다 | T |
-| H-DL-03 | 다음 단위가 승인돼 있으면 같은 대화에서 구현하지 않고 새 세션으로 인계된다 | L |
-| H-DL-04 | 결과 파일은 30줄 이내이며 마지막 줄이 §8.9 의 세 형식(인계·완료·중단) 중 하나다 | T |
+| H-DL-03 | 같은 범위·권한·책임의 승인된 다음 작업은 같은 세션에서 이어가고, 범위·권한·독립 리뷰 책임이 바뀔 때 검증된 인계를 수행한다 | L |
+| H-DL-04 | 결과 파일은 30줄 이내이고 실제 세션 종료 시에만 §8.9의 마지막 줄을 쓰며 같은 세션의 다음 작업을 전체 목표 완료로 보고하지 않는다 | T |
 | H-DL-06 | 동일 검증 트리의 전달 commit은 SHA를 결속하고 내용 변경은 재수용한다. target merge SHA는 단위 head 변경이 아니다 | T |
 | H-DL-07 | merged·closed PR은 새 전달에 재사용하지 않으며 새 head 전달은 새 키를 쓴다 | T |
 | H-DL-08 | 입력 제출과 실제 착수는 정확한 native request·실행 항목·packet·worker incarnation으로 결속하며 큐 대기는 성공이 아니다 | T/L |
@@ -948,6 +971,28 @@ CLI 는 사람용 출력의 마지막 줄에 기계용 한 줄 `RESULT {json}` �
 
 | H-RC-01 | 공개 fix→implement→review→finding resolve→accept가 원 기록을 보존하며 완료된다. 오래된 대상·무권한·후속 리뷰·증거 변경·상충 재호출은 해소를 거부한다 | T |
 | H-RC-02 | prelaunch의 productPaths 부재 시 scopePaths를 검사한다. 공개 scope recheck는 기존 허용 경로의 자동 생성 지적만 정정하고 실제 이탈·리뷰어 지적은 보존한다 | T |
+
+| 목표 연속성과 검증 경계 | 수용 기준 | 유형 |
+|---|---|---|
+| H-GO-01 | 전체 목표와 단위 완료는 구분되며, 남은 작업이나 미검증 목표 기준이 있으면 전체 완료를 기록하지 않는다 | T/L |
+| H-GO-02 | cmux·Orca의 Codex·Claude 관리 세션은 native 목표를 설정하고 정확한 활성 상태·입력·착수를 확인한다. 일반 프롬프트, 붙여넣기, 큐 수락만으로 성공하지 않는다 | T/L |
+| H-GO-03 | 모델·effort·계정은 현재 정책과 작업 성격으로 세션 시작 시 선택하고 코드에 가용 모델 목록을 고정하지 않는다 | T/L |
+| H-GO-04 | 목표·단위·인계·요청·effect·세션 신원은 결속되고 불확실한 결과는 같은 intent를 재관찰하며 중복 기동하지 않는다 | T/L |
+| H-GO-05 | 자동 압축·계획 조정·검증 전환은 세션을 나누지 않고, 실제 책임 경계에서만 검증된 인계를 수행한다 | T/L |
+| H-GO-06 | 완료·차단·리뷰 반환은 각각 단일 목적 스킬과 스크립트로 처리한다. 실제 이전에만 수신을 확인하고 수신자 없는 완료·차단은 사용자 보고와 재개 조건을 보존하며 허용된 worker 종료만 정확히 확인한다 | T/L |
+| H-GO-07 | 호스트의 중단·목표 제어·훅 신뢰를 우회하지 않고 미검증 강제 상태를 성공으로 보고하지 않는다 | T/L |
+| H-GO-08 | 목표 저장 도중 프로세스가 종료돼도 잠금과 revision이 안전하게 복구되며 동시 소유나 데이터 손실이 없다 | T/L |
+| H-RT-01 | Codex와 Claude의 호스트별 플러그인 루트·계정 환경을 사용하고 기본 계정과 명시 계정이 혼동되지 않는다 | T/L |
+| H-RT-02 | Orca 제목 변경과 화면 탭 없는 live terminal도 native 신원·cwd·요청·실제 착수로 재관찰하며 다른 세션을 종료하지 않는다 | T/L |
+| H-RT-03 | cmux 입력은 기존 초안·modal·불안정 화면을 보호하고 정확한 명령 제출·native 목표·착수·인계 읽기를 별도로 검증한다 | T/L |
+| H-AP-01 | 미구성 검사는 fingerprint된 실제 프로젝트 정본으로 증명한 `not-applicable`이며 통과 또는 AC 커버리지로 계산하지 않는다 | T |
+| H-AP-02 | 리뷰 금지 정책과 적용 불가 근거가 충돌하면 실제 검사 구성 또는 명시적 정책 변경 경로를 안내하며 조용히 수용하지 않는다 | T |
+| H-AP-03 | 변조된 상태·커버리지·다른 적용 여부·누락 또는 위조된 구성은 재사용·수용하지 않는다 | T |
+| H-AP-04 | 검사 실행 전후와 수용 직전의 모든 입력을 확인하고 실행 도중 변경·복원된 내용도 유효한 증거로 삼지 않는다 | T |
+| H-PO-07 | 사용자 승인 정책 변경은 진행 중인 단위에 공개적으로 적용할 수 있고 기존 결정·증거·효과·소유권을 보존하며 변경된 수용 대상을 재검증한다 | T |
+| H-PO-08 | 디렉터리 경로는 그 하위만 포함하고 비슷한 이름의 형제 경로나 상위 탈출을 포함하지 않는다 | T |
+| H-DG-01 | 발견된 사용자 관리 플러그인 결함은 원인 서명별 정본 이슈와 원본 수정·검증·필수 리뷰·공식 설치 확인을 거쳐 기존 작업에서 재개한다 | T/L |
+| H-DG-02 | 프로젝트 정본과 배포 산출물은 별도 제품의 Studio Kit App 설계와 그 전용 구현에 의존하지 않는다 | S/T |
 
 ## 13. 정책 기본값 요약
 

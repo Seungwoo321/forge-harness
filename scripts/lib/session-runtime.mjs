@@ -1,8 +1,14 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import os from 'node:os';
 import { createCodexTaskTransport } from './codex-task.mjs';
-import { observeTask, taskPackets } from './session-task.mjs';
+import { createClaudeTaskTransport } from './claude-task.mjs';
+import { observeTask, observeGoalTask, taskPackets } from './session-task.mjs';
+import { submitNativeGoal } from './goal-composer.mjs';
 import { codexComposerMatches, submitCodexComposer } from './codex-composer.mjs';
+import { claudeComposerMatches, submitClaudeComposer } from './claude-composer.mjs';
+import { loadManagedLaunch } from './continuity-launch-io.mjs';
+import { createOrcaRuntimeRpc } from './orca-runtime-rpc.mjs';
 
 function invalid(message) {
   return Object.assign(new Error(message), { code: 'SESSION_OBSERVATION_INVALID' });
@@ -21,9 +27,10 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
   if (!['cmux', 'orca'].includes(runtime) || typeof command !== 'function' || typeof launch !== 'function'
     || !parent || typeof parent.sessionId !== 'string' || !parent.sessionId || typeof parent.incarnationId !== 'string' || !parent.incarnationId
     || typeof parent.cwd !== 'string' || !path.isAbsolute(parent.cwd)
-    || (runtimeRpc !== undefined && typeof runtimeRpc !== 'function') || (runtime === 'orca' && typeof runtimeRpc !== 'function')) {
+    || (runtimeRpc !== undefined && typeof runtimeRpc !== 'function')) {
     throw new TypeError('session runtime requires cmux or orca, command, launch, and an exact parent identity');
   }
+  if (runtime === 'orca' && !runtimeRpc) runtimeRpc = createOrcaRuntimeRpc({command,cwd:parent.cwd});
   parent = Object.freeze({ ...parent });
   if (!Number.isSafeInteger(pollAttempts) || pollAttempts < 1 || pollAttempts > 60) throw new TypeError('invalid observation bound');
 
@@ -87,7 +94,7 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
 
   async function inspectOrca(sessionId, cwd) {
     const { terminal } = await orca(['terminal', 'show', '--terminal', sessionId], cwd);
-    if (terminal?.handle !== sessionId || !terminal.incarnationId || terminal.orphaned === true || terminal.executionHostId !== 'local'
+    if (terminal?.handle !== sessionId || !terminal.incarnationId || terminal.executionHostId !== 'local'
       || terminal.connected !== true || terminal.writable !== true) {
       throw invalid('Orca terminal identity is unavailable');
     }
@@ -126,12 +133,33 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     if ((await invoke('ps', ['-p', pid, '-o', 'lstart='], cwd)).trim() !== started) throw invalid('Orca OS process incarnation changed');
     const confirmed = (await orca(['terminal', 'show', '--terminal', sessionId], cwd)).terminal;
     if (confirmed?.handle !== sessionId || confirmed.incarnationId !== terminal.incarnationId || confirmed.worktreePath !== terminal.worktreePath
-      || confirmed.connected !== true || confirmed.writable !== true || confirmed.orphaned === true) throw invalid('Orca terminal changed during observation');
-    return { sessionId: terminal.handle, cwd: paths[0], incarnationId: terminal.incarnationId, executable, pid: foreground.pid, tty, runtime, worktreeId: terminal.worktreeId };
+      || confirmed.connected !== true || confirmed.writable !== true || confirmed.orphaned !== terminal.orphaned) throw invalid('Orca terminal changed during observation');
+    return { sessionId: terminal.handle, cwd: paths[0], incarnationId: terminal.incarnationId, executable, pid: foreground.pid, tty, runtime, worktreeId: terminal.worktreeId, orphaned: terminal.orphaned === true };
   }
 
   const inspect = runtime === 'cmux' ? inspectCmux : inspectOrca;
-  const transportFor = executable => taskTransport ?? (path.basename(executable) === 'codex' ? createCodexTaskTransport({ command, executable,
+  const defaultEnv = executable => path.basename(executable) === 'claude' ? {CLAUDE_CONFIG_DIR:process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(),'.claude')} : undefined;
+  const transportFor = (executable, env) => taskTransport ?? (path.basename(executable) === 'claude' ? createClaudeTaskTransport({ command, env:{...defaultEnv(executable),...env},
+    ...(runtime === 'orca' ? {submitInput: async (request, verifyNative) => {
+      await verifyNative();
+      const result = await orca(['terminal','send','--terminal',request.observed.sessionId,'--text',request.prompt,'--enter','--wait-submit','15'],request.observed.cwd);
+      if (result.accepted !== true && result.receipt?.accepted !== true) throw invalid('Orca did not accept the Claude request');
+    }} : {submitInput: async (request, verifyNative) => {
+      const { observed, prompt } = request;
+      const target = ['--workspace', observed.workspaceId, '--surface', observed.sessionId];
+      const viewport = await cmux(['rpc', 'terminal.viewport', JSON.stringify({workspace_id:observed.workspaceId,surface_id:observed.sessionId})], observed.cwd);
+      if (viewport.surface_id !== observed.sessionId || !Number.isSafeInteger(viewport.columns) || Buffer.byteLength(prompt,'utf8') + 2 > viewport.columns) throw invalid('packet reference does not fit the exact composer viewport');
+      await submitClaudeComposer({prompt,
+        read: () => invoke('cmux',['read-screen',...target],observed.cwd),
+        paste: text => invoke('cmux',['rpc','surface.send_text',JSON.stringify({workspace_id:observed.workspaceId,surface_id:observed.sessionId,text})],observed.cwd),
+        enter: () => invoke('cmux',['send-key',...target,'Return'],observed.cwd),
+        verify: async () => {
+          if (JSON.stringify(await inspect(observed.sessionId,observed.cwd,observed.executable)) !== JSON.stringify(observed)) throw invalid('worker changed before input');
+          await verifyNative();
+        },
+      });
+    }}),
+  }) : path.basename(executable) === 'codex' ? createCodexTaskTransport({ command, executable, env,
     ...(runtime === 'cmux' ? { submitInput: async (request, verifyNative) => {
       const { observed, prompt } = request;
       const target = ['--workspace', observed.workspaceId, '--surface', observed.sessionId];
@@ -150,35 +178,91 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     } } : {}),
   }) : null);
   async function workerIdentity(worker) {
-    const transport = transportFor(worker.executable);
+    const transport = transportFor(worker.executable, parent.workerEnv);
     if (typeof transport?.identity !== 'function') throw invalid('worker identity provider is unavailable');
     const identity = await transport.identity(worker);
     if (typeof identity?.threadId !== 'string' || !identity.threadId) throw invalid('native worker identity is unavailable');
     return { ...worker, threadId: identity.threadId };
   }
 
-  async function findStarted(input) {
+  async function configuredLaunch(args) {
+    if (!args.goalPath) return { argv: await launch(args), env: {} };
+    return loadManagedLaunch(args, runtime);
+  }
+
+  async function findStarted(input, submission) {
     const { args, key } = input;
     const title = marker(key);
-    let matches;
+    const { argv, env, goalPrompt } = await configuredLaunch(args);
+    if (!Array.isArray(argv) || typeof argv[0] !== 'string' || !argv[0]) throw invalid('configured worker executable is missing');
+    const packets = await taskPackets(args);
+    const prompt = goalPrompt ?? (taskPrompt ? await taskPrompt(args, argv) : argv.at(-1));
+    let matches, candidates;
     if (runtime === 'cmux') {
       const tree = await cmux(['tree', '--all'], args.cwd);
       const workspaces = (tree.windows ?? []).flatMap(window => window.workspaces ?? []).filter(item => item.title === title);
       matches = workspaces.flatMap(workspace => (workspace.panes ?? []).flatMap(pane => pane.surfaces ?? [])).filter(item => item.type === 'terminal').map(item => item.id);
     } else {
       const result = await orca(['terminal', 'list', '--worktree', `path:${args.cwd}`], args.cwd);
-      matches = (result.terminals ?? []).filter(item => item.title === title).map(item => item.handle);
+      candidates = result.terminals ?? [];
+      matches = candidates.filter(item => item.title === title).map(item => item.handle);
+    }
+    if (runtime === 'orca' && matches.length === 0 && path.basename(argv[0]) === 'claude') {
+      const index = argv.indexOf('--session-id');
+      const expected = index >= 0 ? argv[index + 1]?.toLowerCase() : undefined;
+      if (expected) {
+        const native = taskTransport ?? createClaudeTaskTransport({command,env:{...defaultEnv(argv[0]),...env}});
+        const found = [];
+        for (const terminal of candidates) {
+          if (terminal.handle === parent.sessionId || !terminal.connected || !terminal.writable) continue;
+          try {
+            const current = await inspect(terminal.handle,args.cwd,argv[0]);
+            if ((await native.identity(current)).threadId === expected) found.push(terminal.handle);
+          } catch {}
+        }
+        matches = found;
+      }
+    }
+    if (runtime === 'orca' && matches.length === 0 && path.basename(argv[0]) === 'codex') {
+      const native = taskTransport ?? createCodexTaskTransport({command,executable:argv[0],env});
+      const found = [];
+      for (const terminal of candidates) {
+        if (terminal.handle === parent.sessionId || !terminal.connected || !terminal.writable) continue;
+        try {
+          const current = await inspect(terminal.handle,args.cwd,argv[0]);
+          const evidence = await (goalPrompt ? native.observeGoal({observed:current,input,prompt,packets}) : native.observe({observed:current,input,prompt,packets}));
+          if (['accepted','queued','started'].includes(evidence.state)) found.push(terminal.handle);
+        } catch {}
+      }
+      matches = found;
     }
     if (matches.length !== 1 || matches[0] === parent.sessionId) throw invalid('successor target is missing or ambiguous');
-    const argv = await launch(args);
-    if (!Array.isArray(argv) || typeof argv[0] !== 'string' || !argv[0]) throw invalid('configured worker executable is missing');
     const observed = await inspect(matches[0], args.cwd, argv[0]);
     if (!observed.executable
       || path.basename(observed.executable) !== path.basename(argv[0])) throw invalid('configured worker executable has not started');
-    const packets = await taskPackets(args);
-    const prompt = taskPrompt ? await taskPrompt(args, argv) : argv.at(-1);
-    const transport = transportFor(argv[0]);
-    const result = await observeTask({ transport, observed, input, prompt, packets, submit: true });
+    const transport = transportFor(argv[0], env);
+    const result = goalPrompt ? await observeGoalTask({ transport, observed, input, prompt, packets, submission, submit: async (_request, beforeWrite) => {
+      const target = ['--workspace', observed.workspaceId, '--surface', observed.sessionId];
+      const read = runtime === 'cmux' ? () => invoke('cmux',['read-screen',...target],observed.cwd) : async () => {
+        const terminal = (await orca(['terminal','read','--terminal',observed.sessionId,'--screen'],observed.cwd)).terminal;
+        if (terminal?.source !== 'screen' || terminal.handle !== observed.sessionId) throw invalid('Orca rendered screen is unavailable');
+        return {screen:Array.isArray(terminal.tail) ? terminal.tail.join('\n') : terminal.tail, draft:terminal.draft};
+      };
+      const orcaSend = async text => {
+        const result = await orca(['terminal','send','--terminal',observed.sessionId,'--text',text],observed.cwd);
+        if (result.send?.accepted !== true) throw invalid('Orca terminal did not accept input');
+      };
+      const write = runtime === 'cmux' ? text => invoke('cmux',['rpc','surface.send_text',JSON.stringify({workspace_id:observed.workspaceId,surface_id:observed.sessionId,text})],observed.cwd)
+        : orcaSend;
+      await submitNativeGoal({provider:path.basename(observed.executable),objective:prompt,read,write,beforeWrite,
+        newline: runtime === 'cmux' ? () => invoke('cmux',['send-key',...target,'shift+enter'],observed.cwd) : () => orcaSend('\x1b[13;2u'),
+        enter: runtime === 'cmux' ? () => invoke('cmux',['send-key',...target,'Return'],observed.cwd) : () => orcaSend('\r'),
+        verify: async () => {
+          if (JSON.stringify(await inspect(observed.sessionId,observed.cwd,observed.executable)) !== JSON.stringify(observed)) throw invalid('worker changed before goal input');
+          if ((await transport.observeGoal({observed,input,prompt,packets})).state !== 'absent') throw invalid('native goal is already present');
+        },
+      });
+    } }) : await observeTask({ transport, observed, input, prompt, packets, submit: true });
     if (JSON.stringify(await inspect(matches[0], args.cwd, argv[0])) !== JSON.stringify(observed)) throw invalid('worker changed during task observation');
     return result;
   }
@@ -189,12 +273,12 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     const observed = await inspect(recipient.sessionId, recipient.cwd, recipient.executable);
     if (observed.incarnationId !== recipient.incarnationId) throw invalid('result recipient incarnation changed');
     const packets = await taskPackets(input.args);
-    const interactive = runtime === 'cmux' && path.basename(observed.executable) === 'codex' && !taskTransport;
+    const interactive = runtime === 'cmux' && ['codex','claude'].includes(path.basename(observed.executable)) && !taskTransport;
     const legacyPrompt = `Receive the completed work result and continue its authorized next action.\n${packets.map(packet => `${packet.path}\n${packet.digest}\n${packet.content}`).join('\n')}`;
     const prompt = interactive
       ? `Read ${input.args.resultPath} (${input.args.resultDigest}); follow its referenced handoffs.`
       : legacyPrompt;
-    const workerTransport = transportFor(observed.executable);
+    const workerTransport = transportFor(observed.executable, parent.recipientEnv);
     const transport = workerTransport && { ...workerTransport, async submit(request) {
       if (!submission || submission.attempted) throw invalid('result submission is uncertain; observation only');
       submission.attempted = true;
@@ -208,7 +292,7 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     try { result ??= await observeTask({ transport, observed, input, prompt, packets, submit: Boolean(submission) && !submission.attempted }); }
     catch (error) {
       if (!submission && error.notApplied === true && runtime === 'cmux' && !taskTransport
-        && codexComposerMatches(await invoke('cmux', ['read-screen', '--workspace', observed.workspaceId, '--surface', observed.sessionId], observed.cwd), prompt)) {
+        && (path.basename(observed.executable) === 'claude' ? claudeComposerMatches : codexComposerMatches)(await invoke('cmux', ['read-screen', '--workspace', observed.workspaceId, '--surface', observed.sessionId], observed.cwd), prompt)) {
         error.pendingComposer = true;
       }
       throw error;
@@ -290,16 +374,19 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       if (input.effect === 'session.deliver') { const submission = {}; return poll(() => deliver(input, submission)); }
       if (input.effect === 'session.close') return close(input, false);
       if (input.effect !== 'session.start' || !path.isAbsolute(input.args?.cwd ?? '')) throw invalid('unsupported session effect');
-      const argv = await launch(input.args);
+      const { argv, env, goalPrompt } = await configuredLaunch(input.args);
+      if (goalPrompt && /[\r\t\0\x1b]/.test(goalPrompt)) throw invalid('native goal contains unsupported input');
       if (!Array.isArray(argv) || !argv.length || argv.some(value => typeof value !== 'string' || !value || value.includes('\0'))) throw invalid('launch must return a nonempty argument vector');
-      const text = `cd -- ${quote(input.args.cwd)} && exec ${argv.map(quote).join(' ')}`;
+      const assignments = Object.entries(env).map(([key, value]) => `${key}=${quote(value)}`).join(' ');
+      const text = `cd -- ${quote(input.args.cwd)} && ${assignments ? `${assignments} ` : ''}exec ${argv.map(quote).join(' ')}`;
       if (runtime === 'cmux') {
         // Mutation acknowledgments can be plain text; completion requires live observation below.
         await invoke('cmux', ['--json', '--id-format', 'uuids', 'new-workspace', '--name', marker(input.key), '--cwd', input.args.cwd, '--command', text, '--focus', 'false'], input.args.cwd);
       } else {
         await orca(['terminal', 'create', '--worktree', `path:${input.args.cwd}`, '--title', marker(input.key), '--command', text], input.args.cwd);
       }
-      return poll(() => findStarted(input));
+      const submission = {};
+      return poll(() => findStarted(input, submission));
     },
     async verify(input) {
       try {

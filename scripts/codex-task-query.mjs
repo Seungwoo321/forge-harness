@@ -17,6 +17,10 @@ try {
       return { threadId: candidates[0] };
     }
     const { thread } = await rpc('thread/read', { threadId, includeTurns: false });
+    if (operation === 'goal') {
+      const { goal } = await rpc('thread/goal/get', { threadId });
+      return { thread: { id: thread.id, cwd: thread.cwd }, goal };
+    }
     const turns = [];
     let cursor = null;
     do {
@@ -31,13 +35,14 @@ try {
       queued.push(...page.data);
       cursor = page.nextCursor;
     } while (cursor);
+    const goal = operation === 'goal-observe' ? (await rpc('thread/goal/get', { threadId })).goal : undefined;
     if (operation === 'queue') {
       const accepted = turns.some(turn => turn.items.some(item => item.type === 'userMessage' && item.clientId === clientId));
       if (!accepted && !queued.some(item => item.clientUserMessageId === clientId)) {
         await rpc('thread/queue/add', { threadId, clientUserMessageId: clientId, input: [{ type: 'text', text: prompt, text_elements: [] }] });
       }
-    } else if (operation !== 'read') throw new Error('unsupported worker operation');
-    return { thread: { id: thread.id, cwd: thread.cwd }, turns, queued };
+    } else if (!['read', 'goal-observe'].includes(operation)) throw new Error('unsupported worker operation');
+    return { thread: { id: thread.id, cwd: thread.cwd }, turns, queued, ...(operation === 'goal-observe' ? { goal } : {}) };
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (error) { process.stderr.write(`${error.message}\n`); process.exitCode = 1; }

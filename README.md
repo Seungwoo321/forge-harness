@@ -11,10 +11,11 @@ Run development work through scope → implementation → deterministic gates �
 - **수용 기준과 증거**: 게이트 결과는 입력 fingerprint에 결속된다. 같은 입력의 증거는 재사용하며, 리뷰는 정책에 따라 독립 세션에서 수행한다.
 - **명시적 권한**: 단건 태스크·출시 전 제품·출시된 제품의 정책으로 권한과 리뷰를 정한다. 설치만으로 commit·push·배포 권한을 주지 않는다.
 - **중단과 재개**: 실패를 분류하고 같은 원인에 대한 재시도 상한을 지킨다. 원장을 통해 외부 효과를 재관찰하며 앞으로 수정한다.
+- **목표 연속성**: 전체 목표·남은 단위·실행 정책을 보존하고 확인된 인계 후에만 기존 관리 세션을 종료한다.
 
 ## 준비
 
-Node.js **22 이상**, Git, 플러그인 명령을 지원하는 Claude Code 또는 Codex가 필요하다. 런타임 Node 의존성은 없다. 개발 검증에만 pnpm을 쓴다. 호스트의 모델 사용에는 해당 호스트의 로그인·구독 또는 API 설정이 필요하다.
+Node.js **22 이상**, Git, 플러그인 명령을 지원하는 Claude Code 또는 Codex가 필요하다. 목표 저장소의 프로세스 잠금은 macOS의 `lockf`, Linux의 `flock`, Windows의 PowerShell을 사용한다. 런타임 Node 의존성은 없다. 개발 검증에만 pnpm을 쓴다. 호스트의 모델 사용에는 해당 호스트의 로그인·구독 또는 API 설정이 필요하다.
 
 이 패키지는 제어면과 스킬을 제공한다. 정책·scope·implement 입력 생성은 바로 실행한다. 전체 게이트·전달·세션 전환은 사용 환경의 [런타임 어댑터](docs/runtime-adapters.md)를 명시적으로 연결한다.
 
@@ -87,6 +88,8 @@ codex plugin add forge-harness@forge-harness
 | 런타임 모듈 `--adapters` | Git 관찰·게이트·작업관리·전달·세션 실행 연결 |
 
 기본 상태 위치는 Git 공통 디렉터리의 `work-state/`다. worktree끼리 공유한다. workspace/global 정책은 별도 루트로 지정한다. 설정 값과 출처는 [첫 실행 안내](docs/getting-started.md), 어댑터 API는 [런타임 연결](docs/runtime-adapters.md), 전체 계약은 [제품 명세](docs/spec.md)에 있다.
+
+전체 목표는 `goal-register`로 등록하고 관리 세션은 `session-start`로 시작한다. 단위 완료, 실제 차단, 독립 리뷰 반환에는 각각 `session-finish`, `session-stop`, `session-return`을 사용한다. 실행 정책은 cmux 또는 Orca, 계정 설정 디렉터리, 실행 명령, 모델과 effort를 명시한다. Stop 훅은 호스트에서 활성화되고 신뢰된 경우에 작동하며, 사용자 중단과 호스트의 반복 제한은 유지한다.
 
 플러그인은 Node·Git 명령을 실행하고 프로젝트 파일, Git 체크포인트 ref, 로컬 작업 기록을 쓸 수 있다. 연결한 어댑터와 호스트 권한이 실제 외부 효과를 결정한다. 런타임 모듈은 신뢰하는 로컬 코드만 사용한다. 모델 호출은 호스트가 맡으며 패키지 자체에는 원격 MCP 서버나 분석 수집 코드가 없다. Claude Code의 시작 훅은 정책 유무 안내를 출력한다.
 

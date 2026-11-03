@@ -1,6 +1,7 @@
 import { open, mkdir, readFile, appendFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { authorizeEffect, effectDefinition, prepareEffect } from './policy.mjs';
+import { effectArgsDigest } from './approvals.mjs';
 
 function unitPathPart(unit) {
   if (typeof unit !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(unit) || unit === '.' || unit === '..') {
@@ -130,6 +131,8 @@ export async function executeEffect({
     const intents = records.filter(row => row.event === 'intent' && row.key === prepared.key);
     const priorIntent = intents.at(-1);
     if (priorIntent) {
+      if (effect === 'session.start' && effectArgsDigest(priorIntent.args) !== effectArgsDigest(args))
+        throw errorWithCode('EFFECT_UNCERTAIN', 'session start requires its original complete arguments');
       const result = records.findLast(row => row.event === 'result' && row.seq === priorIntent.seq);
       let closedPr = false;
       let retry = false;

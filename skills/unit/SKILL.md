@@ -14,7 +14,7 @@ Resolve this skill's installed directory first. The package root is two director
 3. After policy confirmation, rerun the exact same `unit start` command and request file. The CLI resolves policy and creates the Unit Record atomically; it does not infer `goal.class` from repository clues.
 4. On success, open the `scope` stage with `unit stage open <unit> scope` and pass the resulting StageInput to the scope stage.
 
-The request JSON contains `kind` and `request: {text, userInputRef}`; optional `canon` entries are `{path,digest}`. See the packaged `docs/getting-started.md` for a runnable first stage and adapter requirements. Do not fabricate a user-input reference or infer confirmation.
+For managed continuity, first register the overall goal with `goal-register` and put its `goalId` in the unit request. Session startup and finish use the `session-start` and `session-finish` skills; a unit without a goal cannot finish under the new continuity contract. The request JSON contains `kind` and `request: {text, userInputRef}`; optional `canon` entries are `{path,digest}`. See the packaged `docs/getting-started.md` for a runnable first stage and adapter requirements. Do not fabricate a user-input reference or infer confirmation.
 
 For non-interactive starts, pass `--non-interactive`. The CLI uses the configured policy or the conservative `task` default with `unconfirmed-default` provenance and does not load `policy-setup`.
 

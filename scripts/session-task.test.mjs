@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { observeTask, taskDigest, validateTaskReceipt } from './lib/session-task.mjs';
+import { observeTask, observeGoalTask, taskDigest, validateTaskReceipt } from './lib/session-task.mjs';
 import { createCodexTaskTransport } from './lib/codex-task.mjs';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
@@ -24,6 +24,27 @@ test('pending input submits conditionally once; accepted input never submits twi
     assert.equal((await observeTask({ transport, observed, input, prompt: 'prompt', packets, submit: true })).task.activityId, 'tool');
   }
   assert.equal(sends, 1);
+});
+
+test('native goal submission is never repeated after an uncertain result', async () => {
+  let state='absent', sends=0;
+  const goalInput={...input,args:{...input.args,goalPath:packets[0].path,goalDigest:packets[0].digest}};
+  const evidence={state:'started',threadId:'thread',turnId:'turn',activityId:'activity',packets,
+    goal:{threadId:'thread',status:'active',objective:'finish'}};
+  const transport={observeGoal:async()=>state==='started'?evidence:{state}};
+  const submission={}, options={transport,observed,input:goalInput,prompt:'finish',packets,submission,submit:async(_request,mark)=>{mark();sends+=1;}};
+  await assert.rejects(observeGoalTask(options),/has not started/);
+  await assert.rejects(observeGoalTask(options),/has not started/);
+  await assert.rejects(observeGoalTask({...options,submission:undefined}),/has not started/);
+  assert.equal(sends,1);
+  assert.throws(()=>validateTaskReceipt({...observed,task:{...observed,...started,schema:'harness.task-receipt/1',effectKey:goalInput.key}},goalInput),/receipt/);
+  const preflight = {};
+  await assert.rejects(observeGoalTask({...options,submission:preflight,submit:async()=>{throw Error('not ready');}}),/not ready/);
+  assert.equal(preflight.attempted,undefined);
+  state='started';
+  assert.equal((await observeGoalTask(options)).task.schema,'harness.goal-receipt/1');
+  evidence.goal.objective='wrong';
+  await assert.rejects(observeGoalTask(options),/receipt/);
 });
 
 test('native metadata selects the unique primary thread among child locks and rejects ambiguity', async t => {
@@ -58,6 +79,39 @@ test('multi-lock identity must belong to the observed process and remains fenced
   assert.deepEqual(await transport.identity(observed), { threadId: root });
   chosen = 'unowned';
   await assert.rejects(transport.identity(observed), /not owned/);
+});
+
+test('native goal observation is bound to the same worker thread and directory', async () => {
+  const threadId = '00000000-0000-0000-0000-000000000001';
+  let cwd = observed.cwd;
+  const transport = createCodexTaskTransport({ command: async (binary, _args, options) => {
+    if (binary === 'lsof') return { exitCode: 0, stdout: `n/x/thread-writer-locks/${threadId}.lock\n` };
+    const request = JSON.parse(options.input);
+    assert.equal(request.operation, 'goal');
+    return { exitCode: 0, stdout: JSON.stringify({ thread: { id: threadId, cwd }, goal: { threadId, status: 'active', objective: 'complete work' } }) };
+  } });
+  assert.equal((await transport.goal(observed)).objective, 'complete work');
+  cwd = '/other';
+  await assert.rejects(transport.goal(observed), /thread changed/);
+});
+
+test('goal activity must follow native goal creation and needs no ordinary user message', async () => {
+  const threadId = '00000000-0000-0000-0000-000000000001';
+  let startedAt = 10, itemStartedAt = 10999;
+  const transport = createCodexTaskTransport({ command: async (binary, _args, options) => {
+    if (binary === 'lsof') return { exitCode: 0, stdout: `n/x/thread-writer-locks/${threadId}.lock\n` };
+    assert.equal(JSON.parse(options.input).operation, 'goal-observe');
+    return { exitCode: 0, stdout: JSON.stringify({ thread: { id: threadId, cwd: observed.cwd },
+      goal: { threadId, status: 'active', objective: 'finish', createdAt: 10 },
+      turns: [{ id: 'turn', startedAt, status: 'inProgress', items: [{ type: 'agentMessage', id: 'activity', startedAtMs:itemStartedAt }] }], queued: [] }) };
+  } });
+  const request = { observed, input, prompt: 'finish', packets: [] };
+  assert.equal((await transport.observeGoal(request)).state, 'accepted');
+  itemStartedAt = 11000;
+  assert.equal((await transport.observeGoal(request)).activityId, 'activity');
+  itemStartedAt = 10999; startedAt = 11;
+  assert.equal((await transport.observeGoal(request)).activityId, 'activity');
+  await assert.rejects(transport.observeGoal({ ...request, prompt: 'different' }), /differs/);
 });
 
 test('upgrading a legacy full-packet delivery observes its receipt or queue without submitting a new prompt', async t => {

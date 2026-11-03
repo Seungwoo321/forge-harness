@@ -15,7 +15,7 @@ export async function runPublicUnitCli(argv, { cwd = process.cwd(), contractsDir
     if (options.adapters) {
       const module = await import(pathToFileURL(path.resolve(cwd, options.adapters)).href);
       if (typeof module.createRuntimeAdapters !== 'function') throw new TypeError('adapter module must export createRuntimeAdapters');
-      providers = await module.createRuntimeAdapters({ cwd, adapters: core });
+      providers = await module.createRuntimeAdapters({ cwd, adapters: core, options, argv });
       if (!providers || typeof providers !== 'object' || Array.isArray(providers)
         || Object.keys(providers).some(key => !['git', 'gates', 'tracker', 'sessionRunner', 'repository', 'provider', 'effect', 'effectContext'].includes(key))) {
         throw new TypeError('runtime providers may register only git, gates, tracker, sessionRunner, repository, provider, effect, and effectContext');
@@ -37,7 +37,7 @@ export async function runPublicUnitCli(argv, { cwd = process.cwd(), contractsDir
     const session = createAdapters({ sessionRunner }).session;
     const output = await runUnitCli(argv, { cwd, contractsDir, adapters: Object.freeze({ ...core, ...injected, session }) });
     const result = JSON.parse(output.slice(output.lastIndexOf('RESULT ') + 7));
-    if (argv[0] === 'unit' && argv[1] === 'finish' && result.finalizePending && options.adapters) {
+    if (argv[0] === 'unit' && ['finish', 'session-stop', 'session-return'].includes(argv[1]) && result.finalizePending && options.adapters) {
       const directory = path.join(result.stateRoot, 'units', argv[2]);
       await mkdir(directory, { recursive: true });
       const arguments_ = [fileURLToPath(new URL('../unit.mjs', import.meta.url)), 'unit', 'finalize', argv[2], '--adapters', path.resolve(cwd, options.adapters)];

@@ -132,3 +132,34 @@ test('PUBLIC-E4-INVALID-APPROVAL: irreversible delivery consumes the same Unit b
   await denied;
   assert.deepEqual(await f.ledger.withLock('demo', entries => entries.read()), []);
 });
+
+test('ordinary effect cannot use authority superseded while waiting for custody', async t => {
+  const f=await fixture(t), waiting=latch(), release=latch();
+  t.after(()=>release.resolve());
+  await f.store.update('demo',current=>({...current,state:'Implementing',accepted:null,policy:{...current.policy,delivery:'merge'}}));
+  await writeFile(path.join(f.root,'push.json'),JSON.stringify({repo:'demo/repo',branch:'feature',head:'h1'}));
+  f.adapters.effectContext=async()=>{waiting.resolve();await release.promise;return {resourceOwned:true,productOwned:true,inScope:true,operational:false,irreversible:false,containsSecret:false,forbiddenCommand:false,explicitUserInstruction:true};};
+  const effect=f.call(['unit','effect','demo','--effect','git.push','--args','push.json']);
+  await waiting.promise;
+  const before=await f.store.update('demo',current=>({...current,state:'SelfGated'}));
+  const {changeUnitDelivery}=await import('./lib/unit-policy-change.mjs');
+  await changeUnitDelivery({stateRoot:f.root,store:f.store,unit:'demo',request:{id:'downgrade',expectedRevision:before.revision,delivery:'none',reason:'authorized downgrade'},userInputRef:'user-1',adapters:f.adapters});
+  release.resolve();
+  assert.equal((await effect).error,'EFFECT_DENIED'); assert.equal(f.applied(),0);
+  assert.deepEqual(await f.ledger.withLock('demo',ledger=>ledger.read()),[]);
+});
+
+test('ordinary effect rejects a policy changed away and back before custody', async t => {
+  const f=await fixture(t), waiting=latch(), release=latch();
+  t.after(()=>release.resolve());
+  await f.store.update('demo',current=>({...current,state:'Implementing',accepted:null,policy:{...current.policy,delivery:'merge'}}));
+  await writeFile(path.join(f.root,'push.json'),JSON.stringify({repo:'demo/repo',branch:'feature',head:'h1'}));
+  f.adapters.effectContext=async()=>{waiting.resolve();await release.promise;return {resourceOwned:true,productOwned:true,inScope:true,operational:false,irreversible:false,containsSecret:false,forbiddenCommand:false,explicitUserInstruction:true};};
+  const effect=f.call(['unit','effect','demo','--effect','git.push','--args','push.json']); await waiting.promise;
+  await f.store.update('demo',current=>({...current,state:'SelfGated'}));
+  const {changeUnitDelivery}=await import('./lib/unit-policy-change.mjs');
+  for (const delivery of ['none','merge']) {const current=await f.store.read('demo');
+    await changeUnitDelivery({stateRoot:f.root,store:f.store,unit:'demo',request:{id:`change-${delivery}`,expectedRevision:current.revision,delivery,reason:'authorized'},userInputRef:'user-1',adapters:f.adapters});}
+  await f.store.update('demo',current=>({...current,state:'Implementing'})); release.resolve();
+  assert.equal((await effect).error,'EFFECT_DENIED'); assert.equal(f.applied(),0);
+});

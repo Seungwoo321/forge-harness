@@ -64,3 +64,11 @@ test('CLI keeps a machine-readable RESULT line after human output', () => {
   assert.match(output, /^blocked by policy\nRESULT \{"code":3,"summary":"blocked by policy","state":"Stopped"\}$/);
   assert.throws(() => formatCliResult({ code: 0, summary: 'ok', details: { code: 42 } }), /code/);
 });
+
+test('same-session unit results retain work without a session-end marker', () => {
+  const content=result({kind:'continue',unit:'next-work'});
+  assert.doesNotMatch(content,/단위 종료 —/);
+  assert.throws(()=>validateUnitResult(content),/canonical unit outcome/);
+  assert.equal(validateUnitResult(content,{allowContinuing:true}).outcome,'다음 작업 단위: next-work');
+  assert.throws(()=>validateUnitResult('다음 작업 단위: next-work',{allowContinuing:true}),/canonical unit outcome/);
+});

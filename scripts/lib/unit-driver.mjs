@@ -20,6 +20,8 @@ import { acceptedDeliveryMetadata, validateDeliveryContext } from './delivery-fl
 import { validateAcceptedContent } from './delivery.mjs';
 import { resolveFindings } from './finding-resolution.mjs';
 import { recheckScope } from './scope-recheck.mjs';
+import { changeUnitDelivery } from './unit-policy-change.mjs';
+import { attemptsFor } from './stage-attempts.mjs';
 
 const controlPlaneFields = new Set([
   'request', 'unit', 'kind', 'goal', 'policy', 'policySources', 'canon', 'tracker', 'isolation',
@@ -107,14 +109,6 @@ function readinessFor(contract, record, contracts) {
 async function readContracts(contractsDir) {
   const names = ['scope', 'implement', 'root-cause', 'review', 'handoff'];
   return Promise.all(names.map(async stage => JSON.parse(await readFile(contractFile(contractsDir, stage), 'utf8'))));
-}
-
-function attemptsFor(record, stage) {
-  const entry = (record.stages ?? []).find(item => item.name === stage);
-  if (!entry) return [];
-  return entry.attempts ?? (Number.isSafeInteger(entry.attempt) ? [{
-    ...entry, n: entry.attempt, endedAt: entry.endedAt ?? entry.submittedAt ?? null,
-  }] : []);
 }
 
 function firstCheckpoint(record) {
@@ -225,7 +219,8 @@ async function runProgress(stateRoot, unit) {
   const record = await createUnitStateStore(stateRoot).read(unit);
   if (!record) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
   const progress = acceptanceProgress(record);
-  return formatCliResult({ code: 0, summary: `Unit ${unit} acceptance progress`, details: { unit, progress, kind: record.kind, canon: record.canon, acceptance: record.acceptance } });
+  const effectiveDelivery = record.policyOverrides?.delivery ?? record.policy?.delivery ?? 'none';
+  return formatCliResult({ code: 0, summary: `Unit ${unit} acceptance progress`, details: { unit, state: record.state, revision: record.revision, effectiveDelivery, progress, kind: record.kind, canon: record.canon, acceptance: record.acceptance } });
 }
 
 function usageError(message) {
@@ -658,13 +653,20 @@ async function runEffect({ stateRoot, unit, options, adapters, cwd }) {
   const result = await executeEffect({
     unit, effect: options.effect, args, policy, approvalRef: options.approval ?? null,
     context: { ...context, explicitUserInstruction: context.explicitUserInstruction === true },
-    // Ledger first lets queued revocations commit; Unit custody orders execution against later revocations.
-    store: irreversible ? { withLock: (id, action) => ledgerStore.withLock(id, ledger => store.withLock(id, async current => {
-      await validateTarget(current);
-      await resolveEffectApproval({ record: current, effect: options.effect, args, approvalRef: options.approval, provider: adapters.provider });
-      await validateTarget(current);
+    // Ledger then Unit custody serializes authorization with policy changes and revocations.
+    store: { withLock: (id, action) => ledgerStore.withLock(id, ledger => store.withLock(id, async current => {
+      const currentPolicy = resolvePolicy({ unit: current.policyOverrides ?? {}, project: current.policy ?? {} }, { nonInteractive: true }).policy;
+      if (digest({ policy: currentPolicy, epoch: current.policyChanges?.at(-1)?.revision ?? 0 }) !== digest({ policy, epoch: record.policyChanges?.at(-1)?.revision ?? 0 })
+        || (irreversible ? !['Accepted', 'Delivering'].includes(current.state) : current.state !== 'Implementing')) {
+        throw Object.assign(new Error('effect state or policy changed before execution'), { code: irreversible ? 'EFFECT_APPROVAL_REQUIRED' : 'EFFECT_DENIED' });
+      }
+      if (irreversible) {
+        await validateTarget(current);
+        await resolveEffectApproval({ record: current, effect: options.effect, args, approvalRef: options.approval, provider: adapters.provider });
+        await validateTarget(current);
+      }
       return await action(ledger);
-    })) } : ledgerStore,
+    })) },
     adapter: { ...adapters.effect, now: () => adapters.now() },
   });
   return { code: result.status === 'uncertain' ? 3 : 0, summary: `Effect ${options.effect}: ${result.status}`, details: { unit, effect: options.effect, status: result.status, key: result.key } };
@@ -812,6 +814,9 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
   }
   const profile = selectProfile(record.kind);
   const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
+  const policyDigest = digest({ policy, epoch: record.policyChanges?.at(-1)?.revision ?? 0 });
+  const policyMatches = current => digest({ policy: resolvePolicy({ unit: current.policyOverrides ?? {}, project: current.policy ?? {} }, { nonInteractive: true }).policy,
+    epoch: current.policyChanges?.at(-1)?.revision ?? 0 }) === policyDigest;
   const target = await adapters.git.inspectUnit({ unit, record });
   if (typeof target?.head !== 'string' || !target.head || typeof target.contentFingerprint !== 'string' || !target.contentFingerprint) {
     throw Object.assign(new Error('Git adapter must return the unit head and content fingerprint'), { code: 'ADAPTER_INVALID' });
@@ -893,7 +898,9 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
     return formatCliResult({ code: 1, summary: 'Accepted target changed and requires revalidation', details: { unit, state: record.state, reason: evaluation.reason } });
   }
   if (reviewResolution.required && evaluation.reason === 'matching ship review is required') {
+    let policyChanged = false;
     record = await store.update(unit, current => {
+      if (!policyMatches(current)) { policyChanged = true; return current; }
       const updated = { ...current, head: target.head, contentFingerprint: target.contentFingerprint,
         ...(current.head !== target.head || current.contentFingerprint !== target.contentFingerprint ? { diff: null, handoff: null } : {}),
         reviewDecision, reviewedHead: null, verdict: null, accepted: null };
@@ -901,6 +908,7 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
       return current.state === 'Accepted'
         ? transitionRecord(transitionRecord(updated, 'SelfGated'), 'InReview') : transitionRecord(updated, 'InReview');
     });
+    if (policyChanged) return formatCliResult({ code: 1, summary: 'Policy changed during acceptance; revalidation is required', details: { unit, state: record.state } });
     return formatCliResult({ code: 20, summary: `Independent ${reviewResolution.by} review is required`, details: { unit, state: record.state, reviewDecision } });
   }
   if (!evaluation.ok) {
@@ -911,6 +919,7 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
   let commitFailure = null;
   let acceptedCoverage = evaluation.coverage;
   record = await store.update(unit, async current => {
+    if (!policyMatches(current)) { commitFailure = 'Policy changed during acceptance; revalidation is required'; return current; }
     const finalTarget = await adapters.git.inspectUnit({ unit, record: current });
     if (finalTarget?.head !== target.head || finalTarget?.contentFingerprint !== target.contentFingerprint
       || policy.delivery !== 'none' && ['repo', 'branch', 'tree', 'indexTree', 'headTree', 'base'].some(field => finalTarget?.[field] !== target[field])) {
@@ -1071,8 +1080,15 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
       return await runEvidenceRerun({ stateRoot: effectiveRoot, unit, gateId: parsed.options.gate, adapters, cwd });
     }
-    if (noun !== 'unit' || !['start', 'scope', 'finding', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
+    if (noun !== 'unit' || !['start', 'scope', 'finding', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'policy'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
     const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
+    if (subcommand === 'policy') {
+      const [action, unit] = rest;
+      if (action !== 'change' || rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit policy change requires <unit> --request <file> --user-input <ref>');
+      const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'unit policy change request', 'CLI_USAGE');
+      const change = await changeUnitDelivery({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, request, userInputRef: parsed.options['user-input'], adapters });
+      return formatCliResult({ code: 0, summary: `Policy changed for ${unit}`, details: { unit, change } });
+    }
     if (subcommand === 'finding') {
       const [action, unit] = rest;
       if (action !== 'resolve' || rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit finding resolve requires <unit> --request <file> --user-input <ref>');

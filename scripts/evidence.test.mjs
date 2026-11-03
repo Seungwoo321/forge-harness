@@ -171,3 +171,31 @@ test('historical and duplicate passes cannot restore invalidated gate coverage o
     assert.equal(evaluateAcceptance({ head: 'h', currentHead: 'h', contentFingerprint: 'c', currentContentFingerprint: 'c', requiredGates: ['tests'], evidence }).ok, false);
   }
 });
+
+test('an absent project check is recorded honestly and needs a matching independent review', async () => {
+  const applicability={state:'not-applicable',reason:'No typecheck script is configured',evidencePath:'package.json'};
+  const gate={id:'typecheck',format:'exec',command:['check-applicability'],files:[{path:'package.json',content:'{"scripts":{"test":"node test"}}'}],applicability};
+  const stored=[];
+  const adapter={latest:async()=>stored.at(-1),run:async()=>({exit:0,ok:true,report:'{"scripts":{"test":"node test"}}',reportPath:'package.json',covers:['AC-1']}),persist:async(_id,update)=>{const row=update(stored.at(-1));stored.push(row);return row}};
+  const fingerprint=gateFingerprint(gate), result=await runGate({gate,fingerprint,adapter});
+  const forged={...result.record,status:'passed',covers:['AC-1']};
+  assert.equal(canReuseEvidence(forged,fingerprint,gate),false);
+  assert.equal(canReuseEvidence(result.record,fingerprint,gate),true);
+  for (const damaged of [{...result.record,report:null}, {...result.record,digest:null}, {...result.record,digest:'sha256:'+'0'.repeat(64)}, {...result.record,report:'other.json'}]) {
+    assert.equal(canReuseEvidence(damaged,fingerprint,gate),false);
+    assert.equal(evaluateAcceptance({head:'h',currentHead:'h',contentFingerprint:'c',currentContentFingerprint:'c',requiredGates:['typecheck'],evidence:[damaged],review:{verdict:'ship',head:'h',contentFingerprint:'c'}}).ok,false);
+  }
+  for (const content of ['null','[]','42','"text"']) await assert.rejects(runGate({gate:{...gate,files:[{path:'package.json',content}]},fingerprint,adapter}),/configuration must be an object/);
+
+  assert.equal(result.record.status,'not-applicable');assert.deepEqual(result.record.covers,[]);
+  assert.equal(acceptanceCoverage([{id:'AC-1'}],[{...result.record,covers:['AC-1']}]).ok,false);
+  assert.notEqual(fingerprint,gateFingerprint({...gate,applicability:{...applicability,reason:'different'}}));
+  const target={head:'h',currentHead:'h',contentFingerprint:'c',currentContentFingerprint:'c',requiredGates:['typecheck'],evidence:[result.record]};
+  assert.equal(evaluateAcceptance({...target,acceptance:[{id:'AC-1'}]}).reason,'acceptance criteria are uncovered');
+  assert.equal(evaluateAcceptance(target).reason,'matching ship review is required');
+  assert.equal(evaluateAcceptance({...target,review:{verdict:'ship',head:'h',contentFingerprint:'stale'}}).ok,false);
+  assert.equal(evaluateAcceptance({...target,review:{verdict:'ship',head:'h',contentFingerprint:'c'}}).ok,true);
+  await assert.rejects(runGate({gate:{...gate,id:'tests'},fingerprint,adapter}),/invalid gate applicability/);
+  await assert.rejects(runGate({gate:{...gate,files:[{path:'package.json',content:'{"scripts":{"typecheck":"tsc"}}'}]},fingerprint,adapter}),/configured gate/);
+  await assert.rejects(runGate({gate:{...gate,files:[]},fingerprint,adapter}),/project configuration/);
+});

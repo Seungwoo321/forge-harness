@@ -14,7 +14,7 @@ function digest(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
-export function gateFingerprint({ files, command, config = {}, toolVersions = {} }) {
+export function gateFingerprint({ files, command, config = {}, toolVersions = {}, applicability }) {
   if (!Array.isArray(files) || files.length === 0) return null;
   const rows = files.map(file => {
     if (typeof file.path !== 'string' || file.path.length === 0 || file.content === undefined) {
@@ -23,10 +23,27 @@ export function gateFingerprint({ files, command, config = {}, toolVersions = {}
     const content = Buffer.isBuffer(file.content) ? file.content : Buffer.from(String(file.content));
     return { path: file.path, mode: file.mode ?? null, digest: digest(content) };
   }).sort((a, b) => a.path.localeCompare(b.path));
-  return `sha256:${digest(JSON.stringify(stable({ files: rows, command, config, toolVersions })))}`;
+  return `sha256:${digest(JSON.stringify(stable({ files: rows, command, config, toolVersions, ...(applicability === undefined ? {} : {applicability}) })))}`;
 }
 
-export function canReuseEvidence(previous, fingerprint) {
+function validateApplicability(gate) {
+  if (gate.applicability === undefined) return null;
+  const item = gate.applicability;
+  if (!item || item.state !== 'not-applicable' || gate.format !== 'exec' || !['typecheck','build'].includes(gate.id)
+    || typeof item.reason !== 'string' || !item.reason.trim() || item.evidencePath !== 'package.json'
+    || Object.keys(item).some(key=>!['state','reason','evidencePath'].includes(key))) throw new TypeError('invalid gate applicability');
+  const files = gate.files?.filter(file=>file.path === item.evidencePath);
+  if (files?.length !== 1 || gate.files.length !== 1) throw new TypeError('gate applicability requires only the project configuration');
+  let configuration;
+  try { configuration = JSON.parse(String(files[0].content)); } catch { throw new TypeError('gate applicability configuration is invalid'); }
+  if (!configuration || typeof configuration !== 'object' || Array.isArray(configuration)) throw new TypeError('gate applicability configuration must be an object');
+  const scripts = configuration.scripts;
+  if (scripts !== undefined && (!scripts || typeof scripts !== 'object' || Array.isArray(scripts))) throw new TypeError('project scripts are invalid');
+  if (Object.hasOwn(scripts ?? {},gate.id)) throw new TypeError('configured gate cannot be not applicable');
+  return { ...item, configDigest: `sha256:${digest(Buffer.from(String(files[0].content)))}` };
+}
+
+export function canReuseEvidence(previous, fingerprint, gate) {
   return Boolean(previous
     && previous.fingerprint === fingerprint
     && fingerprint
@@ -34,7 +51,14 @@ export function canReuseEvidence(previous, fingerprint) {
     && previous.failureClass == null
     && previous.nondeterministic !== true
     && previous.status !== 'pending'
-    && previous.judge?.status !== 'pending');
+    && previous.judge?.status !== 'pending'
+    && (!gate || (gate.applicability
+      ? previous.status === 'not-applicable' && previous.applicability?.state === gate.applicability.state
+        && previous.applicability?.reason === gate.applicability.reason && previous.applicability?.evidencePath === gate.applicability.evidencePath
+        && previous.applicability?.configDigest === `sha256:${digest(Buffer.from(String(gate.files[0].content)))}`
+        && previous.report === gate.applicability.evidencePath && previous.digest === previous.applicability.configDigest
+        && Array.isArray(previous.covers) && previous.covers.length === 0
+      : previous.status === 'passed' && previous.applicability === undefined)));
 }
 
 function hasPendingJudge(result) {
@@ -157,7 +181,7 @@ export function hasInvalidEvidence(evidence = []) {
 export function acceptanceCoverage(acceptance, evidence) {
   const covered = new Set();
   for (const record of currentEvidence(evidence)) {
-    if (!record || record.exit !== 0 || record.nondeterministic === true || record.status === 'pending'
+    if (!record || record.exit !== 0 || record.nondeterministic === true || ['pending','not-applicable'].includes(record.status)
       || record.judge?.status === 'pending' || record.failureClass != null) continue;
     for (const id of record.covers ?? []) covered.add(id);
   }
@@ -172,8 +196,9 @@ export async function runGate({ gate, fingerprint, adapter, independent = false 
   if (!adapter || typeof adapter.latest !== 'function' || typeof adapter.run !== 'function' || typeof adapter.persist !== 'function') {
     throw new TypeError('gate adapter must implement latest, run, and persist');
   }
+  const applicability = validateApplicability(gate);
   const prior = await adapter.latest(gate.id);
-  if (!independent && canReuseEvidence(prior, fingerprint)) return { record: prior, reused: true };
+  if (!independent && canReuseEvidence(prior, fingerprint, gate)) return { record: prior, reused: true };
   const result = await adapter.run(gate);
   const parsed = parseGateReport({ ...gate, ...result, result });
   const resultRecord = {
@@ -187,10 +212,11 @@ export async function runGate({ gate, fingerprint, adapter, independent = false 
     ...(result?.verdict !== undefined ? { verdict: result.verdict } : {}),
     ...(result?.path !== undefined ? { path: result.path } : {}),
     ...(result?.key !== undefined ? { key: result.key } : {}),
-    covers: parsed.ok ? parsed.covers : [],
+    covers: parsed.ok && !applicability ? parsed.covers : [],
     tests: parsed.tests ?? [],
     failureClass: parsed.failureClass ?? (parsed.ok || parsed.pending ? null : 'unknown'),
-    status: parsed.pending ? 'pending' : parsed.ok ? 'passed' : 'failed',
+    status: parsed.pending ? 'pending' : parsed.ok ? applicability ? 'not-applicable' : 'passed' : 'failed',
+    ...(parsed.ok && applicability ? {applicability} : {}),
   };
   // The adapter invokes this updater with current evidence inside its storage transaction.
   const record = await adapter.persist(gate.id, prior => {
@@ -225,11 +251,18 @@ export function evaluateAcceptance({ acceptance = [], evidence = [], requiredGat
   }
   const pending = requiredGates.filter(id => evidence.some(item => item.gate === id && item.status === 'pending'));
   if (pending.length) return { ok: false, reason: 'gate judgment is pending', pending };
-  const missing = requiredGates.filter(id => !evidence.some(item => item.gate === id && item.status === 'passed'
+  const notApplicable = requiredGates.filter(id => evidence.some(item => item.gate === id && ['typecheck','build'].includes(id)
+    && item.status === 'not-applicable' && item.exit === 0 && item.failureClass == null && item.nondeterministic !== true
+    && item.applicability?.state === 'not-applicable' && item.applicability.evidencePath === 'package.json'
+    && typeof item.applicability.reason === 'string' && item.applicability.reason.trim() && item.fingerprint
+    && item.report === item.applicability.evidencePath && /^sha256:[a-f0-9]{64}$/.test(item.digest ?? '')
+    && item.digest === item.applicability.configDigest));
+  const missing = requiredGates.filter(id => !notApplicable.includes(id) && !evidence.some(item => item.gate === id && item.status === 'passed'
     && item.exit === 0 && item.failureClass == null && item.nondeterministic !== true));
   if (missing.length) return { ok: false, reason: 'required gates have no valid passing evidence', missing };
   const coverage = acceptanceCoverage(acceptance, evidence);
   if (!coverage.ok) return { ok: false, reason: 'acceptance criteria are uncovered', ...coverage };
+  reviewRequired ||= notApplicable.length > 0;
   if (reviewRequired && (!review || review.verdict !== 'ship' || review.head !== head || review.contentFingerprint !== contentFingerprint)) {
     return { ok: false, reason: 'matching ship review is required' };
   }

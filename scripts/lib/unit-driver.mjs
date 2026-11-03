@@ -763,7 +763,7 @@ function gateEvidenceAdapter(store, unit, adapters, record) {
   };
 }
 
-async function runEvidenceRerun({ stateRoot, unit, gateId, adapters }) {
+async function runEvidenceRerun({ stateRoot, unit, gateId, adapters, cwd }) {
   const store = createUnitStateStore(stateRoot);
   const record = await store.read(unit);
   if (!record) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
@@ -772,6 +772,12 @@ async function runEvidenceRerun({ stateRoot, unit, gateId, adapters }) {
   }
   const gate = await adapters.gates.describe(gateId, { unit, record });
   if (!gate || gate.id !== gateId) throw Object.assign(new Error(`gate adapter did not describe ${gateId}`), { code: 'ADAPTER_INVALID' });
+  let applicabilityBytes;
+  if (gate.applicability) {
+    applicabilityBytes = await readFile(path.join(cwd, 'package.json'));
+    const described = gate.files?.filter(file => file.path === 'package.json');
+    if (described?.length !== 1 || !applicabilityBytes.equals(Buffer.from(described[0].content))) throw Object.assign(new Error(`gate ${gateId} applicability does not match project package.json`), { code: 'ADAPTER_INVALID' });
+  }
   const fingerprint = gateFingerprint(gate);
   const adapter = gateEvidenceAdapter(store, unit, adapters, record);
   const prior = await adapter.latest(gateId);
@@ -779,19 +785,22 @@ async function runEvidenceRerun({ stateRoot, unit, gateId, adapters }) {
     throw Object.assign(new Error('independent rerun requires existing evidence with the same inputs'), { code: 'EVIDENCE_STALE' });
   }
   adapter.run = async () => {
-    const result = await adapters.gates.run(gate, { unit, record });
+    const result = gate.applicability
+      ? { exit: 0, ok: true, report: applicabilityBytes.toString('utf8'), reportPath: 'package.json', covers: [] }
+      : await adapters.gates.run(gate, { unit, record });
     const checked = await adapters.gates.describe(gateId, { unit, record });
-    if (!checked || checked.id !== gateId || gateFingerprint(checked) !== fingerprint) {
+    if (!checked || checked.id !== gateId || gateFingerprint(checked) !== fingerprint
+      || gate.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(applicabilityBytes)) {
       return { ...result, exit: 1, ok: false, failureClass: 'harness' };
     }
     return result;
   };
   const outcome = await runGate({ gate, fingerprint, adapter, independent: true });
-  return formatCliResult({ code: outcome.nondeterministic ? 4 : outcome.pending ? 3 : outcome.record.status === 'passed' ? 0 : 1,
+  return formatCliResult({ code: outcome.nondeterministic ? 4 : outcome.pending ? 3 : ['passed','not-applicable'].includes(outcome.record.status) ? 0 : 1,
     summary: `Evidence ${gateId}: ${outcome.record.status}`, details: { unit, ...outcome } });
 }
 
-async function runAcceptance({ stateRoot, unit, adapters }) {
+async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
   const store = createUnitStateStore(stateRoot);
   let record = await store.read(unit);
   if (!record) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
@@ -811,10 +820,40 @@ async function runAcceptance({ stateRoot, unit, adapters }) {
   for (const gateId of profile.gates) {
     const gate = await adapters.gates.describe(gateId, { unit, record });
     if (!gate || gate.id !== gateId) throw Object.assign(new Error(`gate adapter did not describe ${gateId}`), { code: 'ADAPTER_INVALID' });
+    let applicabilityBytes;
+    if (gate.applicability) {
+      const actual = await readFile(path.join(cwd, 'package.json'));
+      applicabilityBytes = actual;
+      const described = gate.files?.filter(file => file.path === 'package.json');
+      if (described?.length !== 1 || !actual.equals(Buffer.from(described[0].content))) throw Object.assign(new Error(`gate ${gateId} applicability does not match project package.json`), { code: 'ADAPTER_INVALID' });
+    }
     const fingerprint = gateFingerprint(gate);
     if (!fingerprint) throw Object.assign(new Error(`gate ${gateId} has no fingerprint inputs`), { code: 'ADAPTER_INVALID' });
     gateFingerprints.set(gateId, fingerprint);
-    await runGate({ gate, fingerprint, adapter: gateEvidenceAdapter(store, unit, adapters, record) });
+    const gateAdapter = gateEvidenceAdapter(store, unit, adapters, record);
+    const executeGate = gate.applicability
+      ? async () => ({ exit: 0, ok: true, report: applicabilityBytes.toString('utf8'), reportPath: 'package.json', covers: [] })
+      : gateAdapter.run;
+    gateAdapter.run = async currentGate => {
+      const result = await executeGate(currentGate);
+      const checked = await adapters.gates.describe(gateId, { unit, record });
+      if (!checked || checked.id !== gateId || gateFingerprint(checked) !== fingerprint
+        || gate.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(applicabilityBytes)) {
+        return { ...result, exit: 1, ok: false, failureClass: 'harness' };
+      }
+      return result;
+    };
+    await runGate({ gate, fingerprint, adapter: gateAdapter });
+    const checkedGate = await adapters.gates.describe(gateId, { unit, record });
+    if (!checkedGate || checkedGate.id !== gateId || gateFingerprint(checkedGate) !== fingerprint
+      || gate.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(applicabilityBytes)) {
+      await store.update(unit, current => {
+        const updated = { ...current, evidence: (current.evidence ?? []).map(item => item.gate === gateId
+          ? { ...item, status: 'stale', covers: [] } : item), accepted: null, reviewDecision: null, reviewedHead: null, verdict: null };
+        return ['InReview', 'Accepted'].includes(current.state) ? transitionRecord(updated, 'SelfGated') : updated;
+      });
+      throw Object.assign(new Error(`gate ${gateId} inputs changed during execution`), { code: 'EVIDENCE_STALE' });
+    }
     record = await store.read(unit);
   }
   const checkedTarget = await adapters.git.inspectUnit({ unit, record });
@@ -822,6 +861,9 @@ async function runAcceptance({ stateRoot, unit, adapters }) {
     kind: record.kind, policy, findings: record.findings ?? [], failures: record.failures ?? [],
     evidence: record.evidence ?? [], requiredGates: profile.gates,
   });
+  if (policy.review.mode === 'none' && record.evidence?.some(item => profile.gates.includes(item.gate) && item.status === 'not-applicable')) {
+    return formatCliResult({ code: 1, summary: 'Applicability requires independent review; configure the missing check or explicitly change the review policy', details: { unit, state: record.state, reason: 'incompatible applicability and review policy' } });
+  }
   const triggers = Object.fromEntries(['risk-kind', 'out-of-scope', 'unproven-gate', 'repeated-signature']
     .map(name => [name, reviewResolution.triggeredBy.includes(name)]));
   const reviewDecision = {
@@ -879,6 +921,11 @@ async function runAcceptance({ stateRoot, unit, adapters }) {
         accepted: null, reviewDecision: null,
       };
       return current.state === 'SelfGated' ? updated : transitionRecord(updated, 'SelfGated');
+    }
+    for (const id of profile.gates) {
+      const described = await adapters.gates.describe(id, { unit, record: current });
+      if (!described || described.id !== id || gateFingerprint(described) !== gateFingerprints.get(id)) { commitFailure = `Gate ${id} inputs changed during acceptance`; return current; }
+      if (described.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(Buffer.from(described.files.find(file => file.path === 'package.json').content))) { commitFailure = `Gate ${id} project configuration changed during acceptance`; return current; }
     }
     const currentReviewResolution = resolveReview({
       kind: current.kind, policy, findings: current.findings ?? [], failures: current.failures ?? [],
@@ -1022,7 +1069,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const [unit] = rest;
       if (subcommand !== 'rerun' || rest.length !== 1 || !unit || !parsed.options.gate) usageError('usage: evidence rerun <unit> --gate <id>');
       const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
-      return await runEvidenceRerun({ stateRoot: effectiveRoot, unit, gateId: parsed.options.gate, adapters });
+      return await runEvidenceRerun({ stateRoot: effectiveRoot, unit, gateId: parsed.options.gate, adapters, cwd });
     }
     if (noun !== 'unit' || !['start', 'scope', 'finding', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
     const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
@@ -1085,7 +1132,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
     if (subcommand === 'accept') {
       const [unit] = rest;
       if (!unit) usageError('unit accept requires <unit>');
-      return await runAcceptance({ stateRoot: effectiveRoot, unit, adapters });
+      return await runAcceptance({ stateRoot: effectiveRoot, unit, adapters, cwd });
     }
     if (subcommand === 'progress') {
       const [unit] = rest;

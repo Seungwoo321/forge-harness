@@ -41,7 +41,8 @@ export function resolveReview({ kind, policy, findings = [], failures = [], evid
       .slice(0, index).some(previous => previous?.signature === failure?.signature)),
   };
   const triggeredBy = mode === 'conditional' ? triggers.filter(trigger => conditions[trigger] === true) : [];
-  return { required: mode === 'required' || (mode === 'conditional' && triggeredBy.length > 0), by, triggeredBy };
+  const unavailable = requiredGates.some(gate => evidence.some(item => item?.gate === gate && item.status === 'not-applicable'));
+  return { required: mode === 'required' || (mode === 'conditional' && (triggeredBy.length > 0 || unavailable)), by, triggeredBy };
 }
 
 /** Validate the impl-risk contract and its passing risk-tag test evidence. */

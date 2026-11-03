@@ -62,6 +62,8 @@ implement 스킬이 계약에 맞는 출력을 반환하면 같은 `stage submit
 
 수용 후 `unit finish <unit> --request finish.json --adapters <module>`가 전달과 후속 처리를 수행한다. finish 요청·세션 identity 계약은 [명세 §7](spec.md#7-스킬-구성과-계약)에 있다. 결과만 쓰고 종료·전달을 가장하지 않는다. `unit fail`, `unit retry`, `unit resume`는 저장된 실패와 시도 상한을 사용하며 상태 파일을 수동 수정하지 않는다.
 
+열린 구현 단계에서 승인된 상위 변경을 통합해 HEAD가 바뀌어 `CHECKPOINT_STALE`이 발생하면 `unit stage restart <unit> implement --request <file>`을 사용한다. 요청 JSON에는 기존 시도의 `attempt`, `inputDigest`, `checkpointHead`와 현재 `newHead`를 정확히 담는다. 제어면은 Git HEAD와 참조 잠금 아래에서 현재 HEAD가 기존 HEAD의 후손인지 확인하고 기존 시도를 보존한 채 종료한다. 파일 기반 Git 참조 저장소만 지원하며 잠금을 얻지 못하면 재개하지 않는다. 이어 `unit stage open <unit> implement`로 확인한 HEAD에 묶인 같은 단위의 다음 시도를 연다. 작업 파일과 이전 증거는 그대로 두며 새 수용과 리뷰는 현재 내용에 대해 수행한다.
+
 같은 범위와 책임으로 계속할 때 finish 요청에 `sameSession: {"approved": true, "nextUnit": "<unit>"}`을 넣는다. 결과에는 남은 일과 다음 행동을 쓰며 전체 목표 완료를 설정하지 않는다. 단위만 닫히고 세션은 계속된다.
 
 세션 인계의 finish는 정확한 요청 착수 후 분리된 finalizer를 기동하며 그동안 exit 3/Delivered다. 기존 세션으로 돌아갈 때는 새 successor 대신 `returnTo`를 지정한다. finalizer는 결과 수신·착수와 실제 owner 종료를 확인한 뒤 Closed를 기록한다. 대기 중 재개는 같은 roots와 `--adapters`로 `unit finalize <unit>`를 실행한다. 네이티브 제출·종료 설정은 [런타임 연결](runtime-adapters.md)을 따른다.

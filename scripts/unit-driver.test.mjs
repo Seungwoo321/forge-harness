@@ -582,6 +582,76 @@ test('required review is recorded before InReview and accepted only after a matc
   assert.equal((await store.read(unit)).accepted.basis, 'review');
 });
 
+test('unavailable project checks require a real review before public acceptance', async t => {
+  const {root,stateRoot,unit,store,adapters}=await fixture(t);
+  await writeFile(path.join(root,'package.json'),'{"scripts":{"test":"node test"}}');
+  await prepareAcceptanceRecord(store,unit,{review:{mode:'conditional',by:'session',triggers:[]}});
+  const gateAdapters=acceptanceAdapters().adapters;
+  const describe=gateAdapters.gates.describe, run=gateAdapters.gates.run;
+  gateAdapters.gates.describe=async id => ['typecheck','build'].includes(id)
+    ? {id,command:['inspect-script',id],files:[{path:'package.json',content:'{"scripts":{"test":"node test"}}'}],format:'exec',reportPath:`${id}.txt`,applicability:{state:'not-applicable',reason:`No ${id} script`,evidencePath:'package.json'}}
+    : describe(id);
+  gateAdapters.gates.run=async gate => { if (gate.applicability) throw new Error('applicability must be derived by the control plane'); return run(gate); };
+  const first=result(await runUnitCli(['unit','accept',unit],{cwd:root,stateRoot,adapters:gateAdapters}));
+  assert.equal(first.code,20,JSON.stringify(first));
+  const record=await store.read(unit);
+  assert.equal(record.state,'InReview');
+  assert.deepEqual(record.evidence.filter(item=>item.status==='not-applicable').map(item=>item.gate),['typecheck','build']);
+  assert.ok(record.evidence.filter(item=>item.status==='not-applicable').every(item=>item.covers.length===0));
+  const rerun=result(await runUnitCli(['evidence','rerun',unit,'--gate','typecheck'],{cwd:root,stateRoot,adapters:gateAdapters}));
+  assert.equal(rerun.code,0,JSON.stringify(rerun));
+  assert.equal(rerun.record.status,'not-applicable');
+  await createReviewUnit(store,'review-unit',unit);
+  const options={stateRoot,contractsDir:path.join(repo,'skills'),adapters};
+  const opened=result(await runUnitCli(['unit','stage','open','review-unit','review'],options));
+  const input=JSON.parse(await readFile(opened.input,'utf8'));
+  const output=path.join(stateRoot,'review-na.json');
+  await writeFile(output,JSON.stringify({inputDigest:input.inputDigest,attempt:input.attempt,submissionId:'review-na',status:'done',summary:'Reviewed',findings:[],verdict:'ship',reviewedHead:input.head}));
+  assert.equal(result(await runUnitCli(['unit','stage','submit','review-unit','review','--output',output],options)).code,0);
+  const accepted=result(await runUnitCli(['unit','accept',unit],{cwd:root,stateRoot,adapters:gateAdapters}));
+  assert.equal(accepted.state,'Accepted',JSON.stringify(accepted));
+  assert.equal((await store.read(unit)).accepted.basis,'review');
+});
+
+test('applicability rejects forged project configuration and an incompatible no-review policy', async t => {
+  const {root,stateRoot,unit,store}=await fixture(t);
+  await writeFile(path.join(root,'package.json'),'{"scripts":{"build":"node build"}}');
+  await prepareAcceptanceRecord(store,unit,{review:{mode:'none',by:'session',triggers:[]}});
+  const adapters=acceptanceAdapters().adapters, describe=adapters.gates.describe;
+  adapters.gates.describe=async id => id==='build'
+    ? {id,command:['inspect-script',id],files:[{path:'package.json',content:'{"scripts":{}}'}],format:'exec',reportPath:'build.txt',applicability:{state:'not-applicable',reason:'No build script',evidencePath:'package.json'}}
+    : describe(id);
+  let response=result(await runUnitCli(['unit','accept',unit],{cwd:root,stateRoot,adapters}));
+  assert.equal(response.error,'ADAPTER_INVALID');
+  await writeFile(path.join(root,'package.json'),'{"scripts":{}}');
+  adapters.gates.run=async gate => gate.applicability ? {exit:0,ok:true,report:'Script absent',reportPath:gate.reportPath,covers:[]} : {exit:0,report:'TAP version 13\n1..1\nok 1 - AC-1\n',reportPath:gate.reportPath};
+  response=result(await runUnitCli(['unit','accept',unit],{cwd:root,stateRoot,adapters}));
+  assert.equal(response.code,1); assert.match(response.summary,/configure the missing check or explicitly change the review policy/);
+  assert.equal((await store.read(unit)).state,'SelfGated');
+});
+
+test('gate inputs changed during execution cannot leave passing evidence', async t => {
+  const {root,stateRoot,unit,store}=await fixture(t);
+  await prepareAcceptanceRecord(store,unit);
+  const adapters=acceptanceAdapters().adapters, describe=adapters.gates.describe, run=adapters.gates.run;
+  let changed=false;
+  adapters.gates.describe=async id => { const gate=await describe(id); if(id==='tests' && changed) gate.files[0].content='modified'; return gate; };
+  adapters.gates.run=async gate => { const output=await run(gate); if(gate.id==='tests') changed=true; return output; };
+  const response=result(await runUnitCli(['unit','accept',unit],{cwd:root,stateRoot,adapters}));
+  assert.equal(response.error,'EVIDENCE_STALE');
+  assert.notEqual((await store.read(unit)).evidence.find(item=>item.gate==='tests').status,'passed');
+});
+
+test('acceptance rejects a gate whose inputs change at the final transaction', async t => {
+  const {root,stateRoot,unit,store}=await fixture(t);
+  await prepareAcceptanceRecord(store,unit);
+  const adapters=acceptanceAdapters().adapters, describe=adapters.gates.describe;
+  let testsObservations=0;
+  adapters.gates.describe=async id => { const gate=await describe(id); if(id==='tests' && ++testsObservations>=4) gate.files[0].content='modified'; return gate; };
+  const response=result(await runUnitCli(['unit','accept',unit],{cwd:root,stateRoot,adapters}));
+  assert.notEqual(response.code,0); assert.notEqual((await store.read(unit)).state,'Accepted');
+});
+
 test('review-kind submissions validate against and write verdict/findings to the target, with the user route and acceptance path', async t => {
   const { stateRoot, unit, store, adapters } = await fixture(t);
   const reviewer = 'review-unit';

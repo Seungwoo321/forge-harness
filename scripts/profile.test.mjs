@@ -30,6 +30,9 @@ test('unproven and repeated-signature review triggers require missing gates and 
   assert.deepEqual(resolveReview({ kind: 'impl', policy, requiredGates: ['tests'], evidence: [passed], failures: [{ signature: 'same' }] }), { required: false, by: 'session', triggeredBy: [] });
   assert.deepEqual(resolveReview({ kind: 'impl', policy, requiredGates: ['tests', 'lint'], evidence: [passed], failures: [{ signature: 'same' }, { signature: 'same' }] }), { required: true, by: 'session', triggeredBy: ['unproven-gate', 'repeated-signature'] });
   assert.deepEqual(resolveReview({ kind: 'impl', policy, requiredGates: ['tests'], evidence: [{ ...passed, nondeterministic: true }] }).triggeredBy, ['unproven-gate']);
+  const noTriggers={review:{mode:'conditional',by:'session',triggers:[]}};
+  assert.equal(resolveReview({kind:'impl',policy:noTriggers,requiredGates:['build'],evidence:[{gate:'build',status:'not-applicable'}]}).required,true);
+  assert.equal(resolveReview({kind:'impl',policy:{review:{...noTriggers.review,mode:'none'}},requiredGates:['build'],evidence:[{gate:'build',status:'not-applicable'}]}).required,false);
 });
 
 test('impl-risk requires non-empty assessment and passing risk-gate evidence for each referenced test', () => {

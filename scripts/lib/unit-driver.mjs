@@ -23,9 +23,12 @@ import { recheckScope } from './scope-recheck.mjs';
 import { createContinuityStore } from './continuity-store.mjs';
 import { blockGoal, resumeGoal, appendGoalWork } from './continuity-transitions.mjs';
 import { commitGoalCompletion } from './continuity-completion.mjs';
+import { commitGoalContinuation } from './continuity-finish.mjs';
 import { startGoalSession } from './continuity-start.mjs';
 import { prepareSessionReturn } from './continuity-return.mjs';
 import { stopGoalSession } from './continuity-stop.mjs';
+import { changeUnitDelivery } from './unit-policy-change.mjs';
+import { attemptsFor } from './stage-attempts.mjs';
 
 const controlPlaneFields = new Set([
   'request', 'unit', 'kind', 'goal', 'policy', 'policySources', 'canon', 'tracker', 'isolation',
@@ -113,14 +116,6 @@ function readinessFor(contract, record, contracts) {
 async function readContracts(contractsDir) {
   const names = ['scope', 'implement', 'root-cause', 'review', 'handoff'];
   return Promise.all(names.map(async stage => JSON.parse(await readFile(contractFile(contractsDir, stage), 'utf8'))));
-}
-
-function attemptsFor(record, stage) {
-  const entry = (record.stages ?? []).find(item => item.name === stage);
-  if (!entry) return [];
-  return entry.attempts ?? (Number.isSafeInteger(entry.attempt) ? [{
-    ...entry, n: entry.attempt, endedAt: entry.endedAt ?? entry.submittedAt ?? null,
-  }] : []);
 }
 
 function firstCheckpoint(record) {
@@ -234,7 +229,8 @@ async function runProgress(stateRoot, unit) {
   const record = await createUnitStateStore(stateRoot).read(unit);
   if (!record) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
   const progress = acceptanceProgress(record);
-  return formatCliResult({ code: 0, summary: `Unit ${unit} acceptance progress`, details: { unit, progress, kind: record.kind, canon: record.canon, acceptance: record.acceptance } });
+  const effectiveDelivery = record.policyOverrides?.delivery ?? record.policy?.delivery ?? 'none';
+  return formatCliResult({ code: 0, summary: `Unit ${unit} acceptance progress`, details: { unit, state: record.state, revision: record.revision, effectiveDelivery, progress, kind: record.kind, canon: record.canon, acceptance: record.acceptance } });
 }
 
 function usageError(message) {
@@ -677,13 +673,20 @@ async function runEffect({ stateRoot, unit, options, adapters, cwd }) {
   const result = await executeEffect({
     unit, effect: options.effect, args, policy, approvalRef: options.approval ?? null,
     context: { ...context, explicitUserInstruction: context.explicitUserInstruction === true },
-    // Ledger first lets queued revocations commit; Unit custody orders execution against later revocations.
-    store: irreversible ? { withLock: (id, action) => ledgerStore.withLock(id, ledger => store.withLock(id, async current => {
-      await validateTarget(current);
-      await resolveEffectApproval({ record: current, effect: options.effect, args, approvalRef: options.approval, provider: adapters.provider });
-      await validateTarget(current);
+    // Ledger then Unit custody serializes authorization with policy changes and revocations.
+    store: { withLock: (id, action) => ledgerStore.withLock(id, ledger => store.withLock(id, async current => {
+      const currentPolicy = resolvePolicy({ unit: current.policyOverrides ?? {}, project: current.policy ?? {} }, { nonInteractive: true }).policy;
+      if (digest({ policy: currentPolicy, epoch: current.policyChanges?.at(-1)?.revision ?? 0 }) !== digest({ policy, epoch: record.policyChanges?.at(-1)?.revision ?? 0 })
+        || (irreversible ? !['Accepted', 'Delivering'].includes(current.state) : current.state !== 'Implementing')) {
+        throw Object.assign(new Error('effect state or policy changed before execution'), { code: irreversible ? 'EFFECT_APPROVAL_REQUIRED' : 'EFFECT_DENIED' });
+      }
+      if (irreversible) {
+        await validateTarget(current);
+        await resolveEffectApproval({ record: current, effect: options.effect, args, approvalRef: options.approval, provider: adapters.provider });
+        await validateTarget(current);
+      }
       return await action(ledger);
-    })) } : ledgerStore,
+    })) },
     adapter: { ...adapters.effect, now: () => adapters.now() },
   });
   return { code: result.status === 'uncertain' ? 3 : 0, summary: `Effect ${options.effect}: ${result.status}`, details: { unit, effect: options.effect, status: result.status, key: result.key } };
@@ -787,7 +790,7 @@ function gateEvidenceAdapter(store, unit, adapters, record) {
   };
 }
 
-async function runEvidenceRerun({ stateRoot, unit, gateId, adapters }) {
+async function runEvidenceRerun({ stateRoot, unit, gateId, adapters, cwd }) {
   const store = createUnitStateStore(stateRoot);
   const record = await store.read(unit);
   if (!record) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
@@ -796,6 +799,12 @@ async function runEvidenceRerun({ stateRoot, unit, gateId, adapters }) {
   }
   const gate = await adapters.gates.describe(gateId, { unit, record });
   if (!gate || gate.id !== gateId) throw Object.assign(new Error(`gate adapter did not describe ${gateId}`), { code: 'ADAPTER_INVALID' });
+  let applicabilityBytes;
+  if (gate.applicability) {
+    applicabilityBytes = await readFile(path.join(cwd, 'package.json'));
+    const described = gate.files?.filter(file => file.path === 'package.json');
+    if (described?.length !== 1 || !applicabilityBytes.equals(Buffer.from(described[0].content))) throw Object.assign(new Error(`gate ${gateId} applicability does not match project package.json`), { code: 'ADAPTER_INVALID' });
+  }
   const fingerprint = gateFingerprint(gate);
   const adapter = gateEvidenceAdapter(store, unit, adapters, record);
   const prior = await adapter.latest(gateId);
@@ -803,19 +812,22 @@ async function runEvidenceRerun({ stateRoot, unit, gateId, adapters }) {
     throw Object.assign(new Error('independent rerun requires existing evidence with the same inputs'), { code: 'EVIDENCE_STALE' });
   }
   adapter.run = async () => {
-    const result = await adapters.gates.run(gate, { unit, record });
+    const result = gate.applicability
+      ? { exit: 0, ok: true, report: applicabilityBytes.toString('utf8'), reportPath: 'package.json', covers: [] }
+      : await adapters.gates.run(gate, { unit, record });
     const checked = await adapters.gates.describe(gateId, { unit, record });
-    if (!checked || checked.id !== gateId || gateFingerprint(checked) !== fingerprint) {
+    if (!checked || checked.id !== gateId || gateFingerprint(checked) !== fingerprint
+      || gate.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(applicabilityBytes)) {
       return { ...result, exit: 1, ok: false, failureClass: 'harness' };
     }
     return result;
   };
   const outcome = await runGate({ gate, fingerprint, adapter, independent: true });
-  return formatCliResult({ code: outcome.nondeterministic ? 4 : outcome.pending ? 3 : outcome.record.status === 'passed' ? 0 : 1,
+  return formatCliResult({ code: outcome.nondeterministic ? 4 : outcome.pending ? 3 : ['passed','not-applicable'].includes(outcome.record.status) ? 0 : 1,
     summary: `Evidence ${gateId}: ${outcome.record.status}`, details: { unit, ...outcome } });
 }
 
-async function runAcceptance({ stateRoot, unit, adapters }) {
+async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
   const store = createUnitStateStore(stateRoot);
   let record = await store.read(unit);
   if (!record) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
@@ -827,6 +839,9 @@ async function runAcceptance({ stateRoot, unit, adapters }) {
   }
   const profile = selectProfile(record.kind);
   const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
+  const policyDigest = digest({ policy, epoch: record.policyChanges?.at(-1)?.revision ?? 0 });
+  const policyMatches = current => digest({ policy: resolvePolicy({ unit: current.policyOverrides ?? {}, project: current.policy ?? {} }, { nonInteractive: true }).policy,
+    epoch: current.policyChanges?.at(-1)?.revision ?? 0 }) === policyDigest;
   const target = await adapters.git.inspectUnit({ unit, record });
   if (typeof target?.head !== 'string' || !target.head || typeof target.contentFingerprint !== 'string' || !target.contentFingerprint) {
     throw Object.assign(new Error('Git adapter must return the unit head and content fingerprint'), { code: 'ADAPTER_INVALID' });
@@ -835,10 +850,40 @@ async function runAcceptance({ stateRoot, unit, adapters }) {
   for (const gateId of profile.gates) {
     const gate = await adapters.gates.describe(gateId, { unit, record });
     if (!gate || gate.id !== gateId) throw Object.assign(new Error(`gate adapter did not describe ${gateId}`), { code: 'ADAPTER_INVALID' });
+    let applicabilityBytes;
+    if (gate.applicability) {
+      const actual = await readFile(path.join(cwd, 'package.json'));
+      applicabilityBytes = actual;
+      const described = gate.files?.filter(file => file.path === 'package.json');
+      if (described?.length !== 1 || !actual.equals(Buffer.from(described[0].content))) throw Object.assign(new Error(`gate ${gateId} applicability does not match project package.json`), { code: 'ADAPTER_INVALID' });
+    }
     const fingerprint = gateFingerprint(gate);
     if (!fingerprint) throw Object.assign(new Error(`gate ${gateId} has no fingerprint inputs`), { code: 'ADAPTER_INVALID' });
     gateFingerprints.set(gateId, fingerprint);
-    await runGate({ gate, fingerprint, adapter: gateEvidenceAdapter(store, unit, adapters, record) });
+    const gateAdapter = gateEvidenceAdapter(store, unit, adapters, record);
+    const executeGate = gate.applicability
+      ? async () => ({ exit: 0, ok: true, report: applicabilityBytes.toString('utf8'), reportPath: 'package.json', covers: [] })
+      : gateAdapter.run;
+    gateAdapter.run = async currentGate => {
+      const result = await executeGate(currentGate);
+      const checked = await adapters.gates.describe(gateId, { unit, record });
+      if (!checked || checked.id !== gateId || gateFingerprint(checked) !== fingerprint
+        || gate.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(applicabilityBytes)) {
+        return { ...result, exit: 1, ok: false, failureClass: 'harness' };
+      }
+      return result;
+    };
+    await runGate({ gate, fingerprint, adapter: gateAdapter });
+    const checkedGate = await adapters.gates.describe(gateId, { unit, record });
+    if (!checkedGate || checkedGate.id !== gateId || gateFingerprint(checkedGate) !== fingerprint
+      || gate.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(applicabilityBytes)) {
+      await store.update(unit, current => {
+        const updated = { ...current, evidence: (current.evidence ?? []).map(item => item.gate === gateId
+          ? { ...item, status: 'stale', covers: [] } : item), accepted: null, reviewDecision: null, reviewedHead: null, verdict: null };
+        return ['InReview', 'Accepted'].includes(current.state) ? transitionRecord(updated, 'SelfGated') : updated;
+      });
+      throw Object.assign(new Error(`gate ${gateId} inputs changed during execution`), { code: 'EVIDENCE_STALE' });
+    }
     record = await store.read(unit);
   }
   const checkedTarget = await adapters.git.inspectUnit({ unit, record });
@@ -846,6 +891,9 @@ async function runAcceptance({ stateRoot, unit, adapters }) {
     kind: record.kind, policy, findings: record.findings ?? [], failures: record.failures ?? [],
     evidence: record.evidence ?? [], requiredGates: profile.gates,
   });
+  if (policy.review.mode === 'none' && record.evidence?.some(item => profile.gates.includes(item.gate) && item.status === 'not-applicable')) {
+    return formatCliResult({ code: 1, summary: 'Applicability requires independent review; configure the missing check or explicitly change the review policy', details: { unit, state: record.state, reason: 'incompatible applicability and review policy' } });
+  }
   const triggers = Object.fromEntries(['risk-kind', 'out-of-scope', 'unproven-gate', 'repeated-signature']
     .map(name => [name, reviewResolution.triggeredBy.includes(name)]));
   const reviewDecision = {
@@ -875,7 +923,9 @@ async function runAcceptance({ stateRoot, unit, adapters }) {
     return formatCliResult({ code: 1, summary: 'Accepted target changed and requires revalidation', details: { unit, state: record.state, reason: evaluation.reason } });
   }
   if (reviewResolution.required && evaluation.reason === 'matching ship review is required') {
+    let policyChanged = false;
     record = await store.update(unit, current => {
+      if (!policyMatches(current)) { policyChanged = true; return current; }
       const updated = { ...current, head: target.head, contentFingerprint: target.contentFingerprint,
         ...(current.head !== target.head || current.contentFingerprint !== target.contentFingerprint ? { diff: null, handoff: null } : {}),
         reviewDecision, reviewedHead: null, verdict: null, accepted: null };
@@ -883,6 +933,7 @@ async function runAcceptance({ stateRoot, unit, adapters }) {
       return current.state === 'Accepted'
         ? transitionRecord(transitionRecord(updated, 'SelfGated'), 'InReview') : transitionRecord(updated, 'InReview');
     });
+    if (policyChanged) return formatCliResult({ code: 1, summary: 'Policy changed during acceptance; revalidation is required', details: { unit, state: record.state } });
     return formatCliResult({ code: 20, summary: `Independent ${reviewResolution.by} review is required`, details: { unit, state: record.state, reviewDecision } });
   }
   if (!evaluation.ok) {
@@ -893,6 +944,7 @@ async function runAcceptance({ stateRoot, unit, adapters }) {
   let commitFailure = null;
   let acceptedCoverage = evaluation.coverage;
   record = await store.update(unit, async current => {
+    if (!policyMatches(current)) { commitFailure = 'Policy changed during acceptance; revalidation is required'; return current; }
     const finalTarget = await adapters.git.inspectUnit({ unit, record: current });
     if (finalTarget?.head !== target.head || finalTarget?.contentFingerprint !== target.contentFingerprint
       || policy.delivery !== 'none' && ['repo', 'branch', 'tree', 'indexTree', 'headTree', 'base'].some(field => finalTarget?.[field] !== target[field])) {
@@ -903,6 +955,11 @@ async function runAcceptance({ stateRoot, unit, adapters }) {
         accepted: null, reviewDecision: null,
       };
       return current.state === 'SelfGated' ? updated : transitionRecord(updated, 'SelfGated');
+    }
+    for (const id of profile.gates) {
+      const described = await adapters.gates.describe(id, { unit, record: current });
+      if (!described || described.id !== id || gateFingerprint(described) !== gateFingerprints.get(id)) { commitFailure = `Gate ${id} inputs changed during acceptance`; return current; }
+      if (described.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(Buffer.from(described.files.find(file => file.path === 'package.json').content))) { commitFailure = `Gate ${id} project configuration changed during acceptance`; return current; }
     }
     const currentReviewResolution = resolveReview({
       kind: current.kind, policy, findings: current.findings ?? [], failures: current.failures ?? [],
@@ -1067,7 +1124,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const [unit] = rest;
       if (subcommand !== 'rerun' || rest.length !== 1 || !unit || !parsed.options.gate) usageError('usage: evidence rerun <unit> --gate <id>');
       const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
-      return await runEvidenceRerun({ stateRoot: effectiveRoot, unit, gateId: parsed.options.gate, adapters });
+      return await runEvidenceRerun({ stateRoot: effectiveRoot, unit, gateId: parsed.options.gate, adapters, cwd });
     }
     if (noun === 'goal') {
       const [id] = rest;
@@ -1082,9 +1139,12 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       if (subcommand === 'reconcile') {
         const current = await store.read(id);
         if (!current) throw Object.assign(new Error('goal not found'), { code:'GOAL_NOT_FOUND' });
-        const unit = current.completion?.unit ?? (current.goal.remaining.length === 1 ? current.goal.remaining[0] : null);
+        const unit = current.completion?.unit ?? current.goal.remaining[0];
         if (!unit) throw Object.assign(new Error('goal completion is not ready for reconciliation'), { code:'GOAL_INCOMPLETE' });
-        const goal = await commitGoalCompletion({continuityStore:store,unitStore:createUnitStateStore(effectiveRoot),goalId:id,unit});
+        const unitStore = createUnitStateStore(effectiveRoot);
+        const record = await unitStore.read(unit);
+        const goal = record?.goalContinuation ? await commitGoalContinuation({continuityStore:store,unitStore,goalId:id,unit})
+          : await commitGoalCompletion({continuityStore:store,unitStore,goalId:id,unit});
         return formatCliResult({code:0,summary:`Goal ${id} reconciled`,details:{goal}});
       }
       if (subcommand === 'add-work') {
@@ -1126,8 +1186,15 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const goal = await store.create({goal:request.goal,source:request.source,policy:resolved.policy.session});
       return formatCliResult({ code: 0, summary: `Goal ${id} registered`, details: { goal } });
     }
-    if (noun !== 'unit' || !['start', 'scope', 'finding', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'goal-bind', 'session-stop', 'session-return'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
+    if (noun !== 'unit' || !['start', 'scope', 'finding', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'goal-bind', 'session-stop', 'session-return', 'policy'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
     const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
+    if (subcommand === 'policy') {
+      const [action, unit] = rest;
+      if (action !== 'change' || rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit policy change requires <unit> --request <file> --user-input <ref>');
+      const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'unit policy change request', 'CLI_USAGE');
+      const change = await changeUnitDelivery({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, request, userInputRef: parsed.options['user-input'], adapters });
+      return formatCliResult({ code: 0, summary: `Policy changed for ${unit}`, details: { unit, change } });
+    }
     if (subcommand === 'finding') {
       const [action, unit] = rest;
       if (action !== 'resolve' || rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit finding resolve requires <unit> --request <file> --user-input <ref>');
@@ -1228,7 +1295,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
     if (subcommand === 'accept') {
       const [unit] = rest;
       if (!unit) usageError('unit accept requires <unit>');
-      return await runAcceptance({ stateRoot: effectiveRoot, unit, adapters });
+      return await runAcceptance({ stateRoot: effectiveRoot, unit, adapters, cwd });
     }
     if (subcommand === 'progress') {
       const [unit] = rest;

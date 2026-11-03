@@ -57,3 +57,26 @@ export async function recordGoalTransfer({stateRoot,continuity,goalSnapshot,unit
     });
   }
 }
+
+export async function commitGoalContinuation({continuityStore,unitStore,goalId,unit}) {
+  const record = await unitStore.read(unit);
+  const intent = record?.goalContinuation;
+  if (record?.state !== 'Closed' || intent?.goalId !== goalId || !intent.nextUnit || !intent.owner) {
+    throw Object.assign(new Error('closed unit with same-session goal continuation is required'), {code:'CONTINUITY_INVALID'});
+  }
+  return continuityStore.transaction(goalId, current => {
+    const previous = current?.transfers?.find(item => item.unit === unit);
+    if (previous?.sameSession === true && previous.successor === intent.nextUnit
+      && previous.sessionId === intent.owner.sessionId && previous.incarnationId === intent.owner.incarnationId && previous.cwd === intent.owner.cwd) return current;
+    const owner = current?.bootstraps?.findLast(item => item.unit === unit) ?? current?.transfers?.find(item => item.successor === unit);
+    if (!current || current.revision !== intent.revision || current.goal.status !== 'active'
+      || current.goal.remaining[0] !== unit || current.goal.remaining[1] !== intent.nextUnit || previous
+      || owner?.sessionId !== intent.owner.sessionId || owner?.incarnationId !== intent.owner.incarnationId || owner?.cwd !== intent.owner.cwd) {
+      throw Object.assign(new Error('goal continuation or session owner changed'), {code:'CONTINUITY_STALE'});
+    }
+    const identity = {sessionId:owner.sessionId,incarnationId:owner.incarnationId,cwd:owner.cwd};
+    return {...current,revision:current.revision+1,goal:{...current.goal,remaining:current.goal.remaining.slice(1)},
+      bootstraps:[...(current.bootstraps ?? []),{unit:intent.nextUnit,attempt:1,...identity}],
+      transfers:[...(current.transfers ?? []),{unit,successor:intent.nextUnit,sameSession:true,...identity}]};
+  });
+}

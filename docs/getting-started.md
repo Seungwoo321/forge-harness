@@ -62,9 +62,26 @@ implement 스킬이 계약에 맞는 출력을 반환하면 같은 `stage submit
 
 수용 후 `unit finish <unit> --request finish.json --adapters <module>`가 전달과 후속 처리를 수행한다. finish 요청·세션 identity 계약은 [명세 §7](spec.md#7-스킬-구성과-계약)에 있다. 결과만 쓰고 종료·전달을 가장하지 않는다. `unit fail`, `unit retry`, `unit resume`는 저장된 실패와 시도 상한을 사용하며 상태 파일을 수동 수정하지 않는다.
 
+같은 범위와 책임으로 계속할 때 finish 요청에 `sameSession: {"approved": true, "nextUnit": "<unit>"}`을 넣는다. 결과에는 남은 일과 다음 행동을 쓰며 전체 목표 완료를 설정하지 않는다. 단위만 닫히고 세션은 계속된다.
+
 세션 인계의 finish는 정확한 요청 착수 후 분리된 finalizer를 기동하며 그동안 exit 3/Delivered다. 기존 세션으로 돌아갈 때는 새 successor 대신 `returnTo`를 지정한다. finalizer는 결과 수신·착수와 실제 owner 종료를 확인한 뒤 Closed를 기록한다. 대기 중 재개는 같은 roots와 `--adapters`로 `unit finalize <unit>`를 실행한다. 네이티브 제출·종료 설정은 [런타임 연결](runtime-adapters.md)을 따른다.
 
 각 CLI는 사람이 읽는 요약 뒤 한 줄 `RESULT { ... }`를 출력한다. 키는 RESULT 최상위에 있다. exit 0은 해당 명령의 성공, 1은 검사 실패, 2는 입력/계약 오류, 3은 정책/권한/결정 대기, 4는 필수 어댑터 부재, 20은 리뷰 필요다.
+
+## 진행 중인 단위의 전달 정책 변경
+
+사용자의 명시적인 정책 변경은 기존 단위를 새로 만들지 않고 공개 명령으로 적용한다. 사용자 입력 출처를 검증하는 provider가 필요하다. 단계 제출이 끝나고 미확정 효과가 없는 SelfGated 또는 Accepted 상태에서 아래 요청을 사용한다. `unit progress <unit>`의 `revision`과 `effectiveDelivery`로 현재 값을 확인한다. `expectedRevision`은 현재 단위 revision이며, 요청 ID와 사용자 입력 참조는 같은 재시도에서 유지한다.
+
+```json
+{"id":"delivery-change-1","expectedRevision":12,"delivery":"merge","reason":"사용자가 merge를 지정"}
+```
+
+```sh
+node "$PLUGIN_ROOT/scripts/unit.mjs" unit policy change greeting --request policy-change.json --user-input '<검증 가능한 사용자 입력 참조>' --adapters runtime.mjs
+node "$PLUGIN_ROOT/scripts/unit.mjs" unit accept greeting --adapters runtime.mjs
+```
+
+변경 전 정책·수용·리뷰는 이력에 보존되며 기존 증거와 효과는 삭제하지 않는다. 변경 후 같은 단위의 수용 대상을 다시 검증한다. 변경 후 finish는 해당 전달 수준을 기본으로 사용하며 다른 수준을 요청하려면 다시 명시적으로 정책을 변경한다.
 
 ## 기존 지적의 명시적 해소
 

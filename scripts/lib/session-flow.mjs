@@ -5,6 +5,7 @@ import { authorizeDelivery } from './delivery.mjs';
 import { executeEffect, createLedgerStore } from './ledger.mjs';
 import { formatUnitResult, prepareSuccessor, validateHandoffPacket, writeUnitResult } from './report.mjs';
 import { prepareEffect, resolvePolicy } from './policy.mjs';
+import { effectArgsDigest } from './approvals.mjs';
 import { taskPackets, validateTaskReceipt } from './session-task.mjs';
 import { commitTerminalClose, createProjectionQueue, projectTerminalUnit } from './tracker.mjs';
 import { executeDelivery } from './delivery-flow.mjs';
@@ -13,7 +14,7 @@ import { snapshotGoal } from './continuity-snapshot.mjs';
 import { loadManagedLaunch } from './continuity-launch-io.mjs';
 import { selectExecutionPolicy } from './continuity-decision.mjs';
 import { commitGoalCompletion } from './continuity-completion.mjs';
-import { prepareGoalFinish, recordGoalTransfer } from './continuity-finish.mjs';
+import { prepareGoalFinish, recordGoalTransfer, commitGoalContinuation } from './continuity-finish.mjs';
 
 let temporarySequence = 0;
 
@@ -48,14 +49,21 @@ export async function writeHandoff(stateRoot, slug, content) {
 }
 
 export async function finishSessionUnit({
-  stateRoot, store, unit, resultFields, handoffContent, successor = null, goalComplete = false,
-  parentSessionId, parentRuntime, returnTo, goalProof, requestedDelivery = 'none', delivery, trackerAdapter, sessionAdapter, adapters,
+  stateRoot, store, unit, resultFields, handoffContent, successor = null, goalComplete = false, sameSession = null,
+  parentSessionId, parentRuntime, returnTo, goalProof, requestedDelivery, delivery, trackerAdapter, sessionAdapter, adapters,
 }) {
   let record = await store.read(unit);
   if (record?.sessionFinalization) return { code: 3, state: record.state, finalizePending: true, summary: 'Session finalization requires surviving supervisor verification' };
+  if (sameSession !== null && (!sameSession || typeof sameSession !== 'object' || Array.isArray(sameSession)
+    || Object.keys(sameSession).sort().join(',') !== 'approved,nextUnit' || sameSession.approved !== true
+    || typeof sameSession.nextUnit !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(sameSession.nextUnit)
+    || ['.', '..', unit].includes(sameSession.nextUnit) || successor || goalComplete || returnTo)) {
+    throw Object.assign(new Error('same-session continuation requires one approved next unit and no transfer or goal completion'), { code: 'SESSION_CONTINUATION_INVALID' });
+  }
   if (!record || !['Accepted', 'Delivering', 'Delivered'].includes(record.state)) throw Object.assign(new Error('session finish requires an Accepted, Delivering, or Delivered Unit Record'), { code: 'INVALID_TRANSITION' });
-  const continuity = await prepareGoalFinish({stateRoot,store,record,unit,parentRuntime,successor,goalComplete,goalProof});
-  if ((parentRuntime || parentSessionId) && !successor?.approved && !returnTo) throw Object.assign(new Error('session completion requires an exact result recipient'), { code: 'SESSION_OWNER_MISMATCH' });
+  if (record.sameSessionContinuation && !sameSession) throw Object.assign(new Error('same-session continuation is already bound'), { code: 'SESSION_CONTINUATION_CONFLICT' });
+  const continuity = await prepareGoalFinish({stateRoot,store,record,unit,parentRuntime,successor: sameSession ? {approved:true,unit:sameSession.nextUnit} : successor,goalComplete,goalProof});
+  if ((parentRuntime || parentSessionId) && !successor?.approved && !returnTo && !sameSession && !goalComplete) throw Object.assign(new Error('session completion requires an exact result recipient'), { code: 'SESSION_OWNER_MISMATCH' });
   if (!adapters || typeof adapters.now !== 'function') throw new TypeError('session flow adapters are required');
   if (!['execute', 'verify'].every(name => typeof sessionAdapter?.[name] === 'function')) {
     if (successor?.approved || returnTo) throw Object.assign(new Error('session adapter is unavailable'), { code: 'ADAPTER_MISSING' });
@@ -98,9 +106,36 @@ export async function finishSessionUnit({
     }
   }
   const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
+  requestedDelivery ??= record.policyChanges?.length ? policy.delivery : 'none';
+  if (record.policyChanges?.length && requestedDelivery !== policy.delivery) throw Object.assign(new Error('finish delivery must match the explicitly authorized unit policy'), { code: 'POLICY_CHANGE_MISMATCH' });
   const authorized = authorizeDelivery(policy, requestedDelivery);
-  if (!successor?.approved && !goalComplete) throw Object.assign(new Error('session finish requires an approved successor or confirmed goal completion'), { code: 'USER_DECISION_REQUIRED' });
-  formatUnitResult({ ...resultFields, outcome: { kind: 'complete' } });
+  if (!successor?.approved && !goalComplete && !sameSession) throw Object.assign(new Error('session finish requires an approved successor or confirmed goal completion'), { code: 'USER_DECISION_REQUIRED' });
+  formatUnitResult({ ...resultFields, outcome: sameSession ? { kind: 'continue', unit: sameSession.nextUnit } : { kind: 'complete' } });
+  if (sameSession) {
+    const intent = effectArgsDigest({ sameSession, resultFields });
+    const bindingFor = current => {
+      const currentPolicy = resolvePolicy({ unit: current.policyOverrides ?? {}, project: current.policy ?? {} }, { nonInteractive: true }).policy;
+      const accepted = current.accepted ?? {};
+      return effectArgsDigest({ policy: currentPolicy, epoch: current.policyChanges?.at(-1)?.revision ?? 0,
+        accepted: { validatedHead: accepted.validatedHead ?? accepted.head, contentFingerprint: accepted.contentFingerprint,
+          repo: accepted.repo, branch: accepted.branch, tree: accepted.tree, base: accepted.base } });
+    };
+    const binding = bindingFor(record), alreadyBound = new Error('same-session continuation already bound');
+    try { await store.update(unit, current => {
+      if (bindingFor(current) !== binding || current.sameSessionContinuation && current.sameSessionContinuation.intent !== intent) {
+        throw Object.assign(new Error('same-session continuation or accepted target changed'), { code: 'SESSION_CONTINUATION_CONFLICT' });
+      }
+      const previous = current.sameSessionContinuation, policyEpoch = current.policyChanges?.at(-1)?.revision ?? 0;
+      if (previous && previous.delivery !== requestedDelivery && previous.policyEpoch === policyEpoch) {
+        throw Object.assign(new Error('same-session delivery level changed without an authorized policy revision'), { code: 'SESSION_CONTINUATION_CONFLICT' });
+      }
+      if (previous?.binding === binding && previous.delivery === requestedDelivery) throw alreadyBound;
+      if (current.state !== 'Accepted') throw Object.assign(new Error('same-session continuation must be fixed before delivery'), { code: 'INVALID_TRANSITION' });
+      return { ...current, sameSessionContinuation: { intent, binding, delivery: requestedDelivery, policyEpoch, nextUnit: sameSession.nextUnit,
+        bindings: [...(previous?.bindings ?? (previous ? [previous.binding] : [])), binding] } };
+    }); } catch (error) { if (error !== alreadyBound) throw error; }
+    record = await store.read(unit);
+  }
   if (parentRuntime !== undefined) {
     if (!parentRuntime || typeof parentRuntime.sessionId !== 'string' || !parentRuntime.sessionId
       || typeof parentRuntime.cwd !== 'string' || !path.isAbsolute(parentRuntime.cwd)
@@ -144,7 +179,8 @@ export async function finishSessionUnit({
     await observeParent();
   }
   if (typeof adapters.git?.inspectUnit !== 'function') throw Object.assign(new Error('delivery requires Git inspection'), { code: 'ADAPTER_MISSING' });
-  const delivered = await executeDelivery({ stateRoot, store, unit, requestedDelivery, delivery, adapters });
+  const expected = effectArgsDigest({ policy, accepted: record.accepted, epoch: record.policyChanges?.at(-1)?.revision ?? 0, continuation: record.sameSessionContinuation ?? null });
+  const delivered = await executeDelivery({ stateRoot, store, unit, requestedDelivery, delivery, adapters, expected });
   if (delivered.code !== 0) return delivered;
   record = await store.read(unit);
   const handoff = pendingFiles?.handoff ?? (successor?.approved ? await writeHandoff(stateRoot, unit, handoffContent) : null);
@@ -153,18 +189,19 @@ export async function finishSessionUnit({
     ? { kind: 'next', path: handoff.path, unit: lineValue(successor.unit, 'successor unit') }
     : goalComplete
       ? { kind: 'complete' }
-      : null;
+      : sameSession ? { kind: 'continue', unit: sameSession.nextUnit } : null;
   if (!outcome) throw Object.assign(new Error('session finish requires an approved successor or confirmed goal completion'), { code: 'USER_DECISION_REQUIRED' });
   const resultContent = pendingFiles?.resultContent ?? formatUnitResult({ ...resultFields, outcome });
-  const resultPath = pendingFiles?.resultPath ?? await writeUnitResult(stateRoot, unit, resultContent);
+  const resultPath = pendingFiles?.resultPath ?? await writeUnitResult(stateRoot, unit, resultContent, { allowContinuing: Boolean(sameSession) });
   const resultDigest = pendingFiles?.resultDigest ?? `sha256:${createHash('sha256').update(await readFile(resultPath)).digest('hex')}`;
   if (!pendingFiles) await store.update(unit, current => ({
     ...current,
     result: resultContent,
     resultRef: { path: resultPath, digest: resultDigest },
-    next: handoff ? { unit: successor.unit, handoff } : null,
+    next: handoff ? { unit: successor.unit, handoff } : sameSession ? { unit: sameSession.nextUnit, sameSession: true } : null,
     ...(goalSnapshot ? { goalSnapshot } : {}),
     ...(continuity && goalComplete ? { goalCompletion: { goalId: continuity.goal.id, revision: continuity.revision, proof: goalProof } } : {}),
+    ...(continuity && sameSession ? { goalContinuation: { goalId:continuity.goal.id, revision:continuity.revision, nextUnit:sameSession.nextUnit, owner:parentRuntime } } : {}),
     ...(returnTo ? { sessionFinalization: { owner, recipient: returnTo, resultPath, resultDigest, sessionStart: null } } : {}),
   }));
   const prepareFinalization = async (recipient, sessionStart = null) => {
@@ -184,6 +221,7 @@ export async function finishSessionUnit({
   if (!successor?.approved && !returnTo) {
     const closed = await commitTerminalClose({ store, unit, git: adapters.git });
     if (closed.state === 'Closed' && continuity && goalComplete) await commitGoalCompletion({ continuityStore: createContinuityStore(stateRoot), unitStore: store, goalId: continuity.goal.id, unit });
+    if (closed.state === 'Closed' && continuity && sameSession) await commitGoalContinuation({ continuityStore:createContinuityStore(stateRoot),unitStore:store,goalId:continuity.goal.id,unit });
     return { code: closed.state === 'Closed' ? 0 : 1, state: closed.state, resultPath, resultDigest, delivery: authorized, successor: null, summary: 'Unit completed' };
   }
   if (returnTo) return prepareFinalization(returnTo);

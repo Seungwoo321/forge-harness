@@ -472,3 +472,121 @@ test('managed final completion requires covered goal criteria and records comple
   assert.equal((await finalizeSessionUnit({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',adapters})).state,'Closed');
   assert.equal((await goals.read('goal2')).goal.status,'complete');
 });
+
+test('finish rejects acceptance and delivery policy replaced after it began', async t => {
+  const f=await fixture(t,false);
+  await f.store.update('unit-finish',current=>({...current,state:'Accepted'}));
+  let resolveWaiting,resolveRelease;
+  const waiting=new Promise(resolve=>{resolveWaiting=resolve}),release=new Promise(resolve=>{resolveRelease=resolve});
+  t.after(()=>resolveRelease());
+  let reads=0;
+  const wrapped={...f.store,read:async unit=>{if(++reads===2){resolveWaiting();await release;}return f.store.read(unit);}};
+  const finishing=finishSessionUnit({stateRoot:f.stateRoot,store:wrapped,unit:'unit-finish',resultFields,goalComplete:true,adapters:f.adapters});
+  await waiting;
+  const before=await f.store.read('unit-finish');
+  const {changeUnitDelivery}=await import('./lib/unit-policy-change.mjs');
+  const adapters={...f.adapters,provider:{async verifyUserInput(input){return {...input,verified:true};}}};
+  await changeUnitDelivery({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',request:{id:'merge',expectedRevision:before.revision,delivery:'merge',reason:'user selected merge'},userInputRef:'user',adapters});
+  await f.store.update('unit-finish',current=>({...current,state:'Accepted',accepted:{head:'head-1',contentFingerprint:'sha256:current',repo:'r',branch:'b',tree:'t',indexTree:'t',headTree:'t',base:'main'}}));
+  const rejected=assert.rejects(finishing,{code:'DELIVERY_PLAN_MISMATCH'});
+  resolveRelease(); await rejected;
+  const current=await f.store.read('unit-finish'); assert.equal(current.state,'Accepted'); assert.equal(current.deliveryResult,undefined);
+});
+
+test('finish rejects policy changed away and back even if acceptance is identical', async t => {
+  const f=await fixture(t,false); await f.store.update('unit-finish',current=>({...current,state:'Accepted'}));
+  let resolveWaiting,resolveRelease; const waiting=new Promise(resolve=>{resolveWaiting=resolve}),release=new Promise(resolve=>{resolveRelease=resolve}); t.after(()=>resolveRelease());
+  let reads=0; const wrapped={...f.store,read:async unit=>{if(++reads===2){resolveWaiting();await release;}return f.store.read(unit);}};
+  const original=await f.store.read('unit-finish');
+  const finishing=finishSessionUnit({stateRoot:f.stateRoot,store:wrapped,unit:'unit-finish',resultFields,goalComplete:true,adapters:f.adapters}); await waiting;
+  const {changeUnitDelivery}=await import('./lib/unit-policy-change.mjs'); const adapters={...f.adapters,provider:{async verifyUserInput(input){return {...input,verified:true};}}};
+  for(const delivery of ['merge','none']){const current=await f.store.read('unit-finish');await changeUnitDelivery({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',request:{id:`change-${delivery}`,expectedRevision:current.revision,delivery,reason:'authorized'},userInputRef:'user',adapters});}
+  await f.store.update('unit-finish',current=>({...current,state:'Accepted',accepted:original.accepted}));
+  const rejected=assert.rejects(finishing,{code:'DELIVERY_PLAN_MISMATCH'}); resolveRelease(); await rejected;
+  assert.equal((await f.store.read('unit-finish')).state,'Accepted');
+});
+
+test('approved same-session continuation closes only the unit and preserves remaining work', async t => {
+  const f=await fixture(t,false); await f.store.update('unit-finish',current=>({...current,state:'Accepted'}));
+  let sessionEffects=0;
+  const outcome=await finishSessionUnit({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',resultFields,
+    sameSession:{approved:true,nextUnit:'next-work'},adapters:f.adapters,
+    sessionAdapter:{async observe(){sessionEffects++;},async execute(){sessionEffects++;},async verify(){sessionEffects++;}}});
+  assert.equal(outcome.code,0,JSON.stringify(outcome));assert.equal(outcome.state,'Closed');assert.equal(sessionEffects,0);
+  const record=await f.store.read('unit-finish');assert.deepEqual(record.next,{unit:'next-work',sameSession:true});
+  const text=await readFile(record.resultRef.path,'utf8');assert.match(text,/다음 작업 단위: next-work\n$/);assert.doesNotMatch(text,/단위 종료 —/);
+  assert.deepEqual(await createLedgerStore(f.stateRoot).withLock('unit-finish',ledger=>ledger.read()),[]);
+});
+
+test('managed same-session continuation closes the unit and transfers its goal custody without launching', async t => {
+  const f=await fixture(t,false); await f.store.update('unit-finish',current=>({...current,state:'Accepted',continuity:{goalId:'goal1'}}));
+  const {createContinuityStore}=await import('./lib/continuity-store.mjs');
+  const source=path.join(f.root,'goal.md');await writeFile(source,'goal');
+  const goals=createContinuityStore(f.stateRoot);
+  await goals.create({goal:{id:'goal1',objective:'goal',criteria:['done'],remaining:['unit-finish','unit-next'],status:'active'},
+    policy:{runtime:'cmux',provider:'codex',account:'/account',model:'model',effort:'high',argv:['codex']},source:{path:source,digest:taskDigest('goal')}});
+  const owner={sessionId:'parent',incarnationId:'parent-1',cwd:'/work/next'};
+  await goals.transaction('goal1',current=>({...current,revision:current.revision+1,bootstraps:[{unit:'unit-finish',...owner}]}));
+  let effects=0;
+  const outcome=await finishSessionUnit({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',resultFields,parentRuntime:owner,
+    sameSession:{approved:true,nextUnit:'unit-next'},adapters:f.adapters,sessionAdapter:{async observe(){effects++;},async execute(){effects++;},async verify(){effects++;}}});
+  assert.equal(outcome.state,'Closed');assert.equal(effects,0);
+  const goal=await goals.read('goal1');assert.deepEqual(goal.goal.remaining,['unit-next']);
+  assert.deepEqual(goal.bootstraps.at(-1),{unit:'unit-next',attempt:1,...owner});
+});
+
+test('same-session continuation rejects conflicting transfer and changed retry', async t => {
+  const f=await fixture(t,true);await f.store.update('unit-finish',current=>({...current,state:'Accepted'}));
+  const base={stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',resultFields,sameSession:{approved:true,nextUnit:'next-work'},adapters:f.adapters};
+  await assert.rejects(finishSessionUnit({...base,goalComplete:true}),{code:'SESSION_CONTINUATION_INVALID'});
+  let fail=true;const trackerAdapter={async read(){return null;},async project(){if(fail)throw Error('temporarily unavailable');}};
+  const first=await finishSessionUnit({...base,trackerAdapter});assert.equal(first.code,3);assert.equal((await f.store.read('unit-finish')).state,'Delivered');
+  await assert.rejects(finishSessionUnit({...base,sameSession:{approved:true,nextUnit:'other-work'},trackerAdapter}),{code:'SESSION_CONTINUATION_CONFLICT'});
+  await assert.rejects(finishSessionUnit({...base,sameSession:null,goalComplete:true,trackerAdapter}),{code:'SESSION_CONTINUATION_CONFLICT'});
+  fail=false;const resumed=await finishSessionUnit({...base,trackerAdapter});assert.equal(resumed.code,0);assert.equal(resumed.state,'Closed');
+});
+
+test('same-session retry remains bound after a delivery commit advances accepted head', async t => {
+  const f=await fixture(t,true);await f.store.update('unit-finish',current=>({...current,state:'Accepted'}));
+  let fail=true;const trackerAdapter={async read(){return null;},async project(){if(fail)throw Error('temporarily unavailable');}};
+  const request={stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',resultFields,sameSession:{approved:true,nextUnit:'next-work'},adapters:f.adapters,trackerAdapter};
+  assert.equal((await finishSessionUnit(request)).code,3);
+  await f.store.update('unit-finish',current=>({...current,accepted:{...current.accepted,validatedHead:'head-1',head:'commit-1'}}));
+  f.adapters.git.inspectUnit=async()=>({head:'commit-1',contentFingerprint:'sha256:current'});
+  fail=false;const result=await finishSessionUnit(request);assert.equal(result.code,0);assert.equal(result.state,'Closed');
+});
+
+test('same-session continuation safely rebinds after the changed target is reaccepted', async t => {
+  const f=await fixture(t,false);await f.store.update('unit-finish',current=>({...current,state:'Accepted'}));
+  let head='head-2';f.adapters.git.inspectUnit=async()=>({head,contentFingerprint:'sha256:current'});
+  const request={stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',resultFields,sameSession:{approved:true,nextUnit:'next-work'},adapters:f.adapters};
+  const first=await finishSessionUnit(request);assert.equal(first.code,1);let record=await f.store.read('unit-finish');assert.equal(record.state,'SelfGated');
+  const previous=record.sameSessionContinuation.binding;
+  await f.store.update('unit-finish',current=>({...current,state:'Accepted',accepted:{...current.accepted,head,validatedHead:head,contentFingerprint:'sha256:current'}}));
+  const result=await finishSessionUnit(request);assert.equal(result.code,0,JSON.stringify(result));record=await f.store.read('unit-finish');
+  assert.equal(record.state,'Closed');assert.equal(record.sameSessionContinuation.bindings.length,2);assert.equal(record.sameSessionContinuation.bindings[0],previous);
+  assert.notEqual(record.sameSessionContinuation.binding,previous);
+});
+
+test('same-session retry cannot substitute a delivery level without an authorized policy change', async t => {
+  const f=await fixture(t,false);await f.store.update('unit-finish',current=>({...current,state:'Accepted',policy:{...current.policy,delivery:'merge'}}));
+  const inspect=f.adapters.git.inspectUnit;delete f.adapters.git.inspectUnit;
+  const base={stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',resultFields,sameSession:{approved:true,nextUnit:'next-work'},adapters:f.adapters};
+  await assert.rejects(finishSessionUnit({...base,requestedDelivery:'push'}),{code:'ADAPTER_MISSING'});
+  f.adapters.git.inspectUnit=inspect;
+  await assert.rejects(finishSessionUnit({...base,requestedDelivery:'none'}),{code:'SESSION_CONTINUATION_CONFLICT'});
+  const current=await f.store.read('unit-finish');assert.equal(current.state,'Accepted');assert.equal(current.sameSessionContinuation.delivery,'push');
+});
+
+test('same-session delivery may change after an authorized policy revision and reacceptance', async t => {
+  const f=await fixture(t,false);await f.store.update('unit-finish',current=>({...current,state:'Accepted'}));
+  delete f.adapters.git.inspectUnit;
+  const base={stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',resultFields,sameSession:{approved:true,nextUnit:'next-work'},adapters:f.adapters};
+  await assert.rejects(finishSessionUnit(base),{code:'ADAPTER_MISSING'});
+  const {changeUnitDelivery}=await import('./lib/unit-policy-change.mjs');const current=await f.store.read('unit-finish');
+  const adapters={...f.adapters,provider:{async verifyUserInput(input){return {...input,verified:true};}}};
+  await changeUnitDelivery({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',request:{id:'merge',expectedRevision:current.revision,delivery:'merge',reason:'authorized'},userInputRef:'user',adapters});
+  await f.store.update('unit-finish',r=>({...r,state:'Accepted',accepted:{head:'head-1',contentFingerprint:'sha256:current'}}));
+  await assert.rejects(finishSessionUnit(base),{code:'ADAPTER_MISSING'});
+  const updated=await f.store.read('unit-finish');assert.equal(updated.sameSessionContinuation.delivery,'merge');assert.equal(updated.sameSessionContinuation.bindings.length,2);
+});

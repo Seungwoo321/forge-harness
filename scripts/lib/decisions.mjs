@@ -35,7 +35,7 @@ export function validateDecision(record, decisionId) {
   if (!Array.isArray(decision.blocks) || decision.blocks.some(id => !(record.acceptance ?? []).some(item => item.id === id))) {
     throw decisionError('DECISION_INVALID', 'decision blocks must identify existing acceptance criteria');
   }
-  if (!Array.isArray(record.canon) || !record.canon.length
+  if (!Array.isArray(record.canon) || decision.kind === 'canon-conflict' && !record.canon.length
     || record.canon.some(item => typeof item?.path !== 'string' || !item.path || typeof item.digest !== 'string' || !item.digest)) {
     throw decisionError('DECISION_INVALID', 'unit must identify valid canonical references');
   }

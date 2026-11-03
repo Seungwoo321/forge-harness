@@ -336,26 +336,45 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
       || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(request.checkpointHead ?? '') || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(request.newHead ?? '')
       || !/^sha256:[a-f0-9]{64}$/.test(request.inputDigest ?? '')) usageError('stage restart requires the exact attempt, inputDigest, checkpointHead and newHead');
     if (typeof adapters.command !== 'function' || typeof adapters.checkpoint?.inspectChanges !== 'function') throw Object.assign(new Error('stage restart requires Git checkpoint inspection'), { code: 'ADAPTER_MISSING' });
-    let retired;
-    await withGitHeadLock({ cwd, adapters }, () => store.update(unit, async current => {
+    let retired, refreshed = false, duplicate = false;
+    const alreadyRecorded = new Error('stage restart already recorded');
+    try { await withGitHeadLock({ cwd, adapters }, () => store.update(unit, async current => {
       assertStageState(current, stage);
       const entry = (current.stages ?? []).find(item => item.name === stage);
-      const active = entry?.attempts?.find(item => !item.endedAt);
-      if (!active || active.n !== request.attempt || active.inputDigest !== request.inputDigest || active.checkpointHead !== request.checkpointHead)
-        throw Object.assign(new Error('open stage does not match the requested attempt'), { code: 'STAGE_STALE' });
+      const open = entry?.attempts?.find(item => !item.endedAt);
+      const active = open ?? entry?.attempts?.at(-1);
+      if (!active || !open && (active.result !== 'superseded' || !active.restart)
+        || active.n !== request.attempt || active.inputDigest !== request.inputDigest || active.checkpointHead !== request.checkpointHead)
+        throw Object.assign(new Error('stage does not match the requested attempt'), { code: 'STAGE_STALE' });
       const inspected = await adapters.checkpoint.inspectChanges({ unit, stage, attempt: active.n, checkpoint: active.checkpoint,
         firstCheckpoint: firstCheckpoint(current) ?? active.checkpoint, exclude: current.policy?.checkpoint?.exclude ?? [] });
       if (inspected.head !== request.newHead || inspected.head === active.checkpointHead) throw Object.assign(new Error('stage checkpoint is not stale at the requested head'), { code: 'STAGE_STALE' });
-      const ancestry = await adapters.command('git', ['merge-base', '--is-ancestor', active.checkpointHead, inspected.head], { cwd });
+      if (!open && inspected.head === active.restart.newHead) { retired = active.n; duplicate = true; throw alreadyRecorded; }
+      const ancestry = await adapters.command('git', ['merge-base', '--is-ancestor', open ? active.checkpointHead : active.restart.newHead, inspected.head], { cwd });
       const head = await adapters.command('git', ['rev-parse', 'HEAD'], { cwd });
       if (ancestry.exitCode !== 0 || head.exitCode !== 0 || head.stdout.trim() !== inspected.head)
         throw Object.assign(new Error('current head does not safely extend the checkpoint head'), { code: 'STAGE_STALE' });
+      let skipPendingAttempt = active.restart?.skipPendingAttempt ?? 0;
+      if (!open) {
+        const pendingAttempt = Math.max(active.n, skipPendingAttempt) + 1;
+        const file = path.join(stateRoot, 'units', unit, 'stages', `${stage}.${pendingAttempt}.input.json`);
+        let pending;
+        try { pending = JSON.parse(await readFile(file, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+        if (pending) {
+          const { inputDigest, ...input } = pending;
+          if (pending.unit !== unit || pending.stage !== stage || pending.attempt !== pendingAttempt
+            || pending.head !== active.restart.newHead || digest(input) !== inputDigest)
+            throw Object.assign(new Error('pending stage input does not match the previous restart'), { code: 'STAGE_STALE' });
+          skipPendingAttempt = pendingAttempt;
+        }
+      }
       retired = active.n;
+      refreshed = !open;
       return { ...current, stages: current.stages.map(item => item !== entry ? item : { ...item,
-        attempts: item.attempts.map(attempt => attempt.n !== active.n ? attempt : { ...attempt, endedAt: adapters.now(), result: 'superseded',
-          restart: { checkpointHead: active.checkpointHead, newHead: inspected.head, tree: inspected.tree } }) }) };
-    }));
-    return { code: 0, summary: `Retired stale ${stage} attempt for ${unit}; open the next attempt`, details: { unit, stage, attempt: retired, newHead: request.newHead } };
+        attempts: item.attempts.map(attempt => attempt.n !== active.n ? attempt : { ...attempt, ...(open ? {endedAt: adapters.now(), result: 'superseded'} : {restartHistory:[...(attempt.restartHistory ?? []),attempt.restart]}),
+          restart: { checkpointHead: active.checkpointHead, newHead: inspected.head, tree: inspected.tree, ...(skipPendingAttempt ? {skipPendingAttempt} : {}) } }) }) };
+    })); } catch (error) { if (error !== alreadyRecorded) throw error; }
+    return { code: 0, summary: `Prepared ${stage} restart for ${unit}; open the next attempt`, details: { unit, stage, attempt: retired, newHead: request.newHead, ...(refreshed ? {refreshed:true} : {}), ...(duplicate ? {duplicate:true} : {}) } };
   }
   if (options.action === 'open') {
     let opened;
@@ -380,7 +399,7 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
       }
       const restart = stage === 'implement' ? attempts.at(-1)?.restart : null;
       if (restart) target = { ...target, head: restart.newHead, contentFingerprint: '' };
-      const attempt = 1 + Math.max(0, ...attempts.map(item => item.n));
+      const attempt = 1 + Math.max(0, restart?.skipPendingAttempt ?? 0, ...attempts.map(item => item.n));
       if (typeof adapters.checkpoint?.createCheckpoint !== 'function') {
         const error = new Error('checkpoint adapter must implement createCheckpoint');
         error.code = 'ADAPTER_MISSING';

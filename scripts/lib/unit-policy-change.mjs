@@ -1,0 +1,60 @@
+import { effectArgsDigest, verifyApprovalInput } from './approvals.mjs';
+import { createLedgerStore } from './ledger.mjs';
+import { resolvePolicy } from './policy.mjs';
+import { transitionRecord } from './unit-state.mjs';
+import { attemptsFor } from './stage-attempts.mjs';
+
+const deliveries = new Set(['none', 'commit', 'push', 'pr', 'merge']);
+const identifier = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) && !['.', '..'].includes(value);
+const failure = (code, message) => Object.assign(new Error(message), { code });
+
+export async function changeUnitDelivery({ stateRoot, store, unit, request, userInputRef, adapters }) {
+  if (!request || typeof request !== 'object' || Array.isArray(request)
+    || Object.keys(request).sort().join(',') !== 'delivery,expectedRevision,id,reason'
+    || !identifier(request.id) || !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 1
+    || !deliveries.has(request.delivery) || typeof request.reason !== 'string' || !request.reason.trim()
+    || typeof userInputRef !== 'string' || !userInputRef.trim()) throw failure('POLICY_CHANGE_INVALID', 'exact delivery, revision, reason and user authorization are required');
+  const requestDigest = effectArgsDigest({ request, userInputRef });
+  const ledgerStore = createLedgerStore(stateRoot);
+  let receipt;
+  const duplicate = new Error('policy change already recorded');
+  try {
+    await ledgerStore.withLock(unit, async ledger => {
+      const entries = await ledger.read();
+      await store.update(unit, async record => {
+        const existing = (record.policyChanges ?? []).find(item => item.id === request.id);
+        if (existing) {
+          if (existing.requestDigest !== requestDigest) throw failure('POLICY_CHANGE_CONFLICT', 'policy change ID already has a different request');
+          receipt = { ...existing, duplicate: true }; throw duplicate;
+        }
+        if (record.revision !== request.expectedRevision) throw failure('POLICY_CHANGE_STALE', 'unit revision changed');
+        if (!['SelfGated', 'Accepted'].includes(record.state) || ['review', 'ops'].includes(record.kind)
+          || record.deliveryPlan || record.deliveryResult || record.sessionFinalization
+          || (record.stages ?? []).some(stage => attemptsFor(record, stage.name).some(attempt => !attempt.endedAt))) {
+          throw failure('INVALID_TRANSITION', 'delivery policy changes require a submitted, undelivered unit with no session finalization');
+        }
+        if (entries.some(entry => {
+          if (entry.event !== 'intent') return false;
+          const latest = entries.findLast(row => row.event === 'result' && row.seq === entry.seq && row.key === entry.key);
+          return !latest || ['unknown', 'uncertain'].includes(latest.result?.status);
+        })) {
+          throw failure('EFFECT_UNCERTAIN', 'reconcile uncertain effects before changing policy');
+        }
+        const before = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true }).policy;
+        if (before.delivery === request.delivery) throw failure('POLICY_CHANGE_INVALID', 'delivery is already set to the requested value');
+        const overrides = { ...(record.policyOverrides ?? {}), delivery: request.delivery };
+        const after = resolvePolicy({ unit: overrides, project: record.policy ?? {} }, { nonInteractive: true }).policy;
+        await verifyApprovalInput(adapters.provider, { unit, userInputRef, effect: 'unit.policy.change', argsDigest: requestDigest,
+          before: before.delivery, after: after.delivery, reason: request.reason });
+        const changedAt = adapters.now();
+        receipt = { ...request, unit, requestDigest, userInputRef, before: before.delivery, after: after.delivery,
+          previousPolicy: before, previousAcceptance: record.accepted ?? null, previousReviewDecision: record.reviewDecision ?? null,
+          changedAt, revision: record.revision + 1 };
+        const updated = { ...record, policyOverrides: overrides, policyChanges: [...(record.policyChanges ?? []), receipt],
+          accepted: null, reviewDecision: null, reviewedHead: null, verdict: null };
+        return record.state === 'Accepted' ? transitionRecord(updated, 'SelfGated') : updated;
+      });
+    });
+  } catch (error) { if (error !== duplicate) throw error; }
+  return receipt;
+}

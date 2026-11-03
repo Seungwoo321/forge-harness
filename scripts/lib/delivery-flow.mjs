@@ -26,12 +26,20 @@ export function validateDeliveryContext(context) {
   return { ...Object.fromEntries(fields.map(field => [field, context[field]])), explicitUserInstruction: context.explicitUserInstruction === true };
 }
 
-export async function executeDelivery({ stateRoot, store, unit, requestedDelivery, delivery = {}, adapters }) {
+export async function executeDelivery({ stateRoot, store, unit, requestedDelivery, delivery = {}, adapters, expected }) {
   const ledgerStore = createLedgerStore(stateRoot);
   let record = await store.read(unit);
   const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
   authorizeDelivery(policy, requestedDelivery);
+  expected ??= effectArgsDigest({ policy, accepted: record.accepted, epoch: record.policyChanges?.at(-1)?.revision ?? 0, continuation: record.sameSessionContinuation ?? null });
+  const checkBinding = current => {
+    const effective = resolvePolicy({ unit: current.policyOverrides ?? {}, project: current.policy ?? {} }, { nonInteractive: true }).policy;
+    if (effectArgsDigest({ policy: effective, accepted: current.accepted, epoch: current.policyChanges?.at(-1)?.revision ?? 0, continuation: current.sameSessionContinuation ?? null }) !== expected
+      || current.policyChanges?.length && requestedDelivery !== effective.delivery) throw failure('DELIVERY_PLAN_MISMATCH', 'policy or acceptance changed after finish began');
+  };
+  checkBinding(record);
   if (!['Accepted', 'Delivering', 'Delivered'].includes(record.state)) throw failure('INVALID_TRANSITION', 'delivery requires an accepted unit');
+  const resumingDelivery = record.state === 'Delivering';
   if (record.deliveryPlan && record.state !== 'Accepted' && record.deliveryPlan.level !== requestedDelivery) {
     throw failure('DELIVERY_PLAN_MISMATCH', 'resumed delivery must retain its original level');
   }
@@ -48,8 +56,12 @@ export async function executeDelivery({ stateRoot, store, unit, requestedDeliver
     return { code: 1, state: record.state, summary: reason };
   };
   if (!validAcceptance(record)) return invalidate(null, 'Accepted gate evidence is invalid; reacceptance is required');
+  if (resumingDelivery && requestedDelivery === 'merge' && (!Number.isSafeInteger(record.deliveryStartSeq) || record.deliveryStartSeq < 0)) {
+    return { code: 3, state: record.state, summary: 'Legacy delivery boundary is unresolved; inspection is required' };
+  }
   if (requestedDelivery === 'none') {
     record = await store.update(unit, async current => {
+      checkBinding(current);
       const target = await inspect(current);
       if (!validAcceptance(current) || !validateAcceptedContent(current.accepted, target).valid) return transitionRecord({ ...current, accepted: null, reviewDecision: null }, 'SelfGated');
       return current.state === 'Accepted' ? transitionRecord(current, 'Delivering') : current;
@@ -77,7 +89,12 @@ export async function executeDelivery({ stateRoot, store, unit, requestedDeliver
   if (record.state !== 'Accepted' && record.deliveryPlan && effectArgsDigest(plan) !== effectArgsDigest(record.deliveryPlan)) {
     throw failure('DELIVERY_PLAN_MISMATCH', 'resumed delivery must retain its original target and presentation');
   }
-  if (record.state === 'Accepted') record = await store.update(unit, current => transitionRecord({ ...current, deliveryPlan: plan, deliveryResult: null }, 'Delivering'));
+  if (record.state === 'Accepted') record = await ledgerStore.withLock(unit, async ledger => {
+    const rows = await ledger.read();
+    if (rows.some(row => row.event === 'intent' && (!Number.isSafeInteger(row.seq) || row.seq < 1))) throw failure('LEDGER_CORRUPT', 'delivery ledger contains an invalid intent sequence');
+    const deliveryStartSeq = rows.reduce((latest, row) => row.event === 'intent' ? Math.max(latest, row.seq) : latest, 0);
+    return store.update(unit, current => { checkBinding(current); return transitionRecord({ ...current, deliveryPlan: plan, deliveryStartSeq, deliveryResult: null }, 'Delivering'); });
+  });
 
   const refs = [];
   const reconciled = new Map();
@@ -254,7 +271,51 @@ export async function executeDelivery({ stateRoot, store, unit, requestedDeliver
     const routed = await routeFailure('git.push', output);
     if (routed) return routed;
   }
-  if (['pr', 'merge'].includes(requestedDelivery)) {
+  let recoveredMerge = false;
+  if (resumingDelivery && requestedDelivery === 'merge') {
+    const history = await ledgerStore.withLock(unit, ledger => ledger.read());
+    const rows = history.filter(row => Number.isSafeInteger(row.seq) && row.seq > record.deliveryStartSeq);
+    const target = { repo: plan.repo, branch: plan.branch, head: record.accepted.head, base: plan.base };
+    const matchingPr = row => row.event === 'intent' && row.effect === 'pr.create'
+      && ['repo', 'branch', 'head', 'base'].every(field => row.args?.[field] === target[field]);
+    const priorMerge = rows.findLast(row => row.event === 'intent' && row.effect === 'pr.merge'
+      && row.args?.repo === plan.repo && row.args?.head === record.accepted.head && row.args?.base === plan.base);
+    if (priorMerge) {
+      const priorPr = history.findLast(row => matchingPr(row) && history.some(result => result.event === 'result' && result.seq === row.seq && result.key === row.key && result.result?.pr === priorMerge.args.pr));
+      if (!priorPr) return { code: 3, state: record.state, summary: 'Original PR identity is unresolved; inspection is required' };
+      const verifyMerge = () => adapters.repository?.verify?.({ unit, effect: 'pr.merge', args: priorMerge.args, key: priorMerge.key, seq: priorMerge.seq });
+      const hasProof = value => value?.verify && typeof value.verify.adapter === 'string' && typeof value.verify.operation === 'string'
+        && value.verify.args && typeof value.verify.args === 'object' && !Array.isArray(value.verify.args);
+      let verified = await verifyMerge();
+      if (!hasProof(verified) || !['completed', 'not-applied'].includes(verified.status)) return { code: 3, state: record.state, summary: 'Original merge is unresolved; inspection is required' };
+      refs.push({ effect: 'pr.create', seq: priorPr.seq, key: priorPr.key });
+      const outcome = await run('pr.merge', priorMerge.args);
+      if (outcome.stop) return outcome.stop;
+      const routed = await routeFailure('pr.merge', outcome);
+      if (routed) return routed;
+      if (verified.status === 'not-applied') verified = await verifyMerge();
+      if (!hasProof(verified) || verified.status !== 'completed' || verified.result?.acceptedHead !== record.accepted.head
+        || verified.result?.base !== plan.base || typeof verified.result?.mergeHead !== 'string' || !verified.result.mergeHead
+        || effectArgsDigest(outcome.result) !== effectArgsDigest(verified.result)) {
+        return { code: 3, state: record.state, summary: 'Original merge evidence differs; inspection is required' };
+      }
+      mergeHead = bindMergeResult(record.accepted, record.accepted, verified.result).deliveryResult.mergeHead;
+      recoveredMerge = true;
+    } else {
+      const priorPr = rows.findLast(row => matchingPr(row));
+      const priorResult = priorPr && rows.findLast(row => row.event === 'result' && row.seq === priorPr.seq && row.key === priorPr.key);
+      if (priorResult?.result?.pr) {
+        const args = { repo: plan.repo, pr: priorResult.result.pr, head: record.accepted.head, base: plan.base };
+        const verified = await adapters.repository?.verify?.({ unit, effect: 'pr.merge', args, key: prepareEffect('pr.merge', args).key });
+        if (verified?.status === 'completed') return { code: 3, state: record.state, summary: 'Merged PR has no recorded merge intent; inspection is required' };
+        const prState = await adapters.repository?.verify?.({ unit, effect: 'pr.create', args: priorPr.args, key: priorPr.key, seq: priorPr.seq });
+        if (!prState?.verify || !['open', 'closed', 'not-found'].includes(prState.status)) {
+          return { code: 3, state: record.state, summary: 'Original PR state is unresolved; inspection is required' };
+        }
+      }
+    }
+  }
+  if (['pr', 'merge'].includes(requestedDelivery) && !recoveredMerge) {
     changed = await stale();
     if (changed) return invalidate(changed, 'Accepted target changed before PR');
     const args = { repo: plan.repo, branch: plan.branch, head: record.accepted.head, base: plan.base, title: plan.title, body: plan.body };

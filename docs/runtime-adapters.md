@@ -40,9 +40,15 @@ Codex argv의 마지막 인자는 정확한 초기 prompt다. 기본 Codex trans
 
 다른 worker는 명시적 `taskTransport`를 등록한다. `observe({observed,input,prompt,packets})`는 `startup|modal|ready|prefilled|queued|accepted|started`와 네이티브 근거를 반환한다. `started`에는 promptDigest·threadId·requestId·turnId·activityId·packets가 필요하다. `submit({...request,fence})`는 같은 native readiness fence에서 정확한 입력만 조건부 제출한다. interactive pending 입력의 Enter와 busy 입력의 steering/queue는 이 transport가 처리한다. 화면은 composer 준비 관찰에만 쓰고 승인·수신 증거로 쓰지 않는다. cmux는 원자적 composer API가 없으므로 native identity와 정확한 화면을 입력 전 재검사하며 receipt를 별도로 검증한다. `identity(observed)`는 실제 worker의 threadId를 반환한다. `taskPrompt(args,argv)`는 초기 prompt 형식이 다른 worker에만 필요하다.
 
-자동 종료에는 `parent.workerExecutable`과 `parent.closable: true`가 필요하다. incarnation은 해당 worker의 실제 관찰값이며 wrapper 셸의 PID로 대체하지 않는다. `unit finish`는 결과/인계를 고정한 뒤 exit 3을 반환하고 분리된 finalizer를 기동한다. 그 로그는 `<stateRoot>/units/<unit>/finalization.log`다. finalizer만 결과 수신·착수, close intent, 정확한 worker 신원, 종료 뒤 부재를 확인하고 Closed를 기록한다. `returnTo: {sessionId,incarnationId,cwd,executable}`를 주면 기존 parent로 결과를 돌려보낸다. 수신이 지연되거나 종료가 불확실하면 같은 `unit finalize <unit> --adapters <module>` 또는 원래 finish를 재호출한다. 초기 session.start의 unit·role·attempt·args·key는 변경하지 않는다. 기존 원장·결과 파일을 새 필드에 맞춰 직접 수정하지 않는다.
+승인된 다음 작업을 같은 세션에서 계속할 때 finish 요청의 `sameSession: {approved: true, nextUnit: "<unit>"}`을 사용한다. 이 경로는 단위 결과·남은 일·다음 작업을 기록하고 단위만 닫으며 session start·deliver·close나 종료 finalizer를 만들지 않는다. 전체 목표 완료나 실제 인계와 함께 요청할 수 없다.
+
+자동 종료에는 `parent.workerExecutable`과 `parent.closable: true`가 필요하다. incarnation은 해당 worker의 실제 관찰값이며 wrapper 셸의 PID로 대체하지 않는다. 실제 세션 인계의 `unit finish`는 결과/인계를 고정한 뒤 exit 3을 반환하고 분리된 finalizer를 기동한다. 그 로그는 `<stateRoot>/units/<unit>/finalization.log`다. finalizer만 결과 수신·착수, close intent, 정확한 worker 신원, 종료 뒤 부재를 확인하고 Closed를 기록한다. `returnTo: {sessionId,incarnationId,cwd,executable}`를 주면 기존 parent로 결과를 돌려보낸다. 수신이 지연되거나 종료가 불확실하면 같은 `unit finalize <unit> --adapters <module>` 또는 원래 finish를 재호출한다. 초기 session.start의 unit·role·attempt·args·key는 변경하지 않는다. 기존 원장·결과 파일을 새 필드에 맞춰 직접 수정하지 않는다.
 
 반환 의무는 tracker 투영 전에 저장되며 public close/reconcile도 이를 우회하지 못한다. 구버전 process-only result는 같은 seq/key의 실제 native 재관찰로 보강하고 원 행을 남긴다. cmux의 마지막 surface 종료에는 종료된 빈 placeholder surface를 먼저 만든다. workspace 전체 종료는 사용하지 않으므로 동시에 추가된 다른 surface는 유지된다. 종료 뒤 해당 workspace에는 빈 surface가 남을 수 있다.
+
+활성 단위의 전달 정책 변경은 `unit policy change <unit> --request <file> --user-input <ref>`를 사용한다. 요청은 `id`, `expectedRevision`, `delivery`, `reason`을 포함한다. 신뢰된 `provider.verifyUserInput`은 정확한 요청 digest와 이전·새 전달 수준, 사용자 입력 출처를 검증한다. 제출된 SelfGated 또는 Accepted 단위만 변경할 수 있으며 진행 중 단계·전달 계획·세션 종료나 불확실한 효과가 있으면 차단한다. 변경 이력에는 이전 정책·수용·리뷰와 승인 출처가 남고 기존 작업·증거·효과는 유지된다. 이전 수용은 무효화되므로 같은 단위를 다시 수용해야 한다. 동일 요청의 재시도는 기존 결과를 반환한다. 변경한 단위의 finish는 변경된 전달 수준을 기본으로 사용하며, 다른 수준은 먼저 명시적 정책 변경을 거쳐야 한다. 이미 시작된 finish와 효과는 실행 직전 단위 잠금 안에서 현재 정책과 수용 대상 또는 작업 상태를 다시 검사하며 이전 권한으로 진행하지 않는다.
+
+merge 전달은 시작할 때 원장의 기존 intent 경계를 고정한다. 중단 후에는 해당 전달에서 기록한 정확한 PR과 merge intent를 원격 상태 및 원장 결과와 대조해 재개한다. 이미 병합된 대상의 PR 생성이나 merge를 다시 실행하지 않는다. 이전 형식의 진행 중 전달처럼 경계를 증명할 수 없거나 원래 merge intent가 없는 병합은 새 효과를 만들지 않고 확인을 요구한다.
 
 전달 문맥은 `resourceOwned`, `productOwned`, `inScope`, `operational`, `irreversible`, `containsSecret`, `forbiddenCommand`의 boolean을 제공한다. 사용자 지시는 신뢰된 제공자가 검증하며 요청 파일의 자기 신고로 승격하지 않는다. 등록 실패는 구조화된 RESULT로 나오고 필수 제공자가 없는 연산은 차단된다.
 

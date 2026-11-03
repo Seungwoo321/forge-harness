@@ -25,6 +25,7 @@ function outcomeLine(outcome) {
     return `단위 종료 — 인계: ${lineValue(outcome.path, 'handoff path')} · 다음: ${lineValue(outcome.unit, 'successor unit')}`;
   }
   if (outcome.kind === 'complete') return '단위 종료 — 완료';
+  if (outcome.kind === 'continue') return `다음 작업 단위: ${lineValue(outcome.unit, 'next unit')}`;
   if (outcome.kind === 'stopped') {
     if (!stopClasses.has(outcome.classification)) throw new TypeError('unsupported stop classification');
     return `단위 종료 — 중단: ${lineValue(outcome.classification, 'classification')} · 재개: ${lineValue(outcome.resumeCondition, 'resume condition')}`;
@@ -45,11 +46,11 @@ export function formatUnitResult({ title, objective, acceptance, tracking, decis
     `다음 단위 첫 행동: ${lineValue(nextFirstAction, 'next first action')}`,
     outcomeLine(outcome),
   ].join('\n');
-  validateUnitResult(output);
+  validateUnitResult(output, { allowContinuing: outcome?.kind === 'continue' });
   return output;
 }
 
-export function validateUnitResult(content) {
+export function validateUnitResult(content, { allowContinuing = false } = {}) {
   if (typeof content !== 'string' || content.length === 0) throw new TypeError('result file must be non-empty text');
   const normalized = content.replace(/\r\n/g, '\n');
   const rows = (normalized.endsWith('\n') ? normalized.slice(0, -1) : normalized).split('\n');
@@ -57,7 +58,9 @@ export function validateUnitResult(content) {
   const final = rows.at(-1);
   const valid = final === '단위 종료 — 완료'
     || /^단위 종료 — 인계: .+ · 다음: .+$/.test(final)
-    || /^단위 종료 — 중단: .+ · 재개: .+$/.test(final);
+    || /^단위 종료 — 중단: .+ · 재개: .+$/.test(final)
+    || allowContinuing && /^다음 작업 단위: [A-Za-z0-9][A-Za-z0-9._-]*$/.test(final)
+      && packetFields.every(field => rows.some(row => row.startsWith(field) && row.slice(field.length).trim()));
   if (!valid) throw new TypeError('result file must end with a canonical unit outcome');
   return { lines: rows.length, outcome: final };
 }
@@ -97,11 +100,11 @@ export function prepareSuccessor({ record, handoff, successor, parentSessionId }
   };
 }
 
-export async function writeUnitResult(stateRoot, slug, content) {
+export async function writeUnitResult(stateRoot, slug, content, { allowContinuing = false } = {}) {
   if (typeof slug !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(slug) || slug === '.' || slug === '..') {
     throw new TypeError('slug must be a path-safe identifier');
   }
-  validateUnitResult(content);
+  validateUnitResult(content, { allowContinuing });
   const directory = path.join(path.resolve(stateRoot), 'handoff');
   const target = path.join(directory, `${slug}-result.md`);
   await mkdir(directory, { recursive: true });

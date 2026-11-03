@@ -123,3 +123,5 @@ trusted `provider.verifyUserInput`은 `{unit,userInputRef,effect:'finding.resolv
 완료된 리뷰와 현재 대상·수용 기준·게이트 증거가 일치해야 한다. 후속 구현이나 리뷰가 있으면 이전 리뷰로 해소할 수 없다. 구버전 accept가 ship 필드를 지운 경우에도 이 검증을 통과한 원본 ship만 복원하며 영수증에 이전 필드를 보존한다. 같은 요청의 재호출은 기존 영수증을 반환하고, 다른 payload·오래된 revision·소스/증거 변경은 거부한다. 기존 단계·지적·실패·게이트 증거는 삭제하지 않으며 마지막 accept가 수용을 별도로 판정한다.
 
 구버전에서 `REVIEW_TARGET_INVALID`로 멈춘 InReview 단위는 새 패키지와 같은 런타임 어댑터로 기존 리뷰 단위의 `unit stage open <review-unit> review`를 다시 실행한다. 제어면은 저장된 reviewDecision을 현재 내용과 대조하고 실제 diff·구현 인계를 생성한다. 단위나 증거 파일을 직접 수정하지 않는다. 내용이 바뀌면 열기·제출을 거부하므로 대상 단위에서 `unit accept <unit>`로 다시 검증하고 현재 대상을 리뷰한다. 같은 입력의 게이트 증거는 재사용한다.
+
+정본 문서가 없는 단위도 재시도 상한·권한·외부 접근 등 운영 결정을 기록할 수 있다. `canon: []`인 경우 존재하지 않는 정본 참조를 만들지 않고 해당 결정의 `canonRefs`를 빈 배열로 둔다. `canon-conflict` 결정에는 실제 정본 참조가 필요하며, 명시한 참조는 항상 해당 단위의 정본에 속해야 한다.

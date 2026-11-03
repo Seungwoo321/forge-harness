@@ -93,3 +93,15 @@ test('invalid decision kinds and unknown blocked criteria fail closed', async t 
   const f = await fixture(t, { decisions: [{ id: 'D-1', kind: 'other', blocks: ['missing'], canonRefs: ['docs/spec.md'] }] });
   await assert.rejects(() => f.decisions.notify({ store: f.store, unit: 'unit-a', decisionId: 'D-1', now: '2026-01-01T00:00:00.000Z' }), { code: 'DECISION_INVALID' });
 });
+
+test('retry-limit decisions without canonical documents retain their real blocker',async t=>{
+ const decision={id:'D-1',kind:'retry-limit',question:'Allow another attempt?',options:['yes','no'],blocks:['AC-1'],requiredAction:{stage:'implement',effect:'session.start',resumeCondition:'Explicit retry authorization'},canonRefs:[],notifiedAt:null,answer:null};
+ const f=await fixture(t,{state:'Implementing',decisions:[decision]});
+ await f.store.update('unit-a',current=>({...current,canon:[]}));
+ const notified=await f.decisions.notify({store:f.store,unit:'unit-a',decisionId:'D-1',now:'2026-01-01T00:00:00.000Z'});
+ assert.equal(notified.record.acceptance[0].status,'deferred');
+ assert.deepEqual(notified.record.canon,[]);
+ assert.equal(notified.record.openDecisions[0].requiredAction.resumeCondition,'Explicit retry authorization');
+ await f.store.update('unit-a',current=>({...current,openDecisions:[{...decision,kind:'canon-conflict'}]}));
+ await assert.rejects(()=>f.decisions.notify({store:f.store,unit:'unit-a',decisionId:'D-1',now:'2026-01-02T00:00:00.000Z'}),{code:'DECISION_INVALID'});
+});

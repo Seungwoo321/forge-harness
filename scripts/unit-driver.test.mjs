@@ -702,3 +702,38 @@ test('handoff prose cannot bypass verified session finalization', async t => {
   assert.equal(result(await runUnitCli(['unit', 'stage', 'submit', f.unit, 'handoff', '--output', output], context)).code, 0);
   assert.equal((await f.store.read(f.unit)).state, 'Delivered');
 });
+
+test('acceptance cannot commit a policy snapshot superseded during gates', async t => {
+  const {stateRoot,unit,store}=await fixture(t);
+  await prepareAcceptanceRecord(store,unit,{review:{mode:'none',by:'session',triggers:[]}});
+  const adapters=acceptanceAdapters().adapters, run=adapters.gates.run;
+  adapters.now=()=> '2026-01-01T00:00:00Z';
+  adapters.provider={async verifyUserInput(input){return {...input,verified:true}}};
+  let changed=false;
+  adapters.gates.run=async gate=>{
+    if(!changed){changed=true;const {changeUnitDelivery}=await import('./lib/unit-policy-change.mjs');
+      const revision=(await store.read(unit)).revision;
+      await changeUnitDelivery({stateRoot,store,unit,request:{id:'race',expectedRevision:revision,delivery:'merge',reason:'authorized'},userInputRef:'request',adapters});}
+    return run(gate);
+  };
+  const response=result(await runUnitCli(['unit','accept',unit],{stateRoot,adapters}));
+  assert.equal(response.code,1,JSON.stringify(response)); assert.match(response.summary,/Policy changed/);
+  const current=await store.read(unit); assert.equal(current.state,'SelfGated'); assert.equal(current.policyOverrides.delivery,'merge'); assert.equal(current.accepted,null);
+});
+
+test('acceptance rejects policy changed away and back during gates', async t => {
+  const {stateRoot,unit,store}=await fixture(t);
+  await prepareAcceptanceRecord(store,unit,{review:{mode:'none',by:'session',triggers:[]}});
+  const adapters=acceptanceAdapters().adapters, run=adapters.gates.run;
+  adapters.now=()=> '2026-01-01T00:00:00Z'; adapters.provider={async verifyUserInput(input){return {...input,verified:true}}};
+  let changed=false;
+  adapters.gates.run=async gate=>{
+    if(!changed){changed=true;const {changeUnitDelivery}=await import('./lib/unit-policy-change.mjs');
+      for(const delivery of ['merge','none']){const revision=(await store.read(unit)).revision;
+        await changeUnitDelivery({stateRoot,store,unit,request:{id:`change-${delivery}`,expectedRevision:revision,delivery,reason:'authorized'},userInputRef:'request',adapters});}}
+    return run(gate);
+  };
+  const response=result(await runUnitCli(['unit','accept',unit],{stateRoot,adapters}));
+  assert.equal(response.code,1,JSON.stringify(response)); assert.match(response.summary,/Policy changed/);
+  assert.equal((await store.read(unit)).state,'SelfGated');
+});

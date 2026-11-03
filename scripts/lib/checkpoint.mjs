@@ -84,7 +84,7 @@ export function attributeChanges({ unit, firstCheckpointDiff, attemptDiff, isola
 }
 
 function globRegex(pattern) {
-  const value = normalizeRepoPath(pattern);
+  const value = normalizeRepoPath(/[\\/]$/.test(pattern) ? `${pattern}**` : pattern);
   let out = '^';
   for (let i = 0; i < value.length; i += 1) {
     const char = value[i];

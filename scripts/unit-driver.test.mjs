@@ -5,14 +5,22 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { createUnitStateStore } from './lib/unit-state.mjs';
-import { runUnitCli } from './lib/unit-driver.mjs';
+import { runUnitCli as runCoreUnitCli } from './lib/unit-driver.mjs';
 import { runPolicyCli } from './policy.mjs';
 import { createRecoveryStore } from './lib/recovery-store.mjs';
+import { createAdapters } from './lib/adapters.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+function runUnitCli(argv, options) {
+  const gateCommand = argv[0] === 'unit' && argv[1] === 'accept' || argv[0] === 'evidence' && argv[1] === 'rerun';
+  return runCoreUnitCli(argv, gateCommand && !options.cwd ? { ...options, cwd: path.dirname(options.stateRoot) } : options);
+}
+
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'forge-driver-'));
+  await Promise.all(['typecheck', 'lint', 'tests', 'build', 'acceptance-coverage', 'risk-scenarios'].map(id =>
+    writeFile(path.join(root, `${id}.mjs`), `source:${id}`)));
   t.after(() => rm(root, { recursive: true, force: true }));
   const stateRoot = path.join(root, 'work-state');
   const unit = 'unit-a';
@@ -47,27 +55,32 @@ function acceptanceAdapters({ kind = 'impl', coverage = true, pendingGate = null
   let targetIndex = 0;
   const head = 'head-1';
   const contentFingerprint = 'sha256:content';
+  const described = new Map();
+  const gates = {
+    async describe(id) {
+      const gate = { id, command: ['node', 'check', id], files: [{ path: `${id}.mjs`, content: `source:${id}` }], format: id === pendingGate ? 'exec' : 'tap', reportPath: `${id}.tap`, acPattern: 'AC-1', ...(id === pendingGate ? { resultFormat: 'json' } : {}) };
+      described.set(id, gate);
+      return gate;
+    },
+    async run(gate) {
+      gatesRun.push(gate.id);
+      const testName = gate.id === 'risk-scenarios' ? 'risk validation AC-1' : 'covers AC-1';
+      const report = coverage ? `TAP version 13\n1..1\nok 1 - ${testName}\n` : 'TAP version 13\n1..1\nok 1 - no coverage\n';
+      return { exit: 0, report, reportPath: gate.reportPath, ...(gate.id === pendingGate ? { judge: { status: 'pending' } } : {}) };
+    },
+  };
   return {
     gatesRun,
     adapters: {
       now: () => '2026-01-01T00:00:00.000Z',
       git: { async inspectUnit() { return liveTargets?.[targetIndex++] ?? { head, contentFingerprint }; } },
-      gates: {
-        async describe(id) {
-          return { id, command: ['node', 'check', id], files: [{ path: `${id}.mjs`, content: `source:${id}` }], format: 'tap', reportPath: `${id}.tap`, acPattern: 'AC-1' };
-        },
-        async run(gate) {
-          gatesRun.push(gate.id);
-          const testName = gate.id === 'risk-scenarios' ? 'risk validation AC-1' : 'covers AC-1';
-          const report = coverage
-            ? `TAP version 13\n1..1\nok 1 - ${testName}\n`
-            : 'TAP version 13\n1..1\nok 1 - no coverage\n';
-          return {
-            exit: 0, report, reportPath: gate.reportPath,
-            ...(gate.id === pendingGate ? { judge: { status: 'pending' } } : {}),
-          };
-        },
+      async command(_binary, args) {
+        const gate = described.get(args.at(-1));
+        const output = await gates.run(gate);
+        return { exitCode: output.exit, stdout: gate.resultFormat === 'json'
+          ? JSON.stringify({ ok: true, covers: coverage ? ['AC-1'] : [], judge: output.judge }) : output.report };
       },
+      gates,
     },
   };
 }
@@ -613,6 +626,27 @@ test('unavailable project checks require a real review before public acceptance'
   assert.equal((await store.read(unit)).accepted.basis,'review');
 });
 
+test('authorized active review policy change resolves unavailable checks through public acceptance', async t => {
+  const {root,stateRoot,unit,store,adapters:base}=await fixture(t);
+  const packageContent='{"scripts":{"test":"node test"}}';await writeFile(path.join(root,'package.json'),packageContent);
+  const script='console.log("TAP version 13\\n1..1\\nok 1 - AC-1 isolated")';await writeFile(path.join(root,'gate.mjs'),script);
+  await prepareAcceptanceRecord(store,unit,{review:{mode:'none',by:'session',triggers:[]}});
+  const gates={async describe(id){return id==='build' ? {id,command:['inspect-script',id],files:[{path:'package.json',content:packageContent}],format:'exec',reportPath:'build.txt',applicability:{state:'not-applicable',reason:'No build script',evidencePath:'package.json'}} : {id,command:[process.execPath,'gate.mjs'],files:[{path:'gate.mjs',content:script}],format:'tap',acPattern:'AC-1',reportPath:'gate.tap'};}};
+  const adapters={...base,gates,command:createAdapters().command,provider:{async verifyUserInput(input){return {...input,verified:true};}}},options={cwd:root,stateRoot,adapters};
+  const first=result(await runUnitCli(['unit','accept',unit],options));assert.notEqual(first.code,0);
+  const before=await store.read(unit), request=path.join(root,'review-policy.json');
+  await writeFile(request,JSON.stringify({id:'review-change',expectedRevision:before.revision,review:{mode:'required',by:'session',triggers:[]},reason:'User authorized review'}));
+  assert.equal(result(await runUnitCli(['unit','policy','change',unit,'--request',request,'--user-input','user'],options)).code,0);
+  const pending=result(await runUnitCli(['unit','accept',unit],options));assert.equal(pending.code,20,JSON.stringify(pending));
+  await createReviewUnit(store,'review-unit',unit);
+  const reviewOptions={...options,contractsDir:path.join(repo,'skills')};
+  const opened=result(await runUnitCli(['unit','stage','open','review-unit','review'],reviewOptions));
+  const input=JSON.parse(await readFile(opened.input,'utf8')),output=path.join(root,'review-output.json');
+  await writeFile(output,JSON.stringify({inputDigest:input.inputDigest,attempt:input.attempt,submissionId:'review-policy',status:'done',summary:'Reviewed',findings:[],verdict:'ship',reviewedHead:input.head}));
+  assert.equal(result(await runUnitCli(['unit','stage','submit','review-unit','review','--output',output],reviewOptions)).code,0);
+  assert.equal(result(await runUnitCli(['unit','accept',unit],options)).state,'Accepted');
+});
+
 test('applicability rejects forged project configuration and an incompatible no-review policy', async t => {
   const {root,stateRoot,unit,store}=await fixture(t);
   await writeFile(path.join(root,'package.json'),'{"scripts":{"build":"node build"}}');
@@ -781,9 +815,9 @@ test('acceptance cannot commit a policy snapshot superseded during gates', async
   adapters.provider={async verifyUserInput(input){return {...input,verified:true}}};
   let changed=false;
   adapters.gates.run=async gate=>{
-    if(!changed){changed=true;const {changeUnitDelivery}=await import('./lib/unit-policy-change.mjs');
+    if(!changed){changed=true;const {changeUnitPolicy}=await import('./lib/unit-policy-change.mjs');
       const revision=(await store.read(unit)).revision;
-      await changeUnitDelivery({stateRoot,store,unit,request:{id:'race',expectedRevision:revision,delivery:'merge',reason:'authorized'},userInputRef:'request',adapters});}
+      await changeUnitPolicy({stateRoot,store,unit,request:{id:'race',expectedRevision:revision,delivery:'merge',reason:'authorized'},userInputRef:'request',adapters});}
     return run(gate);
   };
   const response=result(await runUnitCli(['unit','accept',unit],{stateRoot,adapters}));
@@ -798,9 +832,9 @@ test('acceptance rejects policy changed away and back during gates', async t => 
   adapters.now=()=> '2026-01-01T00:00:00Z'; adapters.provider={async verifyUserInput(input){return {...input,verified:true}}};
   let changed=false;
   adapters.gates.run=async gate=>{
-    if(!changed){changed=true;const {changeUnitDelivery}=await import('./lib/unit-policy-change.mjs');
+    if(!changed){changed=true;const {changeUnitPolicy}=await import('./lib/unit-policy-change.mjs');
       for(const delivery of ['merge','none']){const revision=(await store.read(unit)).revision;
-        await changeUnitDelivery({stateRoot,store,unit,request:{id:`change-${delivery}`,expectedRevision:revision,delivery,reason:'authorized'},userInputRef:'request',adapters});}}
+        await changeUnitPolicy({stateRoot,store,unit,request:{id:`change-${delivery}`,expectedRevision:revision,delivery,reason:'authorized'},userInputRef:'request',adapters});}}
     return run(gate);
   };
   const response=result(await runUnitCli(['unit','accept',unit],{stateRoot,adapters}));

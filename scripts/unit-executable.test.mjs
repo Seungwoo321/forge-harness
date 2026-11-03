@@ -22,6 +22,7 @@ async function fixture(t, { state = 'Delivered', runtime = null, mode = 'success
   const parentCwd = separate ? path.join(root, 'coordinator') : cwd;
   const bin = path.join(root, 'bin');
   await mkdir(cwd);
+  await writeFile(path.join(cwd, 'gate.mjs'), 'console.log(JSON.stringify({ok:true,covers:["AC-1"]}))');
   await mkdir(bin);
   if (separate) await mkdir(parentCwd);
   const stateRoot = path.join(root, 'state');
@@ -60,7 +61,7 @@ export async function createRuntimeAdapters({cwd,adapters}) {
     async verify(input){await trace({event:'verify',...input});if(mode==='finalize'&&input.effect==='session.close'&&JSON.parse(await readFile(process.env.TEST_NATIVE,'utf8')).closed)return {status:'completed',result:{closed:true,sessionId:'parent',incarnationId:${JSON.stringify(incarnationId)}}};return {status:'unknown'}}
   };
   return {sessionRunner,git:{async inspectUnit({record}) {await trace({event:'inspect',state:record.state,cwd});const inspections=(await readFile(process.env.TEST_TRACE,'utf8')).trim().split('\\n').map(JSON.parse).filter(row=>row.event==='inspect').length;return {head:'head-1',contentFingerprint:mode==='changed'||(mode==='late-close-change'&&inspections>=3)?'changed':'fp-1'}}},
-    gates:{async describe(id){await trace({event:'describe',id,cwd});return {id,command:['gate',id],files:[{path:'src/main.mjs',content:'source'}],format:'exec',reportPath:'reports/'+id+'.json'}},
+    gates:{async describe(id){await trace({event:'describe',id,cwd});return {id,command:[process.execPath,'gate.mjs'],files:[{path:'gate.mjs',content:await readFile(cwd+'/gate.mjs','utf8')}],format:'exec',resultFormat:'json',reportPath:'reports/'+id+'.json'}},
       async run(gate){await trace({event:'gate',id:gate.id,cwd});return {exit:0,ok:true,covers:['AC-1'],report:'{}',reportPath:gate.reportPath,verdict:'green',path:gate.reportPath,key:'original:'+gate.id}}}};
 }`);
   if (runtime) {
@@ -247,19 +248,18 @@ for (const mode of ['wrapped-mismatch', 'wrapped-background', 'wrapped-ambiguous
   });
 }
 
-test('public executable injects Git and gate providers and preserves original evidence identity', async t => {
+test('public executable injects Git and gate descriptions and records isolated execution evidence', async t => {
   const f = await fixture(t, { state: 'SelfGated' });
   assert.equal(f.run('accept').code, 0);
   const record = await f.store.read('unit-a');
   assert.equal(record.state, 'Accepted');
   assert.equal(record.evidence.length, 5);
   for (const evidence of record.evidence) {
-    assert.equal(evidence.verdict, 'green');
-    assert.equal(evidence.path, `reports/${evidence.gate}.json`);
-    assert.equal(evidence.report, evidence.path);
-    assert.equal(evidence.key, `original:${evidence.gate}`);
+    assert.equal(evidence.execution.kind, 'isolated-snapshot-v1');
+    assert.equal(evidence.execution.fingerprint, evidence.fingerprint);
+    assert.match(await readFile(evidence.report, 'utf8'), /AC-1/);
   }
-  assert.ok((await f.rows()).filter(row => row.event === 'gate').every(row => row.cwd === f.cwd));
+  assert.ok((await f.rows()).filter(row => row.event === 'describe').every(row => row.cwd === f.cwd));
   assert.equal(f.run('finish').code, 3);
 });
 
@@ -367,7 +367,7 @@ test('public executable starts a detached finalizer that survives the finish cal
 });
 
 for (const runtime of ['cmux','orca']) for (const provider of ['codex','claude']) for (const mode of runtime === 'orca' ? ['success','native-title-changed','native-orphan'] : ['success']) {
-  test(`managed ${runtime} ${provider} launch binds goal, handoff and configured account (${mode})`, async t => {
+  test(`managed ${runtime} ${provider} launch preserves pending goal and configured account (${mode})`, async t => {
     const f = await fixture(t,{runtime,mode,state:'Accepted',separate:true,managed:true,managedProvider:provider});
     const source = path.join(f.root,'goal.md'); await writeFile(source,'goal');
     const digest = `sha256:${createHash('sha256').update('goal').digest('hex')}`;
@@ -381,9 +381,9 @@ for (const runtime of ['cmux','orca']) for (const provider of ['codex','claude']
     const started = (await f.rows()).find(row=>row.binary===runtime && row.args.includes(runtime==='cmux'?'new-workspace':'create'));
     assert.ok(started,JSON.stringify(await f.rows()));
     const command = started.args[started.args.indexOf('--command')+1];
-    assert.ok(command.includes(provider === 'codex' ? "CODEX_HOME='/account'" : "CLAUDE_CONFIG_DIR='/account'")); assert.match(command,/goal snapshot/);
+    assert.ok(command.includes(provider === 'codex' ? "CODEX_HOME='/account'" : "CLAUDE_CONFIG_DIR='/account'")); assert.doesNotMatch(command,/goal snapshot/);
     const ledger = await f.ledger(); const intent = ledger.find(row=>row.effect==='session.start');
     assert.ok(intent.args.goalPath); assert.ok(intent.args.goalDigest);
-    assert.ok(ledger.some(row=>row.event==='result' && row.seq===intent.seq),JSON.stringify(ledger));
+    assert.equal(ledger.some(row=>row.event==='result' && row.seq===intent.seq),false,JSON.stringify(ledger));
   });
 }

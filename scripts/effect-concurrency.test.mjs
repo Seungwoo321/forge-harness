@@ -12,7 +12,7 @@ import { executeDelivery } from './lib/delivery-flow.mjs';
 
 const latch = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 const args = { resource: 'drafts', selectionDigest: 'selection-1' };
-const gate = { id: 'tests', command: ['test'], format: 'exec', files: [{ path: 'source', content: 'same' }] };
+const gate = { id: 'tests', command: ['test'], format: 'exec', resultFormat: 'json', files: [{ path: 'source', content: 'same' }] };
 
 async function fixture(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'effect-race-'));
@@ -26,6 +26,7 @@ async function fixture(t) {
       reason: 'remove owned drafts', userInputRef: 'user-1', approvedAt: '2026-10-29T00:00:00Z' }],
   });
   await writeFile(path.join(root, 'args.json'), JSON.stringify(args));
+  await writeFile(path.join(root, 'source'), 'same');
   const prepared = latch();
   let applied = 0;
   const target = { head: 'h1', contentFingerprint: 'c1' };
@@ -35,6 +36,10 @@ async function fixture(t) {
       operational: false, irreversible: true, containsSecret: false, forbiddenCommand: false }; },
     effect: { execute: async () => { applied++; return { applied: true }; }, verify: async () => ({ status: 'unknown' }) },
     gates: { describe: async () => gate, run: async () => ({ exit: 0, ok: true, covers: ['AC-2'], report: '{}', reportPath: 'report.json' }) },
+  };
+  adapters.command = async () => {
+    const result = await adapters.gates.run(gate);
+    return { exitCode: result.exit, stdout: JSON.stringify({ ok: result.ok, covers: result.covers, failureClass: result.failureClass }) };
   };
   const call = async argv => JSON.parse((await runUnitCli(argv, { cwd: root, stateRoot: root, adapters })).split('\n').at(-1).slice(7));
   return { root, store, ledger, prepared, adapters, target, applied: () => applied, call,
@@ -142,8 +147,8 @@ test('ordinary effect cannot use authority superseded while waiting for custody'
   const effect=f.call(['unit','effect','demo','--effect','git.push','--args','push.json']);
   await waiting.promise;
   const before=await f.store.update('demo',current=>({...current,state:'SelfGated'}));
-  const {changeUnitDelivery}=await import('./lib/unit-policy-change.mjs');
-  await changeUnitDelivery({stateRoot:f.root,store:f.store,unit:'demo',request:{id:'downgrade',expectedRevision:before.revision,delivery:'none',reason:'authorized downgrade'},userInputRef:'user-1',adapters:f.adapters});
+  const {changeUnitPolicy}=await import('./lib/unit-policy-change.mjs');
+  await changeUnitPolicy({stateRoot:f.root,store:f.store,unit:'demo',request:{id:'downgrade',expectedRevision:before.revision,delivery:'none',reason:'authorized downgrade'},userInputRef:'user-1',adapters:f.adapters});
   release.resolve();
   assert.equal((await effect).error,'EFFECT_DENIED'); assert.equal(f.applied(),0);
   assert.deepEqual(await f.ledger.withLock('demo',ledger=>ledger.read()),[]);
@@ -157,9 +162,9 @@ test('ordinary effect rejects a policy changed away and back before custody', as
   f.adapters.effectContext=async()=>{waiting.resolve();await release.promise;return {resourceOwned:true,productOwned:true,inScope:true,operational:false,irreversible:false,containsSecret:false,forbiddenCommand:false,explicitUserInstruction:true};};
   const effect=f.call(['unit','effect','demo','--effect','git.push','--args','push.json']); await waiting.promise;
   await f.store.update('demo',current=>({...current,state:'SelfGated'}));
-  const {changeUnitDelivery}=await import('./lib/unit-policy-change.mjs');
+  const {changeUnitPolicy}=await import('./lib/unit-policy-change.mjs');
   for (const delivery of ['none','merge']) {const current=await f.store.read('demo');
-    await changeUnitDelivery({stateRoot:f.root,store:f.store,unit:'demo',request:{id:`change-${delivery}`,expectedRevision:current.revision,delivery,reason:'authorized'},userInputRef:'user-1',adapters:f.adapters});}
+    await changeUnitPolicy({stateRoot:f.root,store:f.store,unit:'demo',request:{id:`change-${delivery}`,expectedRevision:current.revision,delivery,reason:'authorized'},userInputRef:'user-1',adapters:f.adapters});}
   await f.store.update('demo',current=>({...current,state:'Implementing'})); release.resolve();
   assert.equal((await effect).error,'EFFECT_DENIED'); assert.equal(f.applied(),0);
 });

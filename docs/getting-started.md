@@ -68,13 +68,15 @@ implement 스킬이 계약에 맞는 출력을 반환하면 같은 `stage submit
 
 각 CLI는 사람이 읽는 요약 뒤 한 줄 `RESULT { ... }`를 출력한다. 키는 RESULT 최상위에 있다. exit 0은 해당 명령의 성공, 1은 검사 실패, 2는 입력/계약 오류, 3은 정책/권한/결정 대기, 4는 필수 어댑터 부재, 20은 리뷰 필요다.
 
-## 진행 중인 단위의 전달 정책 변경
+## 진행 중인 단위의 전달·리뷰 정책 변경
 
 사용자의 명시적인 정책 변경은 기존 단위를 새로 만들지 않고 공개 명령으로 적용한다. 사용자 입력 출처를 검증하는 provider가 필요하다. 단계 제출이 끝나고 미확정 효과가 없는 SelfGated 또는 Accepted 상태에서 아래 요청을 사용한다. `unit progress <unit>`의 `revision`과 `effectiveDelivery`로 현재 값을 확인한다. `expectedRevision`은 현재 단위 revision이며, 요청 ID와 사용자 입력 참조는 같은 재시도에서 유지한다.
 
 ```json
 {"id":"delivery-change-1","expectedRevision":12,"delivery":"merge","reason":"사용자가 merge를 지정"}
 ```
+
+필수 독립 리뷰가 필요한데 기존 정책이 `none`이면 사용자 승인 후 같은 명령에 `delivery` 대신 전체 `review` 값을 전달한다. 예를 들면 `"review":{"mode":"required","by":"session","triggers":[]}`이다. 이 변경은 전달 수준을 바꾸지 않는다.
 
 ```sh
 node "$PLUGIN_ROOT/scripts/unit.mjs" unit policy change greeting --request policy-change.json --user-input '<검증 가능한 사용자 입력 참조>' --adapters runtime.mjs

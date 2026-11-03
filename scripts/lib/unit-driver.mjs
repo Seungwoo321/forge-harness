@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { mkdir, open, readFile, readdir, rename, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, readdir, rename, rm } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { createLedgerStore, executeEffect } from './ledger.mjs';
 import { effectDefinition, prepareEffect, resolvePolicy } from './policy.mjs';
@@ -27,8 +28,9 @@ import { commitGoalContinuation } from './continuity-finish.mjs';
 import { startGoalSession } from './continuity-start.mjs';
 import { prepareSessionReturn } from './continuity-return.mjs';
 import { stopGoalSession } from './continuity-stop.mjs';
-import { changeUnitDelivery } from './unit-policy-change.mjs';
+import { changeUnitPolicy } from './unit-policy-change.mjs';
 import { attemptsFor } from './stage-attempts.mjs';
+import { capturedGateReport, executeCapturedGate, persistCapturedReport } from './gate-execution.mjs';
 
 const controlPlaneFields = new Set([
   'request', 'unit', 'kind', 'goal', 'policy', 'policySources', 'canon', 'tracker', 'isolation',
@@ -771,13 +773,17 @@ async function runSessionFinish({ stateRoot, unit, options, adapters }) {
 
 function gateEvidenceAdapter(store, unit, adapters, record) {
   return {
-    latest: async gate => (await store.read(unit)).evidence?.filter(item => item.gate === gate).at(-1) ?? null,
-    run: gate => adapters.gates.run(gate, { unit, record }),
+    latest: async gate => {
+      const prior=(await store.read(unit)).evidence?.filter(item => item.gate === gate).at(-1) ?? null;
+      if (prior?.execution?.kind === 'isolated-snapshot-v1' && !(await validCapturedReport(prior))) return {...prior,status:'stale',covers:[]};
+      return prior;
+    },
+    run: async () => { throw Object.assign(new Error('gate execution is not configured'),{code:'ADAPTER_MISSING'}); },
     persist: async (gate, update) => {
       let evidence;
       await store.update(unit, current => {
         evidence = update(current.evidence?.filter(item => item.gate === gate).at(-1) ?? null);
-        const updated = { ...current, evidence: [...(current.evidence ?? []).filter(item => item.gate !== evidence.gate), evidence] };
+        const updated = { ...current, evidence: [...(current.evidence ?? []), evidence] };
         if (!current.accepted || !hasInvalidEvidence(updated.evidence)) return updated;
         Object.assign(updated, { accepted: null, reviewDecision: null, reviewedHead: null, verdict: null, deliveryResult: null, terminalProjection: null });
         if (['Accepted', 'Delivering', 'Delivered'].includes(current.state)) return transitionRecord(updated, 'SelfGated');
@@ -790,11 +796,28 @@ function gateEvidenceAdapter(store, unit, adapters, record) {
   };
 }
 
+async function validCapturedReport(record) {
+  if (typeof record?.report !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(record.digest ?? '')) return false;
+  try { return `sha256:${createHash('sha256').update(await readFile(record.report)).digest('hex')}` === record.digest; }
+  catch { return false; }
+}
+
+async function runIsolatedGate({gate,stateRoot,unit,adapters,cwd}) {
+  if (typeof adapters.command !== 'function') throw Object.assign(new Error('isolated gate execution requires the core command adapter'),{code:'ADAPTER_MISSING'});
+  const directory=await mkdtemp(path.join(os.tmpdir(),'forge-gate-'));
+  try {
+    const execution=await executeCapturedGate({gate,directory,sourceRoot:cwd,command:adapters.command});
+    const parsed=capturedGateReport({gate,execution,reportPath:'captured'});
+    const reportPath=await persistCapturedReport({stateRoot:path.resolve(stateRoot),unit,content:execution.stdout});
+    return {...parsed,reportPath};
+  } finally {await rm(directory,{recursive:true,force:true});}
+}
+
 async function runEvidenceRerun({ stateRoot, unit, gateId, adapters, cwd }) {
   const store = createUnitStateStore(stateRoot);
   const record = await store.read(unit);
   if (!record) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
-  if (typeof adapters.gates?.describe !== 'function' || typeof adapters.gates?.run !== 'function') {
+  if (typeof adapters.gates?.describe !== 'function') {
     throw Object.assign(new Error('evidence rerun requires a gate adapter'), { code: 'ADAPTER_MISSING' });
   }
   const gate = await adapters.gates.describe(gateId, { unit, record });
@@ -814,7 +837,7 @@ async function runEvidenceRerun({ stateRoot, unit, gateId, adapters, cwd }) {
   adapter.run = async () => {
     const result = gate.applicability
       ? { exit: 0, ok: true, report: applicabilityBytes.toString('utf8'), reportPath: 'package.json', covers: [] }
-      : await adapters.gates.run(gate, { unit, record });
+      : await runIsolatedGate({gate,stateRoot,unit,adapters,cwd});
     const checked = await adapters.gates.describe(gateId, { unit, record });
     if (!checked || checked.id !== gateId || gateFingerprint(checked) !== fingerprint
       || gate.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(applicabilityBytes)) {
@@ -822,7 +845,7 @@ async function runEvidenceRerun({ stateRoot, unit, gateId, adapters, cwd }) {
     }
     return result;
   };
-  const outcome = await runGate({ gate, fingerprint, adapter, independent: true });
+  const outcome = await runGate({ gate, fingerprint, adapter, independent: true, enforceSnapshot: true });
   return formatCliResult({ code: outcome.nondeterministic ? 4 : outcome.pending ? 3 : ['passed','not-applicable'].includes(outcome.record.status) ? 0 : 1,
     summary: `Evidence ${gateId}: ${outcome.record.status}`, details: { unit, ...outcome } });
 }
@@ -834,7 +857,7 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
   if (!['SelfGated', 'InReview', 'Accepted'].includes(record.state)) {
     throw Object.assign(new Error(`acceptance cannot run while unit is ${record.state}`), { code: 'INVALID_TRANSITION' });
   }
-  if (typeof adapters.git?.inspectUnit !== 'function' || typeof adapters.gates?.describe !== 'function' || typeof adapters.gates?.run !== 'function') {
+  if (typeof adapters.git?.inspectUnit !== 'function' || typeof adapters.gates?.describe !== 'function') {
     throw Object.assign(new Error('acceptance requires Git and gate adapters'), { code: 'ADAPTER_MISSING' });
   }
   const profile = selectProfile(record.kind);
@@ -863,7 +886,7 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
     const gateAdapter = gateEvidenceAdapter(store, unit, adapters, record);
     const executeGate = gate.applicability
       ? async () => ({ exit: 0, ok: true, report: applicabilityBytes.toString('utf8'), reportPath: 'package.json', covers: [] })
-      : gateAdapter.run;
+      : async () => runIsolatedGate({gate,stateRoot,unit,adapters,cwd});
     gateAdapter.run = async currentGate => {
       const result = await executeGate(currentGate);
       const checked = await adapters.gates.describe(gateId, { unit, record });
@@ -873,13 +896,14 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
       }
       return result;
     };
-    await runGate({ gate, fingerprint, adapter: gateAdapter });
+    await runGate({ gate, fingerprint, adapter: gateAdapter, enforceSnapshot: true });
     const checkedGate = await adapters.gates.describe(gateId, { unit, record });
     if (!checkedGate || checkedGate.id !== gateId || gateFingerprint(checkedGate) !== fingerprint
       || gate.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(applicabilityBytes)) {
       await store.update(unit, current => {
-        const updated = { ...current, evidence: (current.evidence ?? []).map(item => item.gate === gateId
-          ? { ...item, status: 'stale', covers: [] } : item), accepted: null, reviewDecision: null, reviewedHead: null, verdict: null };
+        const previous=current.evidence?.filter(item=>item.gate === gateId).at(-1);
+        const updated = { ...current, evidence: previous ? [...(current.evidence ?? []),{...previous,status:'stale',covers:[]}] : current.evidence,
+          accepted: null, reviewDecision: null, reviewedHead: null, verdict: null };
         return ['InReview', 'Accepted'].includes(current.state) ? transitionRecord(updated, 'SelfGated') : updated;
       });
       throw Object.assign(new Error(`gate ${gateId} inputs changed during execution`), { code: 'EVIDENCE_STALE' });
@@ -913,7 +937,7 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
     acceptance: record.acceptance ?? [], evidence: record.evidence ?? [], requiredGates: profile.gates,
     head: target.head, contentFingerprint: target.contentFingerprint,
     currentHead: checkedTarget?.head, currentContentFingerprint: checkedTarget?.contentFingerprint,
-    reviewRequired: reviewResolution.required, review, findings: record.findings ?? [],
+    reviewRequired: reviewResolution.required, review, findings: record.findings ?? [], enforceSnapshot:true,
   });
   if (!evaluation.ok && evaluation.nextState === 'SelfGated') {
     record = await store.update(unit, current => {
@@ -960,6 +984,8 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
       const described = await adapters.gates.describe(id, { unit, record: current });
       if (!described || described.id !== id || gateFingerprint(described) !== gateFingerprints.get(id)) { commitFailure = `Gate ${id} inputs changed during acceptance`; return current; }
       if (described.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(Buffer.from(described.files.find(file => file.path === 'package.json').content))) { commitFailure = `Gate ${id} project configuration changed during acceptance`; return current; }
+      const proof=current.evidence?.filter(item=>item.gate === id).at(-1);
+      if (!described.applicability && !(await validCapturedReport(proof))) { commitFailure = `Gate ${id} captured report changed during acceptance`; return current; }
     }
     const currentReviewResolution = resolveReview({
       kind: current.kind, policy, findings: current.findings ?? [], failures: current.failures ?? [],
@@ -972,7 +998,7 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
       acceptance: current.acceptance ?? [], evidence: current.evidence ?? [], requiredGates: profile.gates,
       head: target.head, contentFingerprint: target.contentFingerprint,
       currentHead: finalTarget.head, currentContentFingerprint: finalTarget.contentFingerprint,
-      reviewRequired: currentReviewResolution.required, findings: current.findings ?? [],
+      reviewRequired: currentReviewResolution.required, findings: current.findings ?? [], enforceSnapshot:true,
       review: current.reviewedHead ? {
         verdict: current.verdict, head: current.reviewedHead, contentFingerprint: current.reviewDecision?.contentFingerprint,
         findings: current.findings ?? [], verdictBy: current.reviewDecision?.by ?? 'session',
@@ -1192,7 +1218,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const [action, unit] = rest;
       if (action !== 'change' || rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit policy change requires <unit> --request <file> --user-input <ref>');
       const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'unit policy change request', 'CLI_USAGE');
-      const change = await changeUnitDelivery({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, request, userInputRef: parsed.options['user-input'], adapters });
+      const change = await changeUnitPolicy({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, request, userInputRef: parsed.options['user-input'], adapters });
       return formatCliResult({ code: 0, summary: `Policy changed for ${unit}`, details: { unit, change } });
     }
     if (subcommand === 'finding') {

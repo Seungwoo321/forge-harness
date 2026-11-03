@@ -24,6 +24,8 @@ For managed goals, resolve `session.runtime`, `session.provider`, `session.accou
 
 Change only after an explicit user request. Ask for the intended values and a short reason, then call `policy set --change --reason <reason> --user-input-ref <confirmed-input-reference>` with the complete draft. The CLI records the prior policy and confirmation provenance.
 
+For a submitted, undelivered unit, use the unit control plane's `unit policy change <unit> --request <file> --user-input <confirmed-input-reference>` instead. The request contains an id, the current expected revision, a reason, and exactly one of `delivery` or the complete `review` object. Preserve the existing unit and re-run acceptance after the authorized change. A required independent review can resolve an applicability conflict without changing delivery.
+
 ## Show
 
 Call `policy resolve --json` and present the resolved values with their field sources. Do not write anything.

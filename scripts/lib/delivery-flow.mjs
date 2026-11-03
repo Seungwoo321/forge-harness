@@ -35,7 +35,7 @@ export async function executeDelivery({ stateRoot, store, unit, requestedDeliver
   const checkBinding = current => {
     const effective = resolvePolicy({ unit: current.policyOverrides ?? {}, project: current.policy ?? {} }, { nonInteractive: true }).policy;
     if (effectArgsDigest({ policy: effective, accepted: current.accepted, epoch: current.policyChanges?.at(-1)?.revision ?? 0, continuation: current.sameSessionContinuation ?? null }) !== expected
-      || current.policyChanges?.length && requestedDelivery !== effective.delivery) throw failure('DELIVERY_PLAN_MISMATCH', 'policy or acceptance changed after finish began');
+      || current.policyChanges?.some(change => Object.hasOwn(change, 'delivery')) && requestedDelivery !== effective.delivery) throw failure('DELIVERY_PLAN_MISMATCH', 'policy or acceptance changed after finish began');
   };
   checkBinding(record);
   if (!['Accepted', 'Delivering', 'Delivered'].includes(record.state)) throw failure('INVALID_TRANSITION', 'delivery requires an accepted unit');

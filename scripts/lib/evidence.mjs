@@ -14,7 +14,7 @@ function digest(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
-export function gateFingerprint({ files, command, config = {}, toolVersions = {}, applicability }) {
+export function gateFingerprint({ files, command, config = {}, toolVersions = {}, applicability, format, acPattern, resultFormat, outputDirectories }) {
   if (!Array.isArray(files) || files.length === 0) return null;
   const rows = files.map(file => {
     if (typeof file.path !== 'string' || file.path.length === 0 || file.content === undefined) {
@@ -23,7 +23,9 @@ export function gateFingerprint({ files, command, config = {}, toolVersions = {}
     const content = Buffer.isBuffer(file.content) ? file.content : Buffer.from(String(file.content));
     return { path: file.path, mode: file.mode ?? null, digest: digest(content) };
   }).sort((a, b) => a.path.localeCompare(b.path));
-  return `sha256:${digest(JSON.stringify(stable({ files: rows, command, config, toolVersions, ...(applicability === undefined ? {} : {applicability}) })))}`;
+  return `sha256:${digest(JSON.stringify(stable({ files: rows, command, config, toolVersions,
+    ...(format === undefined ? {} : {format}), ...(acPattern === undefined ? {} : {acPattern}),
+    ...(resultFormat === undefined ? {} : {resultFormat}), ...(outputDirectories === undefined ? {} : {outputDirectories}), ...(applicability === undefined ? {} : {applicability}) })))}`;
 }
 
 function validateApplicability(gate) {
@@ -43,7 +45,7 @@ function validateApplicability(gate) {
   return { ...item, configDigest: `sha256:${digest(Buffer.from(String(files[0].content)))}` };
 }
 
-export function canReuseEvidence(previous, fingerprint, gate) {
+export function canReuseEvidence(previous, fingerprint, gate, {enforceSnapshot = false} = {}) {
   return Boolean(previous
     && previous.fingerprint === fingerprint
     && fingerprint
@@ -52,6 +54,7 @@ export function canReuseEvidence(previous, fingerprint, gate) {
     && previous.nondeterministic !== true
     && previous.status !== 'pending'
     && previous.judge?.status !== 'pending'
+    && (!enforceSnapshot || gate?.applicability || previous.execution?.kind === 'isolated-snapshot-v1' && previous.execution.fingerprint === fingerprint)
     && (!gate || (gate.applicability
       ? previous.status === 'not-applicable' && previous.applicability?.state === gate.applicability.state
         && previous.applicability?.reason === gate.applicability.reason && previous.applicability?.evidencePath === gate.applicability.evidencePath
@@ -174,14 +177,14 @@ function currentEvidence(evidence) {
 
 export function hasInvalidEvidence(evidence = []) {
   return currentEvidence(evidence).some(item => item.exit !== 0 || item.failureClass != null
-    || item.nondeterministic === true || ['pending', 'failed', 'nondeterministic'].includes(item.status)
+    || item.nondeterministic === true || ['pending', 'failed', 'nondeterministic', 'stale'].includes(item.status)
     || item.judge?.status === 'pending');
 }
 
 export function acceptanceCoverage(acceptance, evidence) {
   const covered = new Set();
   for (const record of currentEvidence(evidence)) {
-    if (!record || record.exit !== 0 || record.nondeterministic === true || ['pending','not-applicable'].includes(record.status)
+    if (!record || record.exit !== 0 || record.nondeterministic === true || ['pending','not-applicable','stale','failed','nondeterministic'].includes(record.status)
       || record.judge?.status === 'pending' || record.failureClass != null) continue;
     for (const id of record.covers ?? []) covered.add(id);
   }
@@ -190,7 +193,7 @@ export function acceptanceCoverage(acceptance, evidence) {
   return { ok: uncovered.length === 0, covered: [...covered].sort(), uncovered };
 }
 
-export async function runGate({ gate, fingerprint, adapter, independent = false }) {
+export async function runGate({ gate, fingerprint, adapter, independent = false, enforceSnapshot = false }) {
   if (!gate || typeof gate.id !== 'string' || !gate.id) throw new TypeError('gate id is required');
   if (!fingerprint) throw new TypeError('a verifiable gate fingerprint is required');
   if (!adapter || typeof adapter.latest !== 'function' || typeof adapter.run !== 'function' || typeof adapter.persist !== 'function') {
@@ -198,8 +201,11 @@ export async function runGate({ gate, fingerprint, adapter, independent = false 
   }
   const applicability = validateApplicability(gate);
   const prior = await adapter.latest(gate.id);
-  if (!independent && canReuseEvidence(prior, fingerprint, gate)) return { record: prior, reused: true };
+  if (!independent && canReuseEvidence(prior, fingerprint, gate, {enforceSnapshot})) return { record: prior, reused: true };
   const result = await adapter.run(gate);
+  if (enforceSnapshot && !applicability && (result.execution?.kind !== 'isolated-snapshot-v1' || result.execution.fingerprint !== fingerprint)) {
+    throw Object.assign(new Error('gate execution is not bound to an isolated input snapshot'),{code:'EVIDENCE_UNPROVEN'});
+  }
   const parsed = parseGateReport({ ...gate, ...result, result });
   const resultRecord = {
     gate: gate.id,
@@ -212,6 +218,7 @@ export async function runGate({ gate, fingerprint, adapter, independent = false 
     ...(result?.verdict !== undefined ? { verdict: result.verdict } : {}),
     ...(result?.path !== undefined ? { path: result.path } : {}),
     ...(result?.key !== undefined ? { key: result.key } : {}),
+    ...(result?.execution !== undefined ? { execution: result.execution } : {}),
     covers: parsed.ok && !applicability ? parsed.covers : [],
     tests: parsed.tests ?? [],
     failureClass: parsed.failureClass ?? (parsed.ok || parsed.pending ? null : 'unknown'),
@@ -241,7 +248,7 @@ export async function runGate({ gate, fingerprint, adapter, independent = false 
   return { record, reused: false, pending: parsed.pending === true, nondeterministic: record.nondeterministic === true, error: parsed.ok ? null : parsed.pending ? 'judge is pending' : parsed.reason };
 }
 
-export function evaluateAcceptance({ acceptance = [], evidence = [], requiredGates = [], head, contentFingerprint, currentHead, currentContentFingerprint, reviewRequired = false, review = null, findings = review?.findings ?? [] } = {}) {
+export function evaluateAcceptance({ acceptance = [], evidence = [], requiredGates = [], head, contentFingerprint, currentHead, currentContentFingerprint, reviewRequired = false, review = null, findings = review?.findings ?? [], enforceSnapshot = false } = {}) {
   evidence = currentEvidence(evidence);
   if (typeof head !== 'string' || !head || typeof contentFingerprint !== 'string' || !contentFingerprint) {
     return { ok: false, reason: 'accepted target is incomplete', uncovered: [] };
@@ -258,7 +265,8 @@ export function evaluateAcceptance({ acceptance = [], evidence = [], requiredGat
     && item.report === item.applicability.evidencePath && /^sha256:[a-f0-9]{64}$/.test(item.digest ?? '')
     && item.digest === item.applicability.configDigest));
   const missing = requiredGates.filter(id => !notApplicable.includes(id) && !evidence.some(item => item.gate === id && item.status === 'passed'
-    && item.exit === 0 && item.failureClass == null && item.nondeterministic !== true));
+    && item.exit === 0 && item.failureClass == null && item.nondeterministic !== true
+    && (!enforceSnapshot || item.execution?.kind === 'isolated-snapshot-v1' && item.execution.fingerprint === item.fingerprint)));
   if (missing.length) return { ok: false, reason: 'required gates have no valid passing evidence', missing };
   const coverage = acceptanceCoverage(acceptance, evidence);
   if (!coverage.ok) return { ok: false, reason: 'acceptance criteria are uncovered', ...coverage };

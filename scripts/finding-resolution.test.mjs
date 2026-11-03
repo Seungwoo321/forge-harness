@@ -48,7 +48,7 @@ export function createRuntimeAdapters({ cwd, adapters }) {
     git: { async inspectUnit() { return { head: (await adapters.command('git', ['rev-parse', 'HEAD'], { cwd })).stdout.trim(),
       contentFingerprint: createHash('sha256').update(JSON.stringify(await files())).digest('hex') }; } },
     gates: {
-      async describe(id) { return { id, command: ['test', id], format: 'exec', files: await files() }; },
+      async describe(id) { return { id, command: [process.execPath, '-e', 'const s=require("node:fs").readFileSync("app.txt","utf8"); const ok=["broken","fixed"].includes(s); console.log(JSON.stringify({ok,covers:ok?["AC-1"]:[]})); if(!ok) process.exitCode=1'], format: 'exec', resultFormat: 'json', files: await files() }; },
       async run(gate) { const ok = ['broken', 'fixed'].includes((await files())[0].content);
         return { exit: ok ? 0 : 1, ok, covers: ['AC-1'], report: '{}', reportPath: gate.id+'.json' }; },
     },

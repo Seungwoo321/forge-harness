@@ -17,6 +17,8 @@ async function fixture(t, { level = 'merge', mode = 'normal', committed = false,
   t.after(() => rm(root, { recursive: true, force: true }));
   const cwd = path.join(root, 'product');
   await mkdir(cwd);
+  const gateSource = 'console.log(JSON.stringify({ok:true,covers:["AC-1"]}))';
+  await writeFile(path.join(cwd, 'gate.mjs'), gateSource);
   const stateRoot = path.join(root, 'state');
   const native = path.join(root, 'repository.json');
   const trace = path.join(root, 'commands.ndjson');
@@ -84,7 +86,7 @@ export function createRuntimeAdapters({cwd,adapters}) {
  const call=async(operation,input)=>{const r=await adapters.command(${JSON.stringify(process.execPath)},[${JSON.stringify(stub)},operation,JSON.stringify(input)],{cwd});if(r.exitCode!==0)throw Error('lost repository response');return JSON.parse(r.stdout)};
  const methods={deliveryContext:x=>call('context',x),execute:x=>call('execute',x),verify:x=>call('verify',x)};
  return {git:{inspectUnit:x=>call('inspect',x),...methods},repository:{...methods},provider:{verifyUserInput:x=>call('user-input',x)},
-  gates:{async describe(id){return{id,command:['gate',id],files:[{path:'src/main.mjs',content:'source'}],format:'exec',reportPath:'report.json'}},async run(){return{exit:0,ok:true,covers:['AC-1'],report:'{}',reportPath:'report.json'}}}};
+  gates:{async describe(id){return{id,command:[${JSON.stringify(process.execPath)},'gate.mjs'],files:[{path:'gate.mjs',content:${JSON.stringify(gateSource)}}],format:'exec',resultFormat:'json'}}}};
 }
 `);
   const request = path.join(root, 'finish.json');

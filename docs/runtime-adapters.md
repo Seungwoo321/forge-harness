@@ -25,7 +25,7 @@ export async function createRuntimeAdapters({ cwd, adapters }) {
 | 제공자 | 필수 메서드와 책임 |
 |---|---|
 | `git` | `inspectUnit({unit})`: 현재 `head`, `contentFingerprint`, `changedPaths` 등 수용 관찰. 전달 시 `deliveryContext`, `execute`, `verify` 추가 |
-| `gates` | `describe(id,{unit,record})`, `run(gate,{unit,record})`: 게이트 입력·설정·도구 버전과 실제 결과 반환 |
+| `gates` | `describe(id,{unit,record})`: 실행 명령과 전체 입력·설정·도구 버전·출력 형식을 기술 |
 | `tracker` | `read`, `project`: 외부 작업관리 읽기·멱등 투영. tracker가 없는 단위는 등록 불필요 |
 | `sessionRunner` | 계약 `harness.session-adapter/1`, 기능 목록, `observe`, `execute`, `verify`: 신원·cwd 관찰, 기동/종료, 실제 효과 검증 |
 | `repository` | PR 생성·머지의 `deliveryContext`, `execute`, `verify` |
@@ -34,11 +34,15 @@ export async function createRuntimeAdapters({ cwd, adapters }) {
 
 `contentFingerprint`는 검증 경로·바이트·파일 모드와 포함/제외 규칙의 정렬된 해시다. `head`만으로 변경된 작업트리의 검증을 대체하지 않는다. delivery를 사용하는 관찰에는 `repo`, `branch`, `tree`, `indexTree`, `headTree`, `base`를 추가한다. 요청이 관찰 결과나 승인 대상을 덮어쓸 수 없다.
 
-게이트의 `describe`는 id/version/command/config, 입력 파일 내용, 도구 버전을 담는다. `run`은 판정과 원 결과 참조를 돌려준다. 정확한 객체 형태와 실제 실행 예는 [공개 CLI 통합 테스트](../scripts/public-control-plane.test.mjs), [실행 파일 통합 테스트](../scripts/unit-executable.test.mjs), [증거 모듈](../scripts/lib/evidence.mjs)이 제공한다. 테스트의 stub 런타임은 실사용 제공자를 대신하지 않는다.
+게이트의 `describe`는 id, 실행할 `command` 배열, `config`, 모든 입력 파일의 상대 경로·내용·실행 모드, 도구 버전과 보고서 형식을 담는다. 제어면은 입력을 원본과 대조해 격리된 사본으로 만들고 그 사본에서 명령을 직접 실행한다. 원본 작업 트리는 실행 프로세스에 노출하지 않는다. 실행 전후의 사본과 현재 대상·게이트 입력을 확인하고 실제 stdout을 내용 주소형 보고서로 보존한다. 입력 파일에는 실행에 필요한 프로젝트 소스·설정·의존성을 포함한다. 내부 상대 심볼릭 링크는 `mode: "120000"`과 링크 대상 문자열로 기술하며 외부 탈출은 거부한다. 격리 실행 영수증이 없는 예전 통과 증거는 보존하되 새 수용에서 재사용하지 않는다.
+
+실행 중 생성할 디렉터리는 `outputDirectories`에 상대 경로로 선언한다. 제어면은 입력과 겹치지 않는 디렉터리만 쓰기 가능하게 만들고 이 목록을 fingerprint에 포함한다. pnpm이 `node_modules`를 생성해야 한다면 해당 경로를 선언하고 `package.json`과 `pnpm-lock.yaml`을 입력에 포함한다. 이미 캡처한 입력 파일을 산출 디렉터리 아래에 둘 수 없다.
+
+`format: "tap"`은 stdout을 TAP으로 해석한다. `format: "exec"` 또는 `"module"`의 기본 텍스트 출력은 종료 상태를 판정하며 수용 기준을 자동으로 주장하지 않는다. `resultFormat: "json"`이면 stdout에 `{ "ok": true, "covers": ["AC-1"] }` 형태의 결과를 출력한다. 종료 상태는 항상 제어면이 관찰한 실제 프로세스 상태를 사용한다. macOS는 시스템 sandbox, Linux는 Bubblewrap을 사용하며 격리 수단이 없거나 사본을 검증할 수 없으면 통과로 기록하지 않는다. 정확한 공개 실행 예는 [격리 수용 테스트](../scripts/gate-acceptance.test.mjs)와 [증거 모듈](../scripts/lib/evidence.mjs)에 있다.
 
 프로젝트에 `typecheck` 또는 `build` package script가 없으면 `describe`는 fingerprint 입력에 `package.json`을 포함하고 `applicability: {state: 'not-applicable', reason, evidencePath: 'package.json'}`을 제공할 수 있다. 제어면은 설명된 설정이 실제 프로젝트의 `package.json`과 일치하는지 확인하고 캡처한 설정에서 script 부재를 직접 판단한다. 실제 설정 파일을 근거로 `not-applicable`을 기록하며 어댑터의 성공 주장을 사용하지 않는다. 이는 통과 증거가 아니고 수용 기준을 커버하지 않으며 정확한 대상의 독립 리뷰가 있어야 수용된다. 그 밖의 게이트, 설정된 명령, 실패한 적용 여부 검사 및 미충족 기준은 이 경로로 면제되지 않는다.
 
-세션 연결에는 패키지의 `scripts/lib/session-runtime.mjs`가 `createSessionRunner({runtime,command,parent,launch,runtimeRpc,taskTransport,taskPrompt})`를 제공한다. `runtime`은 `cmux` 또는 `orca`; `parent`는 실제 `sessionId`, `incarnationId`, `cwd`; `launch`는 승인된 후속 실행 argv를 만든다. Orca는 설치된 CLI와 함께 제공되는 런타임 클라이언트의 `terminal.inspectProcess`를 사용한다. 별도 `runtimeRpc`를 명시하면 그 연결을 사용한다. 번들 클라이언트가 없거나 관찰 계약이 달라지면 실행은 실패 상태로 남는다. 호스트 화면이나 입력 전송만으로 실제 착수를 선언하지 않는다.
+세션 연결에는 패키지의 `scripts/lib/session-runtime.mjs`가 `createSessionRunner({runtime,command,parent,launch,runtimeRpc,taskTransport,taskPrompt})`를 제공한다. `runtime`은 `cmux` 또는 `orca`; `parent`는 실제 `sessionId`, `incarnationId`, `cwd`; `launch`는 승인된 후속 실행 argv를 만든다. Orca는 설치된 CLI와 함께 제공되는 런타임 클라이언트의 `terminal.inspectProcess`를 사용한다. 명시적 `runtimeRpc`가 있으면 대신 사용한다. 제공자는 기본 클라이언트의 발견·호환성·수명을 소유하며 번들 클라이언트는 각 요청의 연결을 호출 후 해제한다. 번들 클라이언트가 없거나 관찰 계약이 달라지면 실행은 실패 상태로 남는다. 호스트 화면이나 입력 전송만으로 실제 착수를 선언하지 않는다.
 
 Orca가 자동 생성한 제목으로 터미널 이름을 바꾸더라도 Claude는 정확한 native session ID로, Codex는 native 대화의 정확한 초기 요청으로 기존 worker를 찾는다. 화면 탭에 연결되지 않은 터미널은 연결·쓰기 가능 상태와 native incarnation, 프로세스·cwd 및 요청 영수증이 일치할 때만 인정한다. 관찰 중 탭 연결 상태가 바뀌거나 후보가 중복되면 재기동하지 않고 미확정으로 남긴다.
 
@@ -56,7 +60,7 @@ Orca가 자동 생성한 제목으로 터미널 이름을 바꾸더라도 Claude
 
 반환 의무는 tracker 투영 전에 저장되며 public close/reconcile도 이를 우회하지 못한다. 구버전 process-only result는 같은 seq/key의 실제 native 재관찰로 보강하고 원 행을 남긴다. cmux의 마지막 surface 종료에는 종료된 빈 placeholder surface를 먼저 만든다. workspace 전체 종료는 사용하지 않으므로 동시에 추가된 다른 surface는 유지된다. 종료 뒤 해당 workspace에는 빈 surface가 남을 수 있다.
 
-활성 단위의 전달 정책 변경은 `unit policy change <unit> --request <file> --user-input <ref>`를 사용한다. 요청은 `id`, `expectedRevision`, `delivery`, `reason`을 포함한다. 신뢰된 `provider.verifyUserInput`은 정확한 요청 digest와 이전·새 전달 수준, 사용자 입력 출처를 검증한다. 제출된 SelfGated 또는 Accepted 단위만 변경할 수 있으며 진행 중 단계·전달 계획·세션 종료나 불확실한 효과가 있으면 차단한다. 변경 이력에는 이전 정책·수용·리뷰와 승인 출처가 남고 기존 작업·증거·효과는 유지된다. 이전 수용은 무효화되므로 같은 단위를 다시 수용해야 한다. 동일 요청의 재시도는 기존 결과를 반환한다. 변경한 단위의 finish는 변경된 전달 수준을 기본으로 사용하며, 다른 수준은 먼저 명시적 정책 변경을 거쳐야 한다. 이미 시작된 finish와 효과는 실행 직전 단위 잠금 안에서 현재 정책과 수용 대상 또는 작업 상태를 다시 검사하며 이전 권한으로 진행하지 않는다.
+활성 단위의 전달 또는 리뷰 정책 변경은 `unit policy change <unit> --request <file> --user-input <ref>`를 사용한다. 요청은 `id`, `expectedRevision`, `reason`과 `delivery` 또는 전체 `review: {mode, by, triggers}` 중 하나를 포함한다. 신뢰된 `provider.verifyUserInput`은 정확한 요청 digest와 이전·새 정책 값, 사용자 입력 출처를 검증한다. 리뷰 값은 JSON 문자열로 전달한다. 제출된 SelfGated 또는 Accepted 단위만 변경할 수 있으며 진행 중 단계·전달 계획·세션 종료나 불확실한 효과가 있으면 차단한다. 변경 이력에는 이전 정책·수용·리뷰와 승인 출처가 남고 기존 작업·증거·효과는 유지된다. 이전 수용은 무효화되므로 같은 단위를 다시 수용해야 한다. 동일 요청의 재시도는 기존 결과를 반환한다. 전달 정책을 변경한 단위의 finish는 변경된 전달 수준을 기본으로 사용하며, 다른 수준은 먼저 명시적 정책 변경을 거쳐야 한다. 이미 시작된 finish와 효과는 실행 직전 단위 잠금 안에서 현재 정책과 수용 대상 또는 작업 상태를 다시 검사하며 이전 권한으로 진행하지 않는다.
 
 merge 전달은 시작할 때 원장의 기존 intent 경계를 고정한다. 중단 후에는 해당 전달에서 기록한 정확한 PR과 merge intent를 원격 상태 및 원장 결과와 대조해 재개한다. 이미 병합된 대상의 PR 생성이나 merge를 다시 실행하지 않는다. 이전 형식의 진행 중 전달처럼 경계를 증명할 수 없거나 원래 merge intent가 없는 병합은 새 효과를 만들지 않고 확인을 요구한다.
 

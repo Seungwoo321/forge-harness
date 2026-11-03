@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -8,7 +8,7 @@ import { selectProfile } from './lib/profile.mjs';
 import { runUnitCli } from './lib/unit-driver.mjs';
 import { createUnitStateStore } from './lib/unit-state.mjs';
 
-const gateFor = (id, content = 'source') => ({ id, format: 'exec', command: ['check', id], files: [{ path: id, content }] });
+const gateFor = (id, content = 'source') => ({ id, format: 'exec', resultFormat: 'json', command: ['check', id], files: [{ path: id, content }] });
 const pass = covers => ({ exit: 0, ok: true, covers, report: '{}', reportPath: 'report.json' });
 const latch = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 const decode = output => JSON.parse(output.split('\n').at(-1).slice('RESULT '.length));
@@ -16,7 +16,10 @@ const decode = output => JSON.parse(output.split('\n').at(-1).slice('RESULT '.le
 async function fixture(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'evidence-race-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const store = createUnitStateStore(root);
+  const cwd = path.join(root, 'source'), stateRoot = path.join(root, 'state');
+  await mkdir(cwd);
+  await Promise.all(selectProfile('impl').gates.map(id => writeFile(path.join(cwd, id), 'source')));
+  const store = createUnitStateStore(stateRoot);
   await store.create({ schema: 'harness.unit/1', unit: 'demo', revision: 0, kind: 'impl', state: 'Accepted',
     policy: { goal: { class: 'product-prelaunch' }, delivery: 'none', review: { mode: 'none', by: 'session', triggers: [] } },
     accepted: { head: 'h1', contentFingerprint: 'c1' }, acceptance: [{ id: 'AC-1', status: 'open' }],
@@ -25,7 +28,11 @@ async function fixture(t) {
   });
   const adapters = { git: { inspectUnit: async () => ({ head: 'h1', contentFingerprint: 'c1' }) },
     gates: { describe: async id => gateFor(id), run: async () => pass(['AC-1']) } };
-  return { store, adapters, call: async args => decode(await runUnitCli(args, { cwd: root, stateRoot: root, adapters })) };
+  adapters.command = async (_binary, args) => {
+    const output = await adapters.gates.run(await adapters.gates.describe(args.at(-1)));
+    return { exitCode: output.exit, stdout: JSON.stringify({ ok: output.ok, covers: output.covers }) };
+  };
+  return { store, adapters, cwd, call: async args => decode(await runUnitCli(args, { cwd, stateRoot, adapters })) };
 }
 
 test('PUBLIC-EVIDENCE-RERUN-NONDETERMINISM: late matching and changed-input runs retain atomic comparison history', async t => {
@@ -42,15 +49,17 @@ test('PUBLIC-EVIDENCE-RERUN-NONDETERMINISM: late matching and changed-input runs
     await started.promise;
     assert.equal((await f.call(['evidence', 'rerun', 'demo', '--gate', 'tests'])).nondeterministic, true);
     if (changedInput) {
+      await Promise.all(selectProfile('impl').gates.map(id => writeFile(path.join(f.cwd, id), 'changed')));
       f.adapters.gates.describe = async id => gateFor(id, 'changed');
       f.adapters.gates.run = async () => pass(['AC-1']);
       assert.equal((await f.call(['unit', 'accept', 'demo'])).code, 0);
+      await Promise.all(selectProfile('impl').gates.map(id => writeFile(path.join(f.cwd, id), 'source')));
       f.adapters.gates.describe = async id => gateFor(id);
     }
     release.resolve();
     assert.equal((await slow).nondeterministic, true);
     const record = await f.store.read('demo');
-    const evidence = record.evidence.find(item => item.gate === 'tests');
+    const evidence = record.evidence.findLast(item => item.gate === 'tests');
     assert.equal(evidence.status, 'nondeterministic');
     assert.equal(evidence.comparisonHistory.find(item => item.fingerprint === gateFingerprint(gateFor('tests'))).nondeterministic, true);
     if (changedInput) assert.ok(evidence.comparisonHistory.some(item => item.fingerprint === gateFingerprint(gateFor('tests', 'changed'))));

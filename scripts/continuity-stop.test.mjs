@@ -37,6 +37,25 @@ test('stopped session transfers immutable blocker context, closes only the owner
  assert.equal((await store.read('u1')).sessionFinalization.closeReceipt.result.closed,true);
 });
 
+test('recipient-free blocker records a resumable report without any session effect',async t=>{
+ const root=await mkdtemp(path.join(tmpdir(),'continuity-stop-user-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const source=path.join(root,'goal.md');await writeFile(source,'goal');
+ const goals=createContinuityStore(root),store=createUnitStateStore(root),owner={sessionId:'owner',incarnationId:'owner-1',cwd:root};
+ await goals.create({goal:{id:'g1',objective:'work',criteria:['done'],remaining:['u1'],status:'active'},policy:{runtime:'cmux',provider:'codex',account:'/account',model:'model',effort:'high',argv:['codex']},source:{path:source,digest:taskDigest('goal')}});
+ await goals.transaction('g1',current=>({...current,revision:2,goal:{...current.goal,status:'blocked',blocker:{unit:'u1',reason:'access',resumeCondition:'access granted',evidence:'units/u1/failures/f1.json'}},bootstraps:[{unit:'u1',...owner}]}));
+ await store.create({schema:'harness.unit/1',unit:'u1',kind:'impl',state:'Stopped',continuity:{goalId:'g1'},failures:[{path:'units/u1/failures/f1.json'}]});
+ let effects=0;const adapters={session:{async observe(){effects++;},async execute(){effects++;},async verify(){effects++;}}};
+ const request={parentRuntime:owner,handoffContent:packet,resultFields:fields,classification:'authority'};
+ const args={stateRoot:root,unit:'u1',request,store,adapters};
+ const result=await stopGoalSession(args);assert.equal(result.code,0);assert.equal(result.blocker.resumeCondition,'access granted');
+ assert.equal((await stopGoalSession(args)).resultPath,result.resultPath);assert.equal(effects,0);
+ await assert.rejects(stopGoalSession({...args,request:{...request,classification:'other'}}),{code:'CONTINUITY_INVALID'});
+ assert.equal((await store.read('u1')).state,'Stopped');assert.equal((await goals.read('g1')).goal.status,'blocked');
+ await goals.transaction('g1',current=>({...current,revision:current.revision+1,goal:{...current.goal,blocker:{...current.goal.blocker,reason:'new access failure'}}}));
+ assert.equal((await stopGoalSession(args)).blocker.reason,'new access failure');
+ assert.equal((await store.read('u1')).stopReports.length,1);
+});
+
 test('independent review returns only to its registered target owner and closes the reviewer', async t=>{
  const {prepareSessionReturn}=await import('./lib/continuity-return.mjs');
  const root=await mkdtemp(path.join(tmpdir(),'continuity-review-'));t.after(()=>rm(root,{recursive:true,force:true}));

@@ -484,9 +484,9 @@ test('finish rejects acceptance and delivery policy replaced after it began', as
   const finishing=finishSessionUnit({stateRoot:f.stateRoot,store:wrapped,unit:'unit-finish',resultFields,goalComplete:true,adapters:f.adapters});
   await waiting;
   const before=await f.store.read('unit-finish');
-  const {changeUnitDelivery}=await import('./lib/unit-policy-change.mjs');
+  const {changeUnitPolicy}=await import('./lib/unit-policy-change.mjs');
   const adapters={...f.adapters,provider:{async verifyUserInput(input){return {...input,verified:true};}}};
-  await changeUnitDelivery({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',request:{id:'merge',expectedRevision:before.revision,delivery:'merge',reason:'user selected merge'},userInputRef:'user',adapters});
+  await changeUnitPolicy({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',request:{id:'merge',expectedRevision:before.revision,delivery:'merge',reason:'user selected merge'},userInputRef:'user',adapters});
   await f.store.update('unit-finish',current=>({...current,state:'Accepted',accepted:{head:'head-1',contentFingerprint:'sha256:current',repo:'r',branch:'b',tree:'t',indexTree:'t',headTree:'t',base:'main'}}));
   const rejected=assert.rejects(finishing,{code:'DELIVERY_PLAN_MISMATCH'});
   resolveRelease(); await rejected;
@@ -499,8 +499,8 @@ test('finish rejects policy changed away and back even if acceptance is identica
   let reads=0; const wrapped={...f.store,read:async unit=>{if(++reads===2){resolveWaiting();await release;}return f.store.read(unit);}};
   const original=await f.store.read('unit-finish');
   const finishing=finishSessionUnit({stateRoot:f.stateRoot,store:wrapped,unit:'unit-finish',resultFields,goalComplete:true,adapters:f.adapters}); await waiting;
-  const {changeUnitDelivery}=await import('./lib/unit-policy-change.mjs'); const adapters={...f.adapters,provider:{async verifyUserInput(input){return {...input,verified:true};}}};
-  for(const delivery of ['merge','none']){const current=await f.store.read('unit-finish');await changeUnitDelivery({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',request:{id:`change-${delivery}`,expectedRevision:current.revision,delivery,reason:'authorized'},userInputRef:'user',adapters});}
+  const {changeUnitPolicy}=await import('./lib/unit-policy-change.mjs'); const adapters={...f.adapters,provider:{async verifyUserInput(input){return {...input,verified:true};}}};
+  for(const delivery of ['merge','none']){const current=await f.store.read('unit-finish');await changeUnitPolicy({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',request:{id:`change-${delivery}`,expectedRevision:current.revision,delivery,reason:'authorized'},userInputRef:'user',adapters});}
   await f.store.update('unit-finish',current=>({...current,state:'Accepted',accepted:original.accepted}));
   const rejected=assert.rejects(finishing,{code:'DELIVERY_PLAN_MISMATCH'}); resolveRelease(); await rejected;
   assert.equal((await f.store.read('unit-finish')).state,'Accepted');
@@ -583,9 +583,9 @@ test('same-session delivery may change after an authorized policy revision and r
   delete f.adapters.git.inspectUnit;
   const base={stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',resultFields,sameSession:{approved:true,nextUnit:'next-work'},adapters:f.adapters};
   await assert.rejects(finishSessionUnit(base),{code:'ADAPTER_MISSING'});
-  const {changeUnitDelivery}=await import('./lib/unit-policy-change.mjs');const current=await f.store.read('unit-finish');
+  const {changeUnitPolicy}=await import('./lib/unit-policy-change.mjs');const current=await f.store.read('unit-finish');
   const adapters={...f.adapters,provider:{async verifyUserInput(input){return {...input,verified:true};}}};
-  await changeUnitDelivery({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',request:{id:'merge',expectedRevision:current.revision,delivery:'merge',reason:'authorized'},userInputRef:'user',adapters});
+  await changeUnitPolicy({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',request:{id:'merge',expectedRevision:current.revision,delivery:'merge',reason:'authorized'},userInputRef:'user',adapters});
   await f.store.update('unit-finish',r=>({...r,state:'Accepted',accepted:{head:'head-1',contentFingerprint:'sha256:current'}}));
   await assert.rejects(finishSessionUnit(base),{code:'ADAPTER_MISSING'});
   const updated=await f.store.read('unit-finish');assert.equal(updated.sameSessionContinuation.delivery,'merge');assert.equal(updated.sameSessionContinuation.bindings.length,2);

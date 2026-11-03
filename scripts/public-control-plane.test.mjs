@@ -14,13 +14,26 @@ import { executeDelivery } from './lib/delivery-flow.mjs';
 const cli = fileURLToPath(new URL('./unit.mjs', import.meta.url));
 const ordinaryArgs = { database: 'local-db', migrationDigest: 'migration-1' };
 const deleteArgs = { resource: 'drafts', selectionDigest: 'selection-1' };
-const gate = { id: 'tests', command: ['check', 'tests'], files: [{ path: 'src/main.mjs', content: 'source' }], format: 'exec' };
+const gateScript = `import { readFileSync, writeFileSync } from 'node:fs';
+const state = JSON.parse(readFileSync(process.env.TEST_NATIVE));
+state.runs += 1;
+if (state.mode === 'input-drift') state.source = 'changed';
+writeFileSync(process.env.TEST_NATIVE, JSON.stringify(state));
+const failureClass = ['product','environment','harness','user-domain','unknown'].includes(state.mode) ? state.mode : null;
+if (state.mode === 'missing-report') process.stdout.write('invalid');
+else process.stdout.write(JSON.stringify({ok: !failureClass, covers: [state.mode === 'divergent' ? 'AC-2' : 'AC-1'], failureClass}));
+if (failureClass) process.exitCode = 1;
+`;
+const gate = { id: 'tests', command: [process.execPath, 'gate.mjs'], files: [{ path: 'src/main.mjs', content: 'source' }, { path: 'gate.mjs', content: gateScript }], format: 'exec', resultFormat: 'json' };
 
 async function fixture(t, { state = 'Implementing' } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'public-control-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const cwd = path.join(root, 'product checkout');
   await mkdir(cwd);
+  await mkdir(path.join(cwd, 'src'));
+  await writeFile(path.join(cwd, 'src/main.mjs'), 'source');
+  await writeFile(path.join(cwd, 'gate.mjs'), gateScript);
   const stateRoot = path.join(root, 'state');
   const store = createUnitStateStore(stateRoot);
   await store.create({ schema: 'harness.unit/1', unit: 'unit-a', revision: 0, kind: 'impl', state,
@@ -60,7 +73,7 @@ else if (operation === 'context') {
   output({ applied: true, verify: 'external-observation' });
 } else if (operation === 'verify') output({ status: state.applied ? 'completed' : 'unknown', result: { applied: true }, verify: 'independent-inspection' });
 else if (operation === 'describe') output({ ...${JSON.stringify(gate)}, id: input.id,
-  files: [{ path: 'src/main.mjs', content: state.mode === 'changed-input' ? 'changed' : state.source ?? 'source' }] });
+  files: [{ path: 'src/main.mjs', content: state.mode === 'changed-input' ? 'changed' : state.source ?? 'source' }, { path: 'gate.mjs', content: ${JSON.stringify(gateScript)} }] });
 else if (operation === 'gate') {
   state.runs += 1; writeFileSync(process.env.TEST_NATIVE, JSON.stringify(state));
   if (state.mode === 'input-drift') { state.source = 'changed'; writeFileSync(process.env.TEST_NATIVE, JSON.stringify(state)); }
@@ -95,7 +108,10 @@ export async function createRuntimeAdapters({ adapters, cwd }) {
     assert.equal(child.status, result.code);
     return result;
   };
-  const setNative = async patch => writeFile(native, JSON.stringify({ ...JSON.parse(await readFile(native, 'utf8')), ...patch }));
+  const setNative = async patch => {
+    if (patch.source !== undefined) await writeFile(path.join(cwd, 'src/main.mjs'), patch.source);
+    await writeFile(native, JSON.stringify({ ...JSON.parse(await readFile(native, 'utf8')), ...patch }));
+  };
   const effect = async (effect = 'db.local.change', args = ordinaryArgs, approval) => {
     await writeFile(path.join(cwd, 'args.json'), JSON.stringify(args));
     return run(['unit', 'effect', 'unit-a', '--effect', effect, '--args', 'args.json', ...(approval ? ['--approval', approval] : [])]);
@@ -204,7 +220,7 @@ test('PUBLIC-EVIDENCE-RERUN-NONDETERMINISM: divergence excludes coverage and can
   await f.setNative({ mode: 'pass' });
   assert.equal(f.run(['unit', 'accept', 'unit-a']).code, 1);
   record = await f.store.read('unit-a');
-  assert.equal(record.evidence.find(item => item.gate === 'tests').nondeterministic, true);
+  assert.equal(record.evidence.findLast(item => item.gate === 'tests').nondeterministic, true);
   assert.equal(record.accepted, null);
 });
 
@@ -237,7 +253,7 @@ test('PUBLIC-EVIDENCE-RERUN-NONDETERMINISM: excluded failures and input round tr
       await f.setNative({ source: 'source' });
       assert.equal(f.run(['unit', 'accept', 'unit-a']).code, 1);
       const record = await f.store.read('unit-a');
-      assert.equal(record.evidence.find(item => item.gate === 'tests').nondeterministic, true);
+      assert.equal(record.evidence.findLast(item => item.gate === 'tests').nondeterministic, true);
       assert.equal(record.accepted, null);
     });
   }

@@ -106,8 +106,9 @@ export async function finishSessionUnit({
     }
   }
   const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
-  requestedDelivery ??= record.policyChanges?.length ? policy.delivery : 'none';
-  if (record.policyChanges?.length && requestedDelivery !== policy.delivery) throw Object.assign(new Error('finish delivery must match the explicitly authorized unit policy'), { code: 'POLICY_CHANGE_MISMATCH' });
+  const deliveryChanged = record.policyChanges?.some(change => Object.hasOwn(change, 'delivery'));
+  requestedDelivery ??= deliveryChanged ? policy.delivery : 'none';
+  if (deliveryChanged && requestedDelivery !== policy.delivery) throw Object.assign(new Error('finish delivery must match the explicitly authorized unit policy'), { code: 'POLICY_CHANGE_MISMATCH' });
   const authorized = authorizeDelivery(policy, requestedDelivery);
   if (!successor?.approved && !goalComplete && !sameSession) throw Object.assign(new Error('session finish requires an approved successor or confirmed goal completion'), { code: 'USER_DECISION_REQUIRED' });
   formatUnitResult({ ...resultFields, outcome: sameSession ? { kind: 'continue', unit: sameSession.nextUnit } : { kind: 'complete' } });

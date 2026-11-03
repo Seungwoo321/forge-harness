@@ -5,7 +5,7 @@ import { createAdapters } from './adapters.mjs';
 import { formatCliResult } from './report.mjs';
 import { parseUnitArgs, runUnitCli } from './unit-driver.mjs';
 
-const operations = { git: ['inspectUnit'], gates: ['describe', 'run'], tracker: ['read', 'project'], effect: ['execute', 'verify'] };
+const operations = { git: ['inspectUnit'], gates: ['describe'], tracker: ['read', 'project'], effect: ['execute', 'verify'] };
 
 export async function runPublicUnitCli(argv, { cwd = process.cwd(), contractsDir } = {}) {
   try {

@@ -39,6 +39,36 @@ const controlPlaneFields = new Set([
 ]);
 let temporarySequence = 0;
 
+async function withGitHeadLock({ cwd, adapters }, action) {
+  const git = async args => {
+    const result = await adapters.command('git', args, { cwd });
+    if (result.exitCode !== 0) throw Object.assign(new Error('cannot inspect Git head for stage recovery'), { code: 'STAGE_STALE' });
+    return result.stdout.trim();
+  };
+  if (await git(['rev-parse', '--show-ref-format']) !== 'files') throw Object.assign(new Error('unsupported Git reference storage for stage recovery'), { code: 'STAGE_STALE' });
+  const locks = [];
+  const acquire = async name => {
+    const lock = `${path.resolve(cwd, await git(['rev-parse', '--git-path', name]))}.lock`;
+    await mkdir(path.dirname(lock), { recursive: true });
+    const handle = await open(lock, 'wx', 0o600);
+    locks.push({ lock, handle });
+  };
+  try {
+    await acquire('HEAD');
+    const symbolic = await adapters.command('git', ['symbolic-ref', '-q', '--no-recurse', 'HEAD'], { cwd });
+    if (symbolic.exitCode === 0) {
+      const ref = symbolic.stdout.trim();
+      if (!ref.startsWith('refs/')) throw Object.assign(new Error('invalid symbolic HEAD'), { code: 'STAGE_STALE' });
+      await acquire(ref);
+      const indirect = await adapters.command('git', ['symbolic-ref', '-q', '--no-recurse', ref], { cwd });
+      if (indirect.exitCode !== 1) throw Object.assign(new Error('indirect symbolic HEAD is unsupported for stage recovery'), { code: 'STAGE_STALE' });
+    } else if (symbolic.exitCode !== 1) throw Object.assign(new Error('cannot inspect symbolic HEAD'), { code: 'STAGE_STALE' });
+    return await action();
+  } finally {
+    for (const { lock, handle } of locks.reverse()) { await handle.close(); await rm(lock, { force: true }); }
+  }
+}
+
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
   if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])]));
@@ -276,7 +306,7 @@ async function getStateRoot(options, cwd, adapters) {
   return path.join(commonDir, 'work-state');
 }
 
-async function runStage({ stateRoot, contractsDir, unit, stage, options, adapters }) {
+async function runStage({ stateRoot, contractsDir, unit, stage, options, adapters, cwd }) {
   const store = createUnitStateStore(stateRoot);
   const record = await store.read(unit);
   if (!record) {
@@ -297,6 +327,35 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
     const error = new Error('root-cause stage requires a recorded failure');
     error.code = 'INVALID_TRANSITION';
     throw error;
+  }
+  if (options.action === 'restart') {
+    if (stage !== 'implement' || !options.request) usageError('stage restart requires implement and --request <file>');
+    const request = await readJsonFile(path.resolve(cwd, options.request), 'stage restart request', 'CLI_USAGE');
+    if (!request || Object.keys(request).sort().join(',') !== 'attempt,checkpointHead,inputDigest,newHead'
+      || !Number.isSafeInteger(request.attempt) || request.attempt < 1
+      || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(request.checkpointHead ?? '') || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(request.newHead ?? '')
+      || !/^sha256:[a-f0-9]{64}$/.test(request.inputDigest ?? '')) usageError('stage restart requires the exact attempt, inputDigest, checkpointHead and newHead');
+    if (typeof adapters.command !== 'function' || typeof adapters.checkpoint?.inspectChanges !== 'function') throw Object.assign(new Error('stage restart requires Git checkpoint inspection'), { code: 'ADAPTER_MISSING' });
+    let retired;
+    await withGitHeadLock({ cwd, adapters }, () => store.update(unit, async current => {
+      assertStageState(current, stage);
+      const entry = (current.stages ?? []).find(item => item.name === stage);
+      const active = entry?.attempts?.find(item => !item.endedAt);
+      if (!active || active.n !== request.attempt || active.inputDigest !== request.inputDigest || active.checkpointHead !== request.checkpointHead)
+        throw Object.assign(new Error('open stage does not match the requested attempt'), { code: 'STAGE_STALE' });
+      const inspected = await adapters.checkpoint.inspectChanges({ unit, stage, attempt: active.n, checkpoint: active.checkpoint,
+        firstCheckpoint: firstCheckpoint(current) ?? active.checkpoint, exclude: current.policy?.checkpoint?.exclude ?? [] });
+      if (inspected.head !== request.newHead || inspected.head === active.checkpointHead) throw Object.assign(new Error('stage checkpoint is not stale at the requested head'), { code: 'STAGE_STALE' });
+      const ancestry = await adapters.command('git', ['merge-base', '--is-ancestor', active.checkpointHead, inspected.head], { cwd });
+      const head = await adapters.command('git', ['rev-parse', 'HEAD'], { cwd });
+      if (ancestry.exitCode !== 0 || head.exitCode !== 0 || head.stdout.trim() !== inspected.head)
+        throw Object.assign(new Error('current head does not safely extend the checkpoint head'), { code: 'STAGE_STALE' });
+      retired = active.n;
+      return { ...current, stages: current.stages.map(item => item !== entry ? item : { ...item,
+        attempts: item.attempts.map(attempt => attempt.n !== active.n ? attempt : { ...attempt, endedAt: adapters.now(), result: 'superseded',
+          restart: { checkpointHead: active.checkpointHead, newHead: inspected.head, tree: inspected.tree } }) }) };
+    }));
+    return { code: 0, summary: `Retired stale ${stage} attempt for ${unit}; open the next attempt`, details: { unit, stage, attempt: retired, newHead: request.newHead } };
   }
   if (options.action === 'open') {
     let opened;
@@ -319,6 +378,8 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
         error.code = 'STAGE_ALREADY_OPEN';
         throw error;
       }
+      const restart = stage === 'implement' ? attempts.at(-1)?.restart : null;
+      if (restart) target = { ...target, head: restart.newHead, contentFingerprint: '' };
       const attempt = 1 + Math.max(0, ...attempts.map(item => item.n));
       if (typeof adapters.checkpoint?.createCheckpoint !== 'function') {
         const error = new Error('checkpoint adapter must implement createCheckpoint');
@@ -1360,8 +1421,8 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       return formatCliResult({ code: outcomes.some(item => item.status === 'queued') ? 3 : 0, summary: `Reconciled ${outcomes.length} tracker projection(s)`, details: { unit, outcomes } });
     }
     const [action, unit, stage] = rest;
-    if (!['open', 'submit'].includes(action) || !unit || !stage) usageError('usage: unit stage open|submit <unit> <stage>');
-    const result = await runStage({ stateRoot: effectiveRoot, contractsDir, unit, stage, options: { ...parsed.options, action }, adapters });
+    if (!['open', 'submit', 'restart'].includes(action) || !unit || !stage) usageError('usage: unit stage open|submit|restart <unit> <stage>');
+    const result = await runStage({ stateRoot: effectiveRoot, contractsDir, unit, stage, options: { ...parsed.options, action }, adapters, cwd });
     return formatCliResult(result);
   } catch (error) {
     return formatCliResult(commandFailure(error));

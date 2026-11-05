@@ -7,17 +7,22 @@ function fixture(mode) {
   let closes = 0;
   let placeholder = false;
   let unrelated = false;
+  let workspaceClosed = 0;
+  const solo = mode === 'solo-race' || mode === 'solo-handoff' || mode === 'solo-user';
+  const title = mode === 'solo-handoff' || mode === 'solo-race' ? `handoff-${'a'.repeat(64)}` : mode === 'solo-user' ? 'my workspace' : undefined;
   const owner = { sessionId: 'owner', cwd: '/work/product', incarnationId: 'tty1:11:START', tty: 'tty1',
     worker: { executable: 'worker', incarnationId: 'tty1:11:START', pid: 11, threadId: 'native-owner' } };
   const recipient = { sessionId: 'receiver', cwd: '/work/product', incarnationId: 'tty2:22:START', executable: 'worker' };
   const input = { effect: 'session.close', key: 'close-key', args: { owner, recipient, session: 'owner', incarnation: owner.incarnationId } };
   const command = async (binary, args) => {
     let stdout = '';
-    if (binary === 'cmux' && args.includes('tree')) stdout = JSON.stringify({ windows: [{ id: 'window', workspaces: [{ id: 'workspace', panes: [{ surfaces: [
+    if (binary === 'cmux' && args.includes('tree')) stdout = JSON.stringify({ windows: [{ id: 'window', workspaces: [{ id: 'workspace', title, panes: [{ surfaces: [
       ...(present ? [{ id: 'owner', type: 'terminal', tty: 'tty1' }] : []), ...(placeholder ? [{id:'placeholder',type:'terminal',tty:'tty3'}] : []),
-      ...(mode==='solo-race'?[]:[{ id: 'receiver', type: 'terminal', tty: 'tty2' }]),
-    ] }] }, ...(mode==='solo-race'?[{id:'receiver-workspace',panes:[{surfaces:[{id:'receiver',type:'terminal',tty:'tty2'}]}]}]:[])] }] });
+      ...(solo?[]:[{ id: 'receiver', type: 'terminal', tty: 'tty2' }]),
+      ...(unrelated?[{id:'user-shell',type:'terminal',tty:'tty4'}]:[]),
+    ] }] }, ...(solo?[{id:'receiver-workspace',panes:[{surfaces:[{id:'receiver',type:'terminal',tty:'tty2'}]}]}]:[])] }] });
     else if (binary === 'cmux' && args.includes('new-surface')) { placeholder = true; }
+    else if (binary === 'cmux' && args.includes('close-workspace')) { workspaceClosed += 1; }
     else if (binary === 'cmux' && args.includes('close-surface')) {
       if(mode==='solo-race') unrelated = true;
       assert.equal(args[args.indexOf('--workspace') + 1], 'workspace');
@@ -33,7 +38,7 @@ function fixture(mode) {
   };
   const runner = createSessionRunner({ runtime: 'cmux', command, parent: { ...owner, closable: mode !== 'orchestrator' },
     launch: () => ['worker'], pollAttempts: 1, taskTransport: { async identity() { return { threadId: mode === 'thread-drift' ? 'another-thread' : 'native-owner' }; } } });
-  return { runner, input, closes: () => closes, placeholder: () => placeholder, unrelated: () => unrelated };
+  return { runner, input, closes: () => closes, placeholder: () => placeholder, unrelated: () => unrelated, workspaceClosed: () => workspaceClosed };
 }
 
 for (const mode of ['orchestrator', 'caller', 'reused', 'recipient-drift', 'thread-drift']) {
@@ -70,4 +75,16 @@ test('last-surface closure uses an exited placeholder and never closes concurren
   assert.equal(f.placeholder(), true);
   assert.equal(f.unrelated(), true);
   assert.equal(f.closes(), 1);
+});
+
+test('a harness-created workspace left with only its placeholder is closed; other workspaces are kept', async () => {
+  const handoff = fixture('solo-handoff');
+  assert.equal((await handoff.runner.execute(handoff.input)).closed, true);
+  assert.equal(handoff.workspaceClosed(), 1);
+  const user = fixture('solo-user');
+  assert.equal((await user.runner.execute(user.input)).closed, true);
+  assert.equal(user.workspaceClosed(), 0);
+  const race = fixture('solo-race');
+  assert.equal((await race.runner.execute(race.input)).closed, true);
+  assert.equal(race.workspaceClosed(), 0);
 });

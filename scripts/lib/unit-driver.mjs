@@ -16,7 +16,7 @@ import { createDecisionStore, validateDecision } from './decisions.mjs';
 import { acceptanceCoverage, evaluateAcceptance, gateFingerprint, hasInvalidEvidence, runGate } from './evidence.mjs';
 import { attributeChanges, createCheckpoint, scopeGuard } from './checkpoint.mjs';
 import { classifySessionBoundary } from './classify.mjs';
-import { recordApproval, resolveEffectApproval } from './approvals.mjs';
+import { effectArgsDigest, recordApproval, resolveEffectApproval, verifyApprovalInput } from './approvals.mjs';
 import { acceptedDeliveryMetadata, validateDeliveryContext } from './delivery-flow.mjs';
 import { validateAcceptedContent } from './delivery.mjs';
 import { resolveFindings } from './finding-resolution.mjs';
@@ -1234,7 +1234,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
     }
     if (noun === 'goal') {
       const [id] = rest;
-      if (!id || rest.length !== 1 || !['create', 'show', 'block', 'resume', 'reconcile', 'add-work'].includes(subcommand)) usageError('usage: goal create|show <id> [--request <file>]');
+      if (!id || rest.length !== 1 || !['create', 'show', 'block', 'resume', 'reconcile', 'add-work', 'policy-refresh'].includes(subcommand)) usageError('usage: goal create|show|policy-refresh <id> [--request <file>] [--user-input <ref>]');
       const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
       const store = createContinuityStore(effectiveRoot);
       if (subcommand === 'show') {
@@ -1277,6 +1277,34 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
         }
         const goal = await store.transaction(id, current => subcommand === 'block' ? blockGoal(current, request) : resumeGoal(current, request));
         return formatCliResult({ code: 0, summary: `Goal ${id} ${subcommand === 'block' ? 'blocked' : 'resumed'}`, details: { goal } });
+      }
+      if (subcommand === 'policy-refresh') {
+        // An approved work-policy change reaches an active goal only through this path: the stored execution policy is
+        // re-resolved, verified against the exact user authorization, and recorded with its predecessor.
+        if (!parsed.options.request || !parsed.options['user-input']) usageError('goal policy-refresh requires --request <file> --user-input <ref>');
+        const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'goal policy refresh request', 'CLI_USAGE');
+        if (!Number.isSafeInteger(request.expectedRevision) || typeof request.reason !== 'string' || !request.reason.trim()) usageError('goal policy-refresh requires expectedRevision and reason');
+        const current = await store.read(id);
+        if (!current) throw Object.assign(new Error('goal not found'), { code: 'GOAL_NOT_FOUND' });
+        if (current.goal.status !== 'active') throw Object.assign(new Error('only an active goal can refresh its execution policy'), { code: 'CONTINUITY_INVALID' });
+        const projectRoot = path.resolve(cwd, parsed.options['project-root'] ?? '.');
+        const resolved = await resolveStoredPolicy({stateRoot:effectiveRoot,projectRoot,
+          ...(parsed.options['workspace-root'] ? {workspaceRoot:path.resolve(cwd,parsed.options['workspace-root'])} : {}),
+          ...(parsed.options['global-root'] ? {globalRoot:path.resolve(cwd,parsed.options['global-root'])} : {}),
+          nonInteractive:parsed.options['non-interactive'] === true});
+        const session = resolved.policy.session;
+        if (JSON.stringify(stable(session)) === JSON.stringify(stable(current.policy)))
+          return formatCliResult({ code: 0, summary: `Goal ${id} execution policy unchanged`, details: { goal: current } });
+        if (current.revision !== request.expectedRevision) throw Object.assign(new Error('goal changed since the refresh was requested'), { code: 'CONTINUITY_STALE' });
+        const userInputRef = parsed.options['user-input'];
+        await verifyApprovalInput(adapters.provider, { goal: id, userInputRef, effect: 'goal.policy.refresh',
+          argsDigest: effectArgsDigest({ expectedRevision: request.expectedRevision, reason: request.reason, policy: session }), reason: request.reason });
+        const goal = await store.transaction(id, record => {
+          if (!record || record.revision !== request.expectedRevision) throw Object.assign(new Error('goal changed during policy refresh'), { code: 'CONTINUITY_STALE' });
+          return { ...record, revision: record.revision + 1, policy: session,
+            policyChanges: [...(record.policyChanges ?? []), { revision: record.revision + 1, previous: record.policy, reason: request.reason, userInputRef }] };
+        });
+        return formatCliResult({ code: 0, summary: `Goal ${id} execution policy refreshed`, details: { goal } });
       }
       if (!parsed.options.request) usageError('goal create requires --request <file>');
       const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'goal request', 'CLI_USAGE');

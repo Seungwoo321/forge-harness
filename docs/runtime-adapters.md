@@ -73,3 +73,5 @@ merge 전달은 시작할 때 원장의 기존 intent 경계를 고정한다. �
 전체 계약: [명세 §7·§8](spec.md#7-스킬-구성과-계약). 런타임 경계: [runtime-adapters.mjs](../scripts/lib/runtime-adapters.mjs). 외부 호출 진입점: [adapters.mjs](../scripts/lib/adapters.mjs).
 
 미수신 재시도는 native history/queue에 요청이 없고 정확한 입력이 composer에 남아 있을 때만 정책 상한 안에서 같은 intent로 Enter를 재개한다. 빈 composer나 단순 조회 실패로는 미제출을 추정하지 않는다.
+
+진행 중인 목표의 실행 정책은 등록 시점에 고정된다. 사용자가 승인한 작업 정책 변경(예: 리뷰 역할)은 `goal policy-refresh <id> --request <file> --user-input <ref> --adapters <module>` 로만 목표에 반영한다. 요청은 `expectedRevision`·`reason` 을 담고, 신뢰된 `provider.verifyUserInput` 이 정확한 승인을 확인한다. 이전 실행 정책은 `policyChanges` 에 남고, 이후 시작하는 단위가 새 정책으로 결속된다. 같은 정책이면 바꾸지 않는다.

@@ -330,11 +330,10 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       // Keep an exited placeholder when needed: workspace-wide close has no atomic inventory fence.
       let placeholder = null;
       if (owned.length === 1 && owned[0].id === owner.sessionId) {
-        await invoke('cmux', ['new-surface', '--workspace', current.workspaceId, '--type', 'terminal', '--command', '/usr/bin/true', '--focus', 'false'], owner.cwd);
+        const created = await cmux(['new-surface', '--workspace', current.workspaceId, '--type', 'terminal', '--command', '/usr/bin/true', '--focus', 'false'], owner.cwd);
         const after = await workerIdentity(await inspect(owner.sessionId, owner.cwd, owner.worker.executable));
         if (after.incarnationId !== owner.worker.incarnationId || after.threadId !== owner.worker.threadId || after.workspaceId !== current.workspaceId) throw invalid('owner changed while preparing surface closure');
-        const added = terminals(await cmux(['tree', '--all'], owner.cwd)).filter(item => item.workspaceId === current.workspaceId && item.id !== owner.sessionId);
-        if (added.length === 1) placeholder = added[0].id;
+        placeholder = typeof created?.surface_id === 'string' ? created.surface_id : null;
       }
       await invoke('cmux', ['close-surface', '--workspace', current.workspaceId, '--surface', owner.sessionId], owner.cwd);
       // A workspace this harness created for the session is closed once only its own placeholder is left.

@@ -1,5 +1,4 @@
 node_modules/
-/daemon/target/
 .local/
 tmp/
 .DS_Store

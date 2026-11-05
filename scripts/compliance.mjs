@@ -53,6 +53,18 @@ export async function runCompliance(base = root) {
     }
   }
 
+  // Conformance requirement IDs (H-*) are keys for gap scans and acceptance mapping; a reused ID silently merges two requirements.
+  const spec = sources.find(([file]) => file === path.join('docs', 'spec.md'));
+  if (spec) {
+    const seen = new Map();
+    spec[1].split('\n').forEach((line, index) => {
+      const id = /^\|\s*(H-[A-Z]+-\d+)\s*\|/.exec(line)?.[1];
+      if (!id) return;
+      if (seen.has(id)) findings.push({ file: spec[0], rule: 'duplicate-conformance-id', match: `${id} (lines ${seen.get(id)} and ${index + 1})` });
+      else seen.set(id, index + 1);
+    });
+  }
+
   findings.sort((a, b) => a.file.localeCompare(b.file) || a.rule.localeCompare(b.rule) || a.match.localeCompare(b.match));
   return { ok: findings.length === 0, findings };
 }

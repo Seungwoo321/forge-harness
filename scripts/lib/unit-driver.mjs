@@ -22,6 +22,7 @@ import { validateAcceptedContent } from './delivery.mjs';
 import { resolveFindings } from './finding-resolution.mjs';
 import { recheckScope } from './scope-recheck.mjs';
 import { amendScope } from './scope-amend.mjs';
+import { finalizeWithin } from './finalize-wait.mjs';
 import { createContinuityStore } from './continuity-store.mjs';
 import { blockGoal, resumeGoal, appendGoalWork } from './continuity-transitions.mjs';
 import { commitGoalCompletion } from './continuity-completion.mjs';
@@ -284,7 +285,7 @@ export function parseUnitArgs(argv) {
         options[key] = true;
         continue;
       }
-      if (!['adapters', 'state-root', 'project-root', 'workspace-root', 'global-root', 'non-interactive', 'output', 'by', 'effect', 'args', 'approval', 'failure', 'snapshot', 'cause-key', 'request', 'decision-id', 'answer', 'user-input', 'gate'].includes(key)) usageError(`unknown option: ${argument}`);
+      if (!['wait', 'interval', 'adapters', 'state-root', 'project-root', 'workspace-root', 'global-root', 'non-interactive', 'output', 'by', 'effect', 'args', 'approval', 'failure', 'snapshot', 'cause-key', 'request', 'decision-id', 'answer', 'user-input', 'gate'].includes(key)) usageError(`unknown option: ${argument}`);
       const value = argv[++index];
       if (!value || value.startsWith('--')) usageError(`missing value for ${argument}`);
       if (options[key] !== undefined) usageError(`duplicate option: ${argument}`);
@@ -1418,8 +1419,11 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
     }
     if (subcommand === 'finalize') {
       const [unit] = rest;
-      if (!unit || rest.length !== 1) usageError('unit finalize requires <unit>');
-      const { code, summary, ...details } = await finalizeSessionUnit({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, adapters });
+      if (!unit || rest.length !== 1) usageError('unit finalize requires <unit> [--wait <seconds>] [--interval <seconds>]');
+      const waitSeconds = parsed.options.wait === undefined ? 0 : Number(parsed.options.wait);
+      const intervalSeconds = parsed.options.interval === undefined ? 30 : Number(parsed.options.interval);
+      if (!Number.isFinite(waitSeconds) || waitSeconds < 0 || !Number.isFinite(intervalSeconds) || intervalSeconds <= 0) usageError('unit finalize --wait and --interval must be non-negative seconds');
+      const { code, summary, ...details } = await finalizeWithin(() => finalizeSessionUnit({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, adapters }), { waitSeconds, intervalSeconds });
       return formatCliResult({ code, summary, details });
     }
     if (subcommand === 'finish') {

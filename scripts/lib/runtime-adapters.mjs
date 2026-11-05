@@ -40,7 +40,9 @@ export async function runPublicUnitCli(argv, { cwd = process.cwd(), contractsDir
     if (argv[0] === 'unit' && ['finish', 'session-stop', 'session-return'].includes(argv[1]) && result.finalizePending && options.adapters) {
       const directory = path.join(result.stateRoot, 'units', argv[2]);
       await mkdir(directory, { recursive: true });
-      const arguments_ = [fileURLToPath(new URL('../unit.mjs', import.meta.url)), 'unit', 'finalize', argv[2], '--adapters', path.resolve(cwd, options.adapters)];
+      // The detached finalizer keeps re-observing a pending delivery for up to two hours, so a busy owner still receives the
+      // result and the finished session closes without someone rerunning finalize.
+      const arguments_ = [fileURLToPath(new URL('../unit.mjs', import.meta.url)), 'unit', 'finalize', argv[2], '--adapters', path.resolve(cwd, options.adapters), '--wait', '7200', '--interval', '30'];
       for (const key of ['state-root', 'project-root']) if (options[key]) arguments_.push(`--${key}`, path.resolve(cwd, options[key]));
       await core.detach(process.execPath, arguments_, { cwd, logPath: path.join(directory, 'finalization.log') });
     }

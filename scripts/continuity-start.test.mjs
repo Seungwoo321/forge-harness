@@ -46,3 +46,20 @@ test('independent review inherits the goal without advancing target ownership', 
  assert.equal((await startGoalSession({stateRoot:root,unit:'review',request,store,adapters:{session,now:()=>new Date().toISOString()}})).status,'completed');
  assert.equal(args.role,'review');const goal=await goals.read('g2');assert.deepEqual(goal.goal.remaining,['target']);assert.equal(goal.reviews[0].targetUnit,'target');
 });
+
+test('a worker that cannot observe its hooks starts without enforcement; an observed unverified hook is refused', async t => {
+  for (const [label, enforcement, expected] of [['claude', undefined, 'completed'], ['codex-unverified', {status:'unverified',provider:'codex',scope:'account-cwd'}, 'rejected']]) await t.test(label, async t => {
+    const root = await mkdtemp(path.join(tmpdir(),`goal-start-${label}-`)); t.after(()=>rm(root,{recursive:true,force:true}));
+    const source = path.join(root,'goal.md'); await writeFile(source,'goal');
+    const handoff = path.join(root,'handoff.md'); const packet = ['목표: goal','수용 기준: criteria','작업관리: unit','결정: policy','변경: none','검증: none','남은 일·위험: work','다음 단위 첫 행동: begin'].join('\n'); await writeFile(handoff,packet);
+    const goals = createContinuityStore(root), store = createUnitStateStore(root);
+    await goals.create({goal:{id:'g3',objective:'goal',criteria:['done'],remaining:['u1'],status:'active'},policy:{runtime:'cmux',provider:label === 'claude' ? 'claude' : 'codex',account:'/account',model:'model',effort:'high',argv:[label === 'claude' ? 'claude' : 'codex']},source:{path:source,digest:hash('goal')}});
+    await store.create({schema:'harness.unit/1',unit:'u1',kind:'impl',state:'Scoped',continuity:{goalId:'g3'},policy:{goal:{class:'product-prelaunch'}}});
+    let receipt;
+    const session = {async observe(){return {sessionId:'parent',incarnationId:'v1',cwd:root,runtime:'cmux'}}, async execute(input){const identity={sessionId:'child',incarnationId:'v2',cwd:input.args.cwd}; return receipt = {...identity,task:{...identity,schema:'harness.goal-receipt/1',...(enforcement ? {enforcement} : {}),effectKey:input.key,promptDigest:taskDigest('prompt'),goalDigest:input.args.goalDigest,goal:{threadId:'thread',status:'active',objective:'prompt'},threadId:'thread',turnId:'turn',activityId:'activity',packets:[{path:input.args.handoffPath,digest:input.args.handoffDigest},{path:input.args.goalPath,digest:input.args.goalDigest}]}}}, async verify(){return {status:'completed',result:receipt}}};
+    const request = {cwd:root,handoffPath:handoff,handoffDigest:hash(packet),parentRuntime:{sessionId:'parent',incarnationId:'v1',cwd:root}};
+    const run = startGoalSession({stateRoot:root,unit:'u1',request,store,adapters:{session,now:()=>new Date().toISOString()}});
+    if (expected === 'completed') assert.equal((await run).status,'completed');
+    else { const outcome = await run.catch(error => ({status:'rejected', error})); assert.notEqual(outcome.status,'completed'); assert.equal((await goals.read('g3')).bootstraps?.length ?? 0, 0); }
+  });
+});

@@ -52,3 +52,23 @@ test('an approved work-policy change reaches an active goal only through a verif
   assert.equal(result(run('goal','policy-refresh','g1','--request',refresh,'--user-input','user-1','--adapters',adapters)).summary,'Goal g1 execution policy unchanged');
   assert.equal(run('unit','start','u2','--request',unit,'--non-interactive').status,0);
 });
+
+test('an approved goal amendment replaces objective and criteria and keeps the prior definition', async t => {
+  const root = await mkdtemp(path.join(tmpdir(),'goal-amend-')); t.after(() => rm(root,{recursive:true,force:true}));
+  const file = path.join(root,'goal.md'); const bytes = 'Goal: deliver\n'; await writeFile(file,bytes);
+  const source = {path:file,digest:`sha256:${createHash('sha256').update(bytes).digest('hex')}`};
+  const state = path.join(root,'state'); await mkdir(state,{recursive:true});
+  await writeFile(path.join(state,'policy.json'),JSON.stringify({goal:{class:'task'},session:{runtime:'cmux',provider:'claude',account:'/account',model:'model',effort:'high',argv:['claude']}}));
+  const request = path.join(root,'goal.json'); await writeFile(request,JSON.stringify({goal:{id:'g1',objective:'deliver line A',criteria:['A works'],remaining:['u1'],status:'active'},source}));
+  const adapters = path.join(root,'adapters.mjs');
+  await writeFile(adapters,`export function createRuntimeAdapters(){ return { provider: { verifyUserInput: input => ({ ...input, verified: input.userInputRef === 'user-1' && input.effect === 'goal.amend' }) } }; }`);
+  const run = (...args) => spawnSync(process.execPath,[cli,...args,'--state-root',state,'--project-root',root],{cwd:root,encoding:'utf8'});
+  const result = child => JSON.parse(child.stdout.slice(child.stdout.lastIndexOf('RESULT ')+7));
+  assert.equal(run('goal','create','g1','--request',request).status,0);
+  const amend = path.join(root,'amend.json'); await writeFile(amend,JSON.stringify({expectedRevision:1,reason:'line B added',objective:'deliver lines A and B',criteria:['A works','B works']}));
+  assert.notEqual(run('goal','amend','g1','--request',amend,'--user-input','user-2','--adapters',adapters).status,0);
+  const amended = result(run('goal','amend','g1','--request',amend,'--user-input','user-1','--adapters',adapters));
+  assert.equal(amended.goal.revision,2); assert.deepEqual(amended.goal.goal.criteria,['A works','B works']);
+  assert.deepEqual(amended.goal.amendments[0].previous,{objective:'deliver line A',criteria:['A works']});
+  assert.equal(result(run('goal','amend','g1','--request',amend,'--user-input','user-1','--adapters',adapters)).error,'CONTINUITY_STALE');
+});

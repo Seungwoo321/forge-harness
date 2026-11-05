@@ -1236,7 +1236,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
     }
     if (noun === 'goal') {
       const [id] = rest;
-      if (!id || rest.length !== 1 || !['create', 'show', 'block', 'resume', 'reconcile', 'add-work', 'policy-refresh'].includes(subcommand)) usageError('usage: goal create|show|policy-refresh <id> [--request <file>] [--user-input <ref>]');
+      if (!id || rest.length !== 1 || !['create', 'show', 'block', 'resume', 'reconcile', 'add-work', 'policy-refresh', 'amend'].includes(subcommand)) usageError('usage: goal create|show|policy-refresh|amend <id> [--request <file>] [--user-input <ref>]');
       const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
       const store = createContinuityStore(effectiveRoot);
       if (subcommand === 'show') {
@@ -1279,6 +1279,29 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
         }
         const goal = await store.transaction(id, current => subcommand === 'block' ? blockGoal(current, request) : resumeGoal(current, request));
         return formatCliResult({ code: 0, summary: `Goal ${id} ${subcommand === 'block' ? 'blocked' : 'resumed'}`, details: { goal } });
+      }
+      if (subcommand === 'amend') {
+        // An approved change to an active goal's objective or criteria, e.g. when added work changes what completes it.
+        // Completion proofs map each criterion verbatim to an accepted unit's acceptance text.
+        if (!parsed.options.request || !parsed.options['user-input']) usageError('goal amend requires --request <file> --user-input <ref>');
+        const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'goal amend request', 'CLI_USAGE');
+        if (!Number.isSafeInteger(request.expectedRevision) || typeof request.reason !== 'string' || !request.reason.trim()
+          || typeof request.objective !== 'string' || !request.objective.trim()
+          || !Array.isArray(request.criteria) || !request.criteria.length || request.criteria.some(item => typeof item !== 'string' || !item.trim())
+          || new Set(request.criteria).size !== request.criteria.length) usageError('goal amend requires expectedRevision, reason, objective and distinct non-empty criteria');
+        const current = await store.read(id);
+        if (!current) throw Object.assign(new Error('goal not found'), { code: 'GOAL_NOT_FOUND' });
+        if (current.goal.status !== 'active') throw Object.assign(new Error('only an active goal can be amended'), { code: 'CONTINUITY_INVALID' });
+        if (current.revision !== request.expectedRevision) throw Object.assign(new Error('goal changed since the amendment was requested'), { code: 'CONTINUITY_STALE' });
+        const userInputRef = parsed.options['user-input'];
+        await verifyApprovalInput(adapters.provider, { goal: id, userInputRef, effect: 'goal.amend',
+          argsDigest: effectArgsDigest({ expectedRevision: request.expectedRevision, objective: request.objective, criteria: request.criteria, reason: request.reason }), reason: request.reason });
+        const goal = await store.transaction(id, record => {
+          if (!record || record.revision !== request.expectedRevision || record.goal.status !== 'active') throw Object.assign(new Error('goal changed during amendment'), { code: 'CONTINUITY_STALE' });
+          return { ...record, revision: record.revision + 1, goal: { ...record.goal, objective: request.objective, criteria: [...request.criteria] },
+            amendments: [...(record.amendments ?? []), { revision: record.revision + 1, previous: { objective: record.goal.objective, criteria: record.goal.criteria }, reason: request.reason, userInputRef }] };
+        });
+        return formatCliResult({ code: 0, summary: `Goal ${id} amended`, details: { goal } });
       }
       if (subcommand === 'policy-refresh') {
         // An approved work-policy change reaches an active goal only through this path: the stored execution policy is

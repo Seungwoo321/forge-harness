@@ -81,7 +81,8 @@ export function createClaudeTaskTransport({ command, env, submitInput }) {
       const matches = rows.filter(row => row.type === 'user' && row.isSidechain !== true && row.sessionId?.toLowerCase() === threadId
         // A delivery reaches an existing owner whose shell may have moved; a start prompt arrives at the launch cwd.
         && (request.input.effect === 'session.deliver' || row.cwd === request.observed.cwd) && textOf(row.message) === request.prompt && typeof row.uuid === 'string');
-      if (matches.length > 1) throw taskError('Claude request appears more than once');
+      // A delivery may be re-sent when an earlier copy was not fully read; any copy that started satisfies it.
+      if (matches.length > 1 && request.input.effect !== 'session.deliver') throw taskError('Claude request appears more than once');
       // A delivery sent while the owner is mid-turn is recorded as a queued_command attachment and injected into that turn.
       const queued = request.input.effect === 'session.deliver' ? rows.filter(row => row.type === 'attachment' && row.isSidechain !== true
         && row.sessionId?.toLowerCase() === threadId && row.attachment?.type === 'queued_command' && row.attachment.commandMode === 'prompt'

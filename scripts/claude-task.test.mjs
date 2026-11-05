@@ -40,6 +40,20 @@ test('Claude receipt requires exact process session, prompt, packet contents and
  assert.equal((await transport.observe(short)).state,'accepted');
  assert.deepEqual((await transport.observe({...request,prompt:'different'})).state,'startup');
  processId='ffffffff-1111-4222-8333-444444444444';assert.equal((await transport.observe(request)).state,'startup');
+ processId=id;
+ // A delivery sent while the owner is mid-turn arrives as a queued_command attachment injected into that turn.
+ result.message.content[0].content='1\tgoal';
+ const queued={type:'attachment',sessionId:id,uuid:'queued-1',parentUuid:'earlier',attachment:{type:'queued_command',commandMode:'prompt',prompt:short.prompt}};
+ const queuedCall={...call,parentUuid:'queued-1'};
+ await writeFile(file,[queued,queuedCall].map(JSON.stringify).join('\n')+'\n');
+ assert.equal((await transport.observe(short)).state,'accepted');
+ await writeFile(file,[queued,queuedCall,result].map(JSON.stringify).join('\n')+'\n');
+ assert.equal((await transport.observe(short)).state,'started');
+ // A queued start prompt is not a delivery and does not count.
+ assert.equal((await transport.observe({...short,input})).state,'startup');
+ // The same delivery re-sent as a normal turn after a queued copy that never read the packet still counts once.
+ await writeFile(file,[queued,{...readUser,uuid:'user-2'},{...call,parentUuid:'user-2'},result].map(JSON.stringify).join('\n')+'\n');
+ assert.equal((await transport.observe(short)).state,'started');
 });
 
 test('Claude native goal requires matching active status, command and descendant activity',async t=>{

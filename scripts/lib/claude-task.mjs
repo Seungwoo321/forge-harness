@@ -82,8 +82,19 @@ export function createClaudeTaskTransport({ command, env, submitInput }) {
         // A delivery reaches an existing owner whose shell may have moved; a start prompt arrives at the launch cwd.
         && (request.input.effect === 'session.deliver' || row.cwd === request.observed.cwd) && textOf(row.message) === request.prompt && typeof row.uuid === 'string');
       if (matches.length > 1) throw taskError('Claude request appears more than once');
-      if (!matches.length) return request.input.effect === 'session.deliver' ? {state:'ready',fence:threadId,notApplied:true} : {state:'startup'};
-      const user=matches[0], index=rows.indexOf(user), descendants=new Set([user.uuid]);
+      // A delivery sent while the owner is mid-turn is recorded as a queued_command attachment and injected into that turn.
+      const queued = request.input.effect === 'session.deliver' ? rows.filter(row => row.type === 'attachment' && row.isSidechain !== true
+        && row.sessionId?.toLowerCase() === threadId && row.attachment?.type === 'queued_command' && row.attachment.commandMode === 'prompt'
+        && row.attachment.prompt === request.prompt && typeof row.uuid === 'string') : [];
+      if (!matches.length && !queued.length) return request.input.effect === 'session.deliver' ? {state:'ready',fence:threadId,notApplied:true} : {state:'startup'};
+      let outcome = {state:'accepted'};
+      for (const candidate of [...matches, ...queued]) {
+        outcome = receiptFrom(candidate);
+        if (outcome.state === 'started') return outcome;
+      }
+      return outcome;
+      function receiptFrom(user) {
+      const index=rows.indexOf(user), descendants=new Set([user.uuid]);
       let activity;
       const reads = new Map(), verified = new Set();
       for (const row of rows.slice(index+1)) {
@@ -106,6 +117,7 @@ export function createClaudeTaskTransport({ command, env, submitInput }) {
       const packets = request.packets.filter(packet => (request.prompt.includes(packet.path) && request.prompt.includes(packet.digest) && request.prompt.includes(packet.content)) || verified.has(packet.path));
       if (packets.length !== request.packets.length) return {state:'accepted'};
       return {state:'started',promptDigest:taskDigest(request.prompt),threadId,requestId:user.uuid,turnId:user.uuid,activityId:activity.uuid,packets:packets.map(({path,digest})=>({path,digest}))};
+      }
     },
     async submit(request) {
       if (request.input.effect !== 'session.deliver' || !submitInput || await binding(request.observed) !== request.fence) throw taskError('Claude conditional submission is unavailable');

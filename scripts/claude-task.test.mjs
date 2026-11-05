@@ -54,6 +54,13 @@ test('Claude receipt requires exact process session, prompt, packet contents and
  // The same delivery re-sent as a normal turn after a queued copy that never read the packet still counts once.
  await writeFile(file,[queued,{...readUser,uuid:'user-2'},{...call,parentUuid:'user-2'},result].map(JSON.stringify).join('\n')+'\n');
  assert.equal((await transport.observe(short)).state,'started');
+ // A delivery whose first copy read the packet partially can be re-sent as another normal turn.
+ const partial={...result,uuid:'partial-1',message:{content:[{type:'tool_result',tool_use_id:'tool-1',content:'1\tgo'}]}};
+ await writeFile(file,[readUser,call,partial,{...readUser,uuid:'user-3'},{...call,parentUuid:'user-3',message:{content:[{type:'tool_use',name:'Read',id:'tool-3',input:{file_path:'/goal'}}]}},{...result,uuid:'result-3',parentUuid:'assistant-1',message:{content:[{type:'tool_result',tool_use_id:'tool-3',content:'1\tgoal'}]}}].map(JSON.stringify).join('\n')+'\n');
+ assert.equal((await transport.observe(short)).state,'started');
+ // A start prompt that appears twice is still ambiguous.
+ await writeFile(file,[user,{...user,uuid:'user-4'},assistant].map(JSON.stringify).join('\n')+'\n');
+ await assert.rejects(transport.observe(request),/more than once/);
 });
 
 test('Claude native goal requires matching active status, command and descendant activity',async t=>{

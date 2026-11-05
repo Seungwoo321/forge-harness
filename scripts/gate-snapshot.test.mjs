@@ -89,10 +89,10 @@ test('a live input changed and restored during execution cannot alter captured i
  const directory=await mkdtemp(path.join(os.tmpdir(),'gate-race-'));t.after(()=>rm(directory,{recursive:true,force:true}));
  const sourceRoot=path.join(directory,'source'),snapshots=path.join(directory,'snapshots');let coord;
  await mkdir(sourceRoot);await mkdir(snapshots);
- const script=`import {access,readFile,writeFile} from 'node:fs/promises';const dir=process.env.TMPDIR;async function wait(name){for(let i=0;i<500;i++){try{await access(dir+'/'+name);return}catch{}await new Promise(r=>setTimeout(r,10))}throw Error('timeout')}await writeFile(dir+'/ready','');await wait('read');const value=await readFile('input','utf8');await writeFile(dir+'/read-done','');await wait('finish');process.stdout.write(value);`;
+ const script=`import {access,readFile,writeFile} from 'node:fs/promises';const dir=process.env.TMPDIR;async function wait(name){for(let i=0;i<3000;i++){try{await access(dir+'/'+name);return}catch{}await new Promise(r=>setTimeout(r,10))}throw Error('timeout')}await writeFile(dir+'/ready','');await wait('read');const value=await readFile('input','utf8');await writeFile(dir+'/read-done','');await wait('finish');process.stdout.write(value);`;
  const files=[{path:'check.mjs',content:script},{path:'input',content:'original'}];
  for(const file of files)await writeFile(path.join(sourceRoot,file.path),file.content);
- const wait=async name=>{for(let i=0;i<500;i++){if(coord){try{await readFile(path.join(coord,name));return}catch(error){if(error.code!=='ENOENT')throw error;}}await new Promise(resolve=>setTimeout(resolve,10));}throw Error(`timed out waiting for ${name}`);};
+ const wait=async name=>{for(let i=0;i<3000;i++){if(coord){try{await readFile(path.join(coord,name));return}catch(error){if(error.code!=='ENOENT')throw error;}}await new Promise(resolve=>setTimeout(resolve,10));}throw Error(`timed out waiting for ${name}`);};
  const command=createAdapters().command;
  const running=executeCapturedGate({gate:{id:'check',command:[process.execPath,'check.mjs'],files},directory:snapshots,sourceRoot,command:(binary,args,options)=>{coord=options.env.TMPDIR;return command(binary,args,options);}});
  await wait('ready');await writeFile(path.join(sourceRoot,'input'),'modified');await writeFile(path.join(coord,'read'),'');

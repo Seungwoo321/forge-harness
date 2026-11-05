@@ -14,6 +14,7 @@ const failure = message => Object.assign(new Error(message), {code:'CONTINUITY_I
 export async function startGoalSession({ stateRoot, unit, request, store, adapters }) {
   const record = await store.read(unit);
   const review = record?.kind === 'review';
+  if (review && record && !record.continuity?.goalId) throw failure('review unit is not bound to a goal: create it with goalId in the unit start request ({kind: "review", targetUnit, goalId})');
   if (!record?.continuity?.goalId || !(review ? record.state === 'InReview' : ['Scoped','Implementing'].includes(record.state))) throw failure('unit must be active and bound to a goal');
   const goals = createContinuityStore(stateRoot);
   const goal = await goals.read(record.continuity.goalId);

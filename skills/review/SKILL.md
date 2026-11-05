@@ -5,6 +5,8 @@ description: Independently review an opened review StageInput against acceptance
 
 # Review
 
+A goal-managed review runs in a review unit created with `{"kind": "review", "targetUnit": "<unit>", "goalId": "<goal>", "request": {...}}`; start it as soon as the target reaches `InReview`, before PR creation or remote CI, and open its session with `session-start`.
+
 Read only the driver-supplied StageInput and this directory's `contract.json` as work context, then inspect the referenced code, diff, handoff, and original evidence.
 
 1. Work independently from the producer. Check acceptance coverage, behavior, failure boundaries, security, data integrity, and unnecessary complexity in the changed code and its callers.

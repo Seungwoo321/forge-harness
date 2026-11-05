@@ -84,6 +84,11 @@ export function attributeChanges({ unit, firstCheckpointDiff, attemptDiff, isola
 }
 
 function globRegex(pattern) {
+  // A plain path (no glob characters) names a file or a directory: it covers itself and everything below it.
+  if (!/[*?]/.test(pattern) && !/[\\/]$/.test(pattern)) {
+    const literal = normalizeRepoPath(pattern).replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
+    return new RegExp(`^${literal}(?:/.*)?$`);
+  }
   const value = normalizeRepoPath(/[\\/]$/.test(pattern) ? `${pattern}**` : pattern);
   let out = '^';
   for (let i = 0; i < value.length; i += 1) {

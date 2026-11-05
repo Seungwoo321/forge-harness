@@ -381,7 +381,7 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       const text = `cd -- ${quote(input.args.cwd)} && ${assignments ? `${assignments} ` : ''}exec ${argv.map(quote).join(' ')}`;
       if (runtime === 'cmux') {
         // Mutation acknowledgments can be plain text; completion requires live observation below.
-        await invoke('cmux', ['--json', '--id-format', 'uuids', 'new-workspace', '--name', marker(input.key), '--cwd', input.args.cwd, '--command', text, '--focus', 'false'], input.args.cwd);
+        await invoke('cmux', ['--json', '--id-format', 'uuids', 'new-workspace', '--name', marker(input.key), '--cwd', input.args.cwd, '--command', text, '--focus', 'true'], input.args.cwd);
       } else {
         await orca(['terminal', 'create', '--worktree', `path:${input.args.cwd}`, '--title', marker(input.key), '--command', text], input.args.cwd);
       }

@@ -15,7 +15,19 @@ if (root && id(goalId) && id(unit) && path.isAbsolute(root)) {
       readFile(path.join(root, 'units', unit, 'unit.json'), 'utf8').then(JSON.parse),
     ]);
   } catch {}
-  const transferred = record?.sessionFinalization?.closeReceipt || (record?.state === 'Closed' && record?.kind !== 'review');
+  const visited = new Set([unit]);
+  let currentUnit = unit;
+  while (goal && record) {
+    const transfer = goal.transfers?.find(item => item.unit === currentUnit);
+    if (transfer?.sameSession !== true) break;
+    if (!id(transfer.successor) || visited.has(transfer.successor)) { record = null; break; }
+    currentUnit = transfer.successor;
+    visited.add(currentUnit);
+    try { record = JSON.parse(await readFile(path.join(root, 'units', currentUnit, 'unit.json'), 'utf8')); }
+    catch { record = null; }
+  }
+  const transferred = record?.sessionFinalization?.closeReceipt
+    || (record?.state === 'Closed' && record?.kind !== 'review' && goal?.goal?.status === 'complete');
   if (!transferred) {
     const action = !goal || !record ? 'Inspect the goal and unit state; do not infer completion from a missing record.'
       : record.kind === 'review' && record.state === 'Closed' ? 'Use the session-return skill to transfer the review and verify closure.'

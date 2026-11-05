@@ -57,13 +57,22 @@ test('PUBLIC-EVIDENCE-RERUN-NONDETERMINISM: late matching and changed-input runs
       f.adapters.gates.describe = async id => gateFor(id);
     }
     release.resolve();
-    assert.equal((await slow).nondeterministic, true);
+    const late = await slow;
     const record = await f.store.read('demo');
     const evidence = record.evidence.findLast(item => item.gate === 'tests');
-    assert.equal(evidence.status, 'nondeterministic');
     assert.equal(evidence.comparisonHistory.find(item => item.fingerprint === gateFingerprint(gateFor('tests'))).nondeterministic, true);
-    if (changedInput) assert.ok(evidence.comparisonHistory.some(item => item.fingerprint === gateFingerprint(gateFor('tests', 'changed'))));
-    assert.equal(record.accepted, null);
+    if (changedInput) {
+      // The live input moved during the late run, so that run is rejected without a record;
+      // the acceptance of the changed content stands on its own evidence.
+      assert.equal(late.error, 'GATE_SNAPSHOT_INVALID');
+      assert.equal(evidence.fingerprint, gateFingerprint(gateFor('tests', 'changed')));
+      assert.equal(evidence.status, 'passed');
+      assert.notEqual(record.accepted, null);
+    } else {
+      assert.equal(late.nondeterministic, true);
+      assert.equal(evidence.status, 'nondeterministic');
+      assert.equal(record.accepted, null);
+    }
     assert.equal((await f.call(['unit', 'accept', 'demo'])).code, 1);
     assert.equal((await f.store.read('demo')).state, 'SelfGated');
   });

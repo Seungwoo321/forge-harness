@@ -5,7 +5,7 @@ function contents(screen, provider) {
   if (typeof screen === 'object') screen = screen.screen;
   if (typeof screen !== 'string') throw taskError('native goal composer is unavailable');
   const lines = screen.split('\n').map(line => line.trimEnd());
-  const start = lines.findLastIndex(line => provider === 'codex' ? /^\s*› /.test(line) : /^\s*❯(?:[ \u00a0]|$)/u.test(line));
+  const start = lines.findLastIndex(line => provider === 'codex' ? /^\s*›(?: |$)/.test(line) : /^\s*❯(?:[ \u00a0]|$)/u.test(line));
   if (start < 0) throw taskError('native goal composer is unavailable');
   let end = lines.findIndex((line, index) => index > start && (provider === 'codex' ? /· (Ready|Working) ·/.test(line) : /^\s*─{8,}\s*$/u.test(line)));
   if (provider === 'codex' && end < 0) {
@@ -17,7 +17,7 @@ function contents(screen, provider) {
     if (end < 0) end = lines.findIndex((line, index) => index > start && /\S.* · /.test(line));
   }
   if (end < 0 || provider === 'claude' && !/^\s*─{8,}\s*$/u.test(lines[start - 1] ?? '')) throw taskError('native goal composer is ambiguous');
-  return [lines[start].replace(provider === 'codex' ? /^\s*› / : /^\s*❯[ \u00a0]?/u, ''), ...lines.slice(start + 1, end).map(line => line.trimStart())].join('\n').trim();
+  return [lines[start].replace(provider === 'codex' ? /^\s*› ?/ : /^\s*❯[ \u00a0]?/u, ''), ...lines.slice(start + 1, end).map(line => line.trimStart())].join('\n').trim();
 }
 
 function matches(display, expected) {
@@ -28,7 +28,7 @@ function matches(display, expected) {
     position += lines[index].length;
     if (index + 1 < lines.length) {
       if (expected[position] === '\n') position += 1;
-      else while (expected[position] === ' ') position += 1;
+      else if (expected[position] === ' ') position += 1;
     }
   }
   return position === expected.length;
@@ -49,20 +49,29 @@ export async function submitNativeGoal({ provider, objective, read, write, newli
   }
   if (!commandReady) throw taskError('native goal command was not recognized');
   const parts = objective.split('\n');
-  await write(` ${parts[0]}`);
+  const type = async text => {
+    const characters=[...text];
+    for(let offset=0;offset<characters.length;offset+=128) {
+      await write(characters.slice(offset,offset+128).join(''));
+      if(offset+128<characters.length)await new Promise(resolve=>setTimeout(resolve,150));
+    }
+  };
+  await type(` ${parts[0]}`);
   for (const part of parts.slice(1)) {
     await newline();
-    if (part) await write(part);
+    if (part) await type(part);
   }
   const expected = `/goal ${objective}`;
+  const matchesDraft = screen => typeof screen?.draft === 'string'
+    ? screen.draft === expected : matches(contents(screen, provider), expected);
   let settled = 0;
   for (let attempt = 0; attempt < 20; attempt += 1) {
     await new Promise(resolve => setTimeout(resolve, 300));
-    if (matches(contents(await read(), provider), expected)) settled += 1;
+    if (matchesDraft(await read())) settled += 1;
     else settled = 0;
     if (settled === 2) {
       await verify();
-      if (!matches(contents(await read(), provider), expected)) throw taskError('native goal composer changed before submission');
+      if (!matchesDraft(await read())) throw taskError('native goal composer changed before submission');
       await enter();
       return;
     }

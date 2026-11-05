@@ -2,7 +2,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { composeGoalPrompt, selectExecutionPolicy } from './continuity-decision.mjs';
 
-export function buildManagedLaunch({ goal, policy, handoff, goalRef, effectKey, packets = [], role = 'implementation', unit }) {
+export function buildManagedLaunch({ goal, policy, handoff, goalRef, effectKey, packets = [], role = 'implementation', unit, cwd }) {
   policy = selectExecutionPolicy(policy, role);
   if (!path.isAbsolute(policy.account)) throw Object.assign(new TypeError('account configuration path must be absolute'), { code: 'CONTINUITY_INVALID' });
   const env = policy.provider === 'codex' ? { CODEX_HOME: policy.account } : { CLAUDE_CONFIG_DIR: policy.account };
@@ -19,7 +19,9 @@ export function buildManagedLaunch({ goal, policy, handoff, goalRef, effectKey, 
     env.FORGE_CONTINUITY_GOAL = goal.id;
     env.FORGE_CONTINUITY_UNIT = unit;
   }
-  const prompt = [composeGoalPrompt({ goal, policy, handoff }), `Read ${goalRef.path} (${goalRef.digest}) as the authoritative goal snapshot.`, ...packets.map(packet => `Read ${packet.path} (${packet.digest}).`)].join(' ');
+  if (cwd !== undefined && !path.isAbsolute(cwd)) throw Object.assign(new TypeError('launch cwd must be absolute'), {code:'CONTINUITY_INVALID'});
+  const displayPath = file => cwd ? path.relative(cwd, file) || '.' : file;
+  const prompt = [composeGoalPrompt({ goal, policy, handoff:{...handoff,path:displayPath(handoff.path)} }), `Read ${displayPath(goalRef.path)} (${goalRef.digest}) as the authoritative goal snapshot.`, ...packets.filter(packet=>packet.path!==handoff.path && packet.path!==goalRef.path).map(packet => `Read ${displayPath(packet.path)} (${packet.digest}).`)].join(' ');
   if (policy.provider === 'claude' && [...prompt].length > 4000) throw Object.assign(new RangeError('Claude goal exceeds its 4000-character limit'), {code:'CONTINUITY_INVALID'});
   return { argv: [...policy.argv, ...options], env, goalPrompt: prompt };
 }

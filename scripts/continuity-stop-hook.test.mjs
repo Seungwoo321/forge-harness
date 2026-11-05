@@ -32,4 +32,14 @@ test('managed Stop continues unfinished work and permits verified transfer witho
   assert.deepEqual(run({}),{});
   record.kind='review'; record.state='Closed'; delete record.sessionFinalization; await save();
   assert.match(run({}).reason,/session-return/);
+  goal.goal.status='active';record.kind='impl';await save();
+  assert.equal(run({}).decision,'block','closed unit before continuation commit still guards the active goal');
+  await mkdir(path.join(root,'units','next'),{recursive:true});
+  await writeFile(path.join(root,'units','next','unit.json'),JSON.stringify({state:'Implementing',kind:'impl'}));
+  goal.transfers=[{unit:'u',successor:'next',sameSession:true}];await save();
+  assert.equal(run({}).decision,'block','original environment must follow same-session custody');
+  await writeFile(path.join(root,'units','next','unit.json'),JSON.stringify({state:'Stopped',kind:'impl'}));
+  assert.match(run({}).reason,/session-stop/);
+  goal.transfers=[];goal.goal.status='complete';await save();
+  assert.deepEqual(run({}),{});
 });

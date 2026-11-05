@@ -59,5 +59,5 @@ test('Claude native goal requires matching active status, command and descendant
  await save([status,command,activity,cleared]);await assert.rejects(transport.observeGoal(request),/cleared/);
  await save([status,command,{...activity,parentUuid:'other'}]);assert.equal((await transport.observeGoal(request)).state,'accepted');
  await save([status,command,activity,{...status,attachment:{type:'goal_status',met:true,condition:prompt}}]);
- await assert.rejects(transport.observeGoal(request),/differs/);
+ assert.equal((await transport.observeGoal(request)).goal.status,'complete');
 });

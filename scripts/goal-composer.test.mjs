@@ -44,3 +44,26 @@ test('Codex accepts the goal command menu when a narrow terminal hides the Ready
   await submitNativeGoal({provider:'codex',objective:'finish',read,write:async text=>{draft+=text;},enter:async()=>{entered+=1;},verify:async()=>{}});
   assert.equal(entered,1);
 });
+
+test('long objectives avoid a folded paste burst before separate submission',async()=>{
+ let draft='',last=0,entered=false;
+ const objective='Read the immutable packets. '.repeat(15);
+ await submitNativeGoal({provider:'codex',objective,read:async()=>({draft}),
+  write:async text=>{if(text.length>128 || text.startsWith('Read') && Date.now()-last<100)throw Error('folded paste');draft+=text;last=Date.now();},
+  verify:async()=>{},enter:async()=>{entered=true;}});
+ assert.equal(draft,`/goal ${objective}`);assert.equal(entered,true);
+});
+
+test('structured drafts preserve exact whitespace before submission', async () => {
+  let draft='', entered=0;
+  await assert.rejects(submitNativeGoal({provider:'codex',objective:'a  b',read:async()=>({draft}),
+    write:async text=>{draft+=text;draft=draft.replace('a  b','a\nb');},verify:async()=>{},enter:async()=>{entered+=1;}}),/did not settle/);
+  assert.equal(entered,0);
+});
+
+test('Orca rendered empty composer may omit its trailing space',async()=>{
+ let draft='',entered=false;
+ await submitNativeGoal({provider:'codex',objective:'finish',read:async()=>`›${draft?' '+draft:''}\n model · Ready · context`,
+  write:async text=>{draft+=text;},verify:async()=>{},enter:async()=>{entered=true;}});
+ assert.equal(entered,true);
+});

@@ -43,3 +43,11 @@ test('native goal references immutable packets without embedding their contents'
   assert.ok(spaced.goalPrompt.includes('keep  both spaces'));
   assert.throws(()=>buildManagedLaunch({goal:{...goal,objective:'x'.repeat(4001)},policy,handoff,goalRef:ref,effectKey:`sha256:${'c'.repeat(64)}`}),{code:'CONTINUITY_INVALID'});
 });
+
+test('launch paths resolve from the verified worker directory without repeated absolute prefixes',()=>{
+ const policy={runtime:'cmux',provider:'codex',account:'/account',model:'m',effort:'low',argv:['codex']};
+ const result=buildManagedLaunch({goal,policy,handoff,cwd:'/work',goalRef:{path:'/work/goal.json',digest:`sha256:${'b'.repeat(64)}`}});
+ assert.ok(result.goalPrompt.includes(`Read handoff.md (${handoff.digest})`));
+ assert.ok(result.goalPrompt.includes('Read goal.json (sha256:'));
+ assert.ok(!result.goalPrompt.includes('/work/'));
+});

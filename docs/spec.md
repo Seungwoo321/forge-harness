@@ -402,7 +402,7 @@ LLM 이 제어면의 결정을 우회하지 못하도록 두 가지를 둔다: �
 
 관리 세션은 선택된 호스트의 네이티브 목표를 먼저 설정한다. Codex와 Claude Code의 `/goal` 또는 동등한 공개 목표 API를 사용하며 일반 argv 프롬프트는 목표를 대신하지 않는다. 목표에는 전체 목적·완료 조건·정책·인계 참조·종료 스킬·차단 시 행동이 포함된다. cmux는 식별된 빈 입력란에 명령과 내용을 넣고 준비 상태를 재확인한 뒤 별도 제출한다. Orca는 native 기동·입력 API의 동일 요청 식별자와 재시도 계약을 따른다. paste·Enter 전송·큐 수락은 목표 설정이나 작업 착수의 증거가 아니다.
 
-제어면은 native 목표 상태에서 정확한 목표와 활성 상태를 확인하고, 정확한 요청과 그 뒤 실제 응답 또는 도구 실행을 각각 관찰한다. worker transport는 목표·prompt·packet digest와 thread·request·turn·실행 항목을 effect key·session·incarnation·cwd에 결속한다. 불변 인계는 실제로 읽었거나 native 목표 입력에 정확한 본문이 포함됐음을 확인한다. 최초 입력이 이미 제출됐거나 결과가 불확실하면 동일 intent를 재관찰하며 재입력·재기동하지 않는다. 동일 worker의 여러 native lock은 root-session metadata로 유일한 주 thread에 결속한다. busy 큐·composer·startup modal은 착수 증거가 아니다. 작업 착수 이후 interrupted 상태도 구분해 보존한다.
+제어면은 native 목표 상태에서 정확한 목표와 active 또는 실제 착수 이후 complete 상태를 확인하고, 정확한 요청과 그 뒤 실제 응답 또는 도구 실행을 각각 관찰한다. worker transport는 목표·prompt·packet digest와 thread·request·turn·실행 항목을 effect key·session·incarnation·cwd에 결속한다. 불변 인계는 실제로 읽었거나 native 목표 입력에 정확한 본문이 포함됐음을 확인한다. 최초 입력이 이미 제출됐거나 결과가 불확실하면 동일 intent를 재관찰하며 재입력·재기동하지 않는다. 동일 worker의 여러 native lock은 root-session metadata로 유일한 주 thread에 결속한다. busy 큐·composer·startup modal은 착수 증거가 아니다. 작업 착수 이후 interrupted 상태도 구분해 보존한다.
 
 실행기 또는 호스트가 목표 상태·훅 신뢰를 관찰할 수 없으면 미검증으로 남는다. 신뢰 우회 플래그를 자동으로 쓰지 않는다. 사용자 중단과 host의 목표 일시중지·반복 제한을 존중하며, 미완료 목표가 중단될 때는 남은 작업과 재개 조건을 보고한다.
 
@@ -975,7 +975,7 @@ CLI 는 사람용 출력의 마지막 줄에 기계용 한 줄 `RESULT {json}` �
 | 목표 연속성과 검증 경계 | 수용 기준 | 유형 |
 |---|---|---|
 | H-GO-01 | 전체 목표와 단위 완료는 구분되며, 남은 작업이나 미검증 목표 기준이 있으면 전체 완료를 기록하지 않는다 | T/L |
-| H-GO-02 | cmux·Orca의 Codex·Claude 관리 세션은 native 목표를 설정하고 정확한 활성 상태·입력·착수를 확인한다. 일반 프롬프트, 붙여넣기, 큐 수락만으로 성공하지 않는다 | T/L |
+| H-GO-02 | cmux·Orca의 Codex·Claude 관리 세션은 native 목표를 설정하고 정확한 목표의 active 또는 착수 이후 complete 상태·입력·착수를 확인한다. complete 상태만으로 착수를 인정하지 않는다. 일반 프롬프트, 붙여넣기, 큐 수락만으로 성공하지 않는다 | T/L |
 | H-GO-03 | 모델·effort·계정은 현재 정책과 작업 성격으로 세션 시작 시 선택하고 코드에 가용 모델 목록을 고정하지 않는다 | T/L |
 | H-GO-04 | 목표·단위·인계·요청·effect·세션 신원은 결속되고 불확실한 결과는 같은 intent를 재관찰하며 중복 기동하지 않는다 | T/L |
 | H-GO-05 | 자동 압축·계획 조정·검증 전환은 세션을 나누지 않고, 실제 책임 경계에서만 검증된 인계를 수행한다 | T/L |

@@ -43,7 +43,7 @@ export function createClaudeTaskTransport({ command, env, submitInput }) {
       const statuses = relevant.filter(row => row.type === 'attachment' && row.attachment?.type === 'goal_status');
       const status = statuses.at(-1)?.attachment;
       if (!status) return {state:'absent'};
-      if (status.condition !== request.prompt || status.met !== false) throw taskError('native goal differs from the intended active goal');
+      if (status.condition !== request.prompt || typeof status.met !== 'boolean') throw taskError('native goal differs from the intended active goal');
       const command = `<command-name>/goal</command-name>\n            <command-message>goal</command-message>\n            <command-args>${request.prompt}</command-args>`;
       const matches = relevant.filter(row => row.type === 'user' && row.isMeta !== true && textOf(row.message) === command && typeof row.uuid === 'string');
       if (matches.length !== 1) throw taskError('native goal command is missing or ambiguous');
@@ -68,9 +68,9 @@ export function createClaudeTaskTransport({ command, env, submitInput }) {
         }
       }
       if (activity && request.packets.every(packet => verified.has(packet.path))) {
-        return {state:'started',threadId,goal:{threadId,status:'active',objective:status.condition},requestId:matches[0].uuid,turnId:matches[0].uuid,activityId:activity.uuid,packets:request.packets.map(({path,digest})=>({path,digest}))};
+        return {state:'started',threadId,goal:{threadId,status:status.met?'complete':'active',objective:status.condition},requestId:matches[0].uuid,turnId:matches[0].uuid,activityId:activity.uuid,packets:request.packets.map(({path,digest})=>({path,digest}))};
       }
-      return {state:'accepted',threadId,goal:{threadId,status:'active',objective:status.condition}};
+      return {state:'accepted',threadId,goal:{threadId,status:status.met?'complete':'active',objective:status.condition}};
     },
     async observe(request) {
       const threadId = await binding(request.observed);

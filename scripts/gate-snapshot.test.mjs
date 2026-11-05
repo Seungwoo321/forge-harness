@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {chmod,mkdir,mkdtemp,readFile,rm,stat,symlink,writeFile} from 'node:fs/promises';
+import {chmod,link,mkdir,mkdtemp,readFile,realpath,rm,stat,symlink,writeFile} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {createGateSnapshot} from './lib/gate-snapshot.mjs';
@@ -55,7 +55,10 @@ test('pnpm can run a declared project script from the isolated input tree',async
  for(const file of files)await writeFile(path.join(sourceRoot,file.path),file.content);
  const lock=await command('pnpm',['install','--lockfile-only','--ignore-scripts','--offline'],{cwd:sourceRoot});assert.equal(lock.exitCode,0,lock.stderr);
  files.push({path:'pnpm-lock.yaml',content:await readFile(path.join(sourceRoot,'pnpm-lock.yaml'),'utf8')});
- const result=await executeCapturedGate({gate:{id:'check',command:['pnpm','run','check'],files,outputDirectories:['node_modules']},directory:snapshots,sourceRoot,command});
+ const launcher=await realpath((await command('which',['pnpm'],{cwd:sourceRoot})).stdout.trim());
+ const manager=(await command('pnpm',['exec','node','-p','process.env.npm_execpath'],{cwd:sourceRoot})).stdout.trim().split('\n').at(-1);
+ const runtimePaths=[path.dirname(path.dirname(launcher)),path.dirname(path.dirname(path.dirname(path.dirname(manager))))];
+ const result=await executeCapturedGate({gate:{id:'check',command:['pnpm','run','check'],files,config:{runtimePaths},outputDirectories:['node_modules']},directory:snapshots,sourceRoot,command});
  assert.equal(result.exitCode,0,result.stderr);assert.match(result.stdout,/PNPM_SNAPSHOT_OK/);
 });
 
@@ -84,16 +87,17 @@ test('snapshot command cannot read the mutable live source tree',async t=>{
 
 test('a live input changed and restored during execution cannot alter captured input',async t=>{
  const directory=await mkdtemp(path.join(os.tmpdir(),'gate-race-'));t.after(()=>rm(directory,{recursive:true,force:true}));
- const sourceRoot=path.join(directory,'source'),snapshots=path.join(directory,'snapshots'),coord=path.join(directory,'coord');
- await mkdir(sourceRoot);await mkdir(snapshots);await mkdir(coord);
- const script=`import {access,readFile,writeFile} from 'node:fs/promises';const dir=${JSON.stringify(coord)};async function wait(name){for(let i=0;i<500;i++){try{await access(dir+'/'+name);return}catch{}await new Promise(r=>setTimeout(r,10))}throw Error('timeout')}await writeFile(dir+'/ready','');await wait('read');const value=await readFile('input','utf8');await writeFile(dir+'/read-done','');await wait('finish');process.stdout.write(value);`;
+ const sourceRoot=path.join(directory,'source'),snapshots=path.join(directory,'snapshots');let coord;
+ await mkdir(sourceRoot);await mkdir(snapshots);
+ const script=`import {access,readFile,writeFile} from 'node:fs/promises';const dir=process.env.TMPDIR;async function wait(name){for(let i=0;i<500;i++){try{await access(dir+'/'+name);return}catch{}await new Promise(r=>setTimeout(r,10))}throw Error('timeout')}await writeFile(dir+'/ready','');await wait('read');const value=await readFile('input','utf8');await writeFile(dir+'/read-done','');await wait('finish');process.stdout.write(value);`;
  const files=[{path:'check.mjs',content:script},{path:'input',content:'original'}];
  for(const file of files)await writeFile(path.join(sourceRoot,file.path),file.content);
- const wait=async name=>{for(let i=0;i<500;i++){try{await readFile(path.join(coord,name));return}catch(error){if(error.code!=='ENOENT')throw error;}await new Promise(resolve=>setTimeout(resolve,10));}throw Error(`timed out waiting for ${name}`);};
- const running=executeCapturedGate({gate:{id:'check',command:[process.execPath,'check.mjs'],files},directory:snapshots,sourceRoot,command:createAdapters().command});
+ const wait=async name=>{for(let i=0;i<500;i++){if(coord){try{await readFile(path.join(coord,name));return}catch(error){if(error.code!=='ENOENT')throw error;}}await new Promise(resolve=>setTimeout(resolve,10));}throw Error(`timed out waiting for ${name}`);};
+ const command=createAdapters().command;
+ const running=executeCapturedGate({gate:{id:'check',command:[process.execPath,'check.mjs'],files},directory:snapshots,sourceRoot,command:(binary,args,options)=>{coord=options.env.TMPDIR;return command(binary,args,options);}});
  await wait('ready');await writeFile(path.join(sourceRoot,'input'),'modified');await writeFile(path.join(coord,'read'),'');
  await wait('read-done');await writeFile(path.join(sourceRoot,'input'),'original');await writeFile(path.join(coord,'finish'),'');
- const result=await running;assert.equal(result.exitCode,0);assert.equal(result.stdout,'original');
+ await assert.rejects(running,{code:'GATE_SNAPSHOT_INVALID'});
 });
 
 test('captured reports use the actual exit and the fingerprinted output contract',()=>{
@@ -106,4 +110,35 @@ test('captured reports use the actual exit and the fingerprinted output contract
  assert.throws(()=>capturedGateReport({gate,execution:{...execution,inputFingerprint:'sha256:wrong'},reportPath:'report.json'}),{code:'GATE_SNAPSHOT_INVALID'});
  const malformed=capturedGateReport({gate,execution:{...execution,exitCode:0,stdout:'invalid'},reportPath:'report.json'});
  assert.equal(malformed.exit,1);assert.equal(malformed.failureClass,'harness');assert.deepEqual(malformed.covers,[]);
+});
+
+test('a live input with an external hardlink cannot produce isolated evidence',async t=>{
+ const directory=await mkdtemp(path.join(os.tmpdir(),'gate-hardlink-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+ const sourceRoot=path.join(directory,'source'),snapshots=path.join(directory,'snapshots');await mkdir(sourceRoot);await mkdir(snapshots);
+ await writeFile(path.join(sourceRoot,'input'),'captured');await link(path.join(sourceRoot,'input'),path.join(directory,'alias'));
+ let executed=false;
+ await assert.rejects(executeCapturedGate({gate:{id:'check',command:[process.execPath,'-e','process.exit(0)'],files:[{path:'input',content:'captured'}]},directory:snapshots,sourceRoot,command:async()=>{executed=true;return {exitCode:0,stdout:''};}}),{code:'GATE_SNAPSHOT_INVALID'});
+ assert.equal(executed,false);
+});
+
+test('external live aliases remain unreadable while source bytes change and are restored',async t=>{
+ const directory=await mkdtemp(path.join(os.tmpdir(),'gate-alias-race-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+ const sourceRoot=path.join(directory,'source'),snapshots=path.join(directory,'snapshots');await mkdir(sourceRoot);await mkdir(snapshots);
+ const source=path.join(sourceRoot,'input'),alias=path.join(directory,'alias');await writeFile(source,'original');await link(source,alias);
+ const script=`import {readFile} from 'node:fs/promises';try{await readFile(${JSON.stringify(alias)});process.exitCode=9}catch(error){process.stdout.write(error.code)}`;
+ await writeFile(path.join(sourceRoot,'check.mjs'),script);
+ const command=createAdapters().command;
+ const result=await executeCapturedGate({gate:{command:[process.execPath,'check.mjs'],files:[{path:'check.mjs',content:script}]},directory:snapshots,sourceRoot,command:async(...args)=>{await writeFile(source,'changed');try{return await command(...args)}finally{await writeFile(source,'original')}}});
+ assert.equal(result.exitCode,0,result.stderr);assert.match(result.stdout,/^(EACCES|EPERM|ENOENT)$/);assert.equal(await readFile(source,'utf8'),'original');
+});
+
+test('a hardlink introduced in an allowed runtime path after preflight invalidates the receipt',async t=>{
+ const directory=await mkdtemp(path.join(os.tmpdir(),'gate-late-alias-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+ const sourceRoot=path.join(directory,'source'),snapshots=path.join(directory,'snapshots'),runtime=path.join(directory,'runtime');
+ for(const dir of [sourceRoot,snapshots,runtime])await mkdir(dir);
+ const input=path.join(sourceRoot,'input'),alias=path.join(runtime,'alias');await writeFile(input,'original');
+ const script=`import {readFile} from 'node:fs/promises';process.stdout.write(await readFile(${JSON.stringify(alias)},'utf8'))`;
+ await writeFile(path.join(sourceRoot,'check.mjs'),script);const command=createAdapters().command;
+ await assert.rejects(executeCapturedGate({gate:{command:[process.execPath,'check.mjs'],config:{runtimePaths:[runtime]},files:[{path:'input',content:'original'},{path:'check.mjs',content:script}]},directory:snapshots,sourceRoot,
+  command:async(...args)=>{await link(input,alias);await writeFile(input,'changed');try{return await command(...args)}finally{await writeFile(input,'original');await rm(alias)}}}),{code:'GATE_SNAPSHOT_INVALID'});
 });

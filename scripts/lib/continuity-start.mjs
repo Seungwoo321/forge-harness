@@ -43,7 +43,7 @@ export async function startGoalSession({ stateRoot, unit, request, store, adapte
   }
   const validate = (result, input) => {
     if (result?.sessionId === owner.sessionId) throw failure('successor must be distinct');
-    return validateTaskReceipt(result,input);
+    return validateTaskReceipt(result,input,{requireEnforcement:true});
   };
   const result = await executeEffect({unit,effect:'session.start',args,policy,context:{explicitUserInstruction:true,productOwned:true},store:createLedgerStore(stateRoot),adapter:{
     now:adapters.now,

@@ -11,5 +11,5 @@ export async function loadManagedLaunch(args, runtime) {
   if (!snapshot || (runtime && selectExecutionPolicy(snapshot.policy,args.role).runtime !== runtime)) throw Object.assign(new Error('goal runtime differs from configured runner'), {code:'CONTINUITY_INVALID'});
   return buildManagedLaunch({goal:snapshot.goal,policy:snapshot.policy,
     handoff:{path:args.handoffPath,digest:args.handoffDigest},goalRef:{path:args.goalPath,digest:args.goalDigest},
-    effectKey:prepareEffect('session.start',args).key,packets,role:args.role,unit:args.unit});
+    effectKey:prepareEffect('session.start',args).key,packets,role:args.role,unit:args.unit,cwd:args.cwd});
 }

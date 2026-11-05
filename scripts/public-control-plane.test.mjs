@@ -14,11 +14,7 @@ import { executeDelivery } from './lib/delivery-flow.mjs';
 const cli = fileURLToPath(new URL('./unit.mjs', import.meta.url));
 const ordinaryArgs = { database: 'local-db', migrationDigest: 'migration-1' };
 const deleteArgs = { resource: 'drafts', selectionDigest: 'selection-1' };
-const gateScript = `import { readFileSync, writeFileSync } from 'node:fs';
-const state = JSON.parse(readFileSync(process.env.TEST_NATIVE));
-state.runs += 1;
-if (state.mode === 'input-drift') state.source = 'changed';
-writeFileSync(process.env.TEST_NATIVE, JSON.stringify(state));
+const gateScript = `const state = {mode:process.env.TEST_GATE_MODE};
 const failureClass = ['product','environment','harness','user-domain','unknown'].includes(state.mode) ? state.mode : null;
 if (state.mode === 'missing-report') process.stdout.write('invalid');
 else process.stdout.write(JSON.stringify({ok: !failureClass, covers: [state.mode === 'divergent' ? 'AC-2' : 'AC-1'], failureClass}));
@@ -72,8 +68,13 @@ else if (operation === 'context') {
   if (state.mode === 'uncertain') process.exit(8);
   output({ applied: true, verify: 'external-observation' });
 } else if (operation === 'verify') output({ status: state.applied ? 'completed' : 'unknown', result: { applied: true }, verify: 'independent-inspection' });
-else if (operation === 'describe') output({ ...${JSON.stringify(gate)}, id: input.id,
+else if (operation === 'describe') {
+ state.descriptions=(state.descriptions??0)+1;
+ if(state.mode==='input-drift' && state.descriptions>1)state.source='changed';
+ writeFileSync(process.env.TEST_NATIVE,JSON.stringify(state));
+ output({ ...${JSON.stringify(gate)}, id: input.id,
   files: [{ path: 'src/main.mjs', content: state.mode === 'changed-input' ? 'changed' : state.source ?? 'source' }, { path: 'gate.mjs', content: ${JSON.stringify(gateScript)} }] });
+}
 else if (operation === 'gate') {
   state.runs += 1; writeFileSync(process.env.TEST_NATIVE, JSON.stringify(state));
   if (state.mode === 'input-drift') { state.source = 'changed'; writeFileSync(process.env.TEST_NATIVE, JSON.stringify(state)); }
@@ -98,9 +99,10 @@ export async function createRuntimeAdapters({ adapters, cwd }) {
     gates: { describe: id => call('describe', { id }), run: x => call('gate', x) } };
 }
 `);
+  let gateMode='pass';
   const run = args => {
     const child = spawnSync(process.execPath, [cli, ...args, '--adapters', providers, '--state-root', stateRoot, '--project-root', cwd], {
-      cwd, encoding: 'utf8', env: { ...process.env, TEST_NATIVE: native, TEST_TRACE: trace, TEST_LEDGER: ledgerPath },
+      cwd, encoding: 'utf8', env: { ...process.env, TEST_NATIVE: native, TEST_TRACE: trace, TEST_LEDGER: ledgerPath, TEST_GATE_MODE:gateMode },
     });
     const line = child.stdout.trim().split('\n').at(-1);
     assert.match(line ?? '', /^RESULT /, child.stderr);
@@ -109,8 +111,9 @@ export async function createRuntimeAdapters({ adapters, cwd }) {
     return result;
   };
   const setNative = async patch => {
+    if(patch.mode!==undefined)gateMode=patch.mode;
     if (patch.source !== undefined) await writeFile(path.join(cwd, 'src/main.mjs'), patch.source);
-    await writeFile(native, JSON.stringify({ ...JSON.parse(await readFile(native, 'utf8')), ...patch }));
+    await writeFile(native, JSON.stringify({ ...JSON.parse(await readFile(native, 'utf8')), ...patch, descriptions:0 }));
   };
   const effect = async (effect = 'db.local.change', args = ordinaryArgs, approval) => {
     await writeFile(path.join(cwd, 'args.json'), JSON.stringify(args));
@@ -197,11 +200,11 @@ test('PUBLIC-EVIDENCE-RERUN-CLI: public rerun independently executes matching in
     assert.equal(result.record.comparison.comparable, true);
     assert.equal(result.record.nondeterministic, undefined);
   }
-  assert.equal(JSON.parse(await readFile(f.native, 'utf8')).runs, 2);
+  assert.equal((await f.store.read('unit-a')).evidence.length, 3);
   assert.equal((await f.store.read('unit-a')).evidence.at(-1).status, 'passed');
   await f.setNative({ mode: 'changed-input' });
   assert.equal(f.rerun().error, 'EVIDENCE_STALE');
-  assert.equal(JSON.parse(await readFile(f.native, 'utf8')).runs, 2);
+  assert.equal((await f.store.read('unit-a')).evidence.length, 3);
   const empty = await fixture(t);
   assert.equal(empty.rerun().error, 'EVIDENCE_STALE');
 });

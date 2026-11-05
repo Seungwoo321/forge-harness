@@ -72,7 +72,7 @@ test('multi-lock identity must belong to the observed process and remains fenced
   const child = '00000000-0000-0000-0000-000000000002';
   let chosen = root;
   const transport = createCodexTaskTransport({ command: async (binary, _args, options) => {
-    if (binary === 'lsof') return { exitCode: 0, stdout: `n/x/thread-writer-locks/${child}.lock\nn/x/thread-writer-locks/${root}.lock\n` };
+    if (binary === 'lsof') return { exitCode: 0, stdout: `n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${child}.lock\nn${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${root}.lock\n` };
     assert.equal(JSON.parse(options.input).operation, 'identify');
     return { exitCode: 0, stdout: JSON.stringify({ threadId: chosen }) };
   } });
@@ -85,7 +85,7 @@ test('native goal observation is bound to the same worker thread and directory',
   const threadId = '00000000-0000-0000-0000-000000000001';
   let cwd = observed.cwd;
   const transport = createCodexTaskTransport({ command: async (binary, _args, options) => {
-    if (binary === 'lsof') return { exitCode: 0, stdout: `n/x/thread-writer-locks/${threadId}.lock\n` };
+    if (binary === 'lsof') return { exitCode: 0, stdout: `n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${threadId}.lock\n` };
     const request = JSON.parse(options.input);
     assert.equal(request.operation, 'goal');
     return { exitCode: 0, stdout: JSON.stringify({ thread: { id: threadId, cwd }, goal: { threadId, status: 'active', objective: 'complete work' } }) };
@@ -99,7 +99,7 @@ test('goal activity must follow native goal creation and needs no ordinary user 
   const threadId = '00000000-0000-0000-0000-000000000001';
   let startedAt = 10, itemStartedAt = 10999;
   const transport = createCodexTaskTransport({ command: async (binary, _args, options) => {
-    if (binary === 'lsof') return { exitCode: 0, stdout: `n/x/thread-writer-locks/${threadId}.lock\n` };
+    if (binary === 'lsof') return { exitCode: 0, stdout: `n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${threadId}.lock\n` };
     assert.equal(JSON.parse(options.input).operation, 'goal-observe');
     return { exitCode: 0, stdout: JSON.stringify({ thread: { id: threadId, cwd: observed.cwd },
       goal: { threadId, status: 'active', objective: 'finish', createdAt: 10 },
@@ -127,7 +127,7 @@ test('upgrading a legacy full-packet delivery observes its receipt or queue with
     let stdout;
     if (binary === 'cmux' && args.includes('tree')) stdout = JSON.stringify({ windows: [{ workspaces: [{ id: 'workspace', panes: [{ surfaces: [{ id: 'receiver', type: 'terminal', tty: 'tty2' }] }] }] }] });
     else if (binary === 'ps') stdout = args.includes('pid=,pgid=,tpgid=,comm=') ? '22 22 22 codex\n' : 'START';
-    else if (binary === 'lsof') stdout = args.includes('-d') ? `p22\nn${root}\n` : `n/x/thread-writer-locks/${threadId}.lock\n`;
+    else if (binary === 'lsof') stdout = args.includes('-d') ? `p22\nn${root}\n` : `n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${threadId}.lock\n`;
     else if (binary === process.execPath) stdout = JSON.stringify({ thread: { id: threadId, cwd: root },
       queued: state === 'queued' ? [{ clientUserMessageId: 'key' }] : [], turns: state === 'queued' ? [] : [{ id: 'turn', status: 'completed', items: [
         { type: 'userMessage', id: 'request', content: [{ type: 'text', text: prompt }] },
@@ -200,7 +200,7 @@ test('native Codex evidence binds writer lock, exact prompt and actual packet re
   let turnStatus = 'interrupted';
   let mode = 'started';
   const command = async (binary, _args, options) => {
-    if (binary === 'lsof') return { exitCode: 0, stdout: `n/config/thread-writer-locks/${threadId}.lock\n` };
+    if (binary === 'lsof') return { exitCode: 0, stdout: `n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${threadId}.lock\n` };
     const request = JSON.parse(options.input);
     assert.equal(request.threadId, threadId);
     return { exitCode: 0, stdout: JSON.stringify({ thread: { id: threadId, cwd: observed.cwd },
@@ -227,4 +227,37 @@ test('native Codex evidence binds writer lock, exact prompt and actual packet re
     mode = value;
     await assert.rejects(observeTask(request), { code: 'SESSION_TASK_UNVERIFIED' });
   }
+});
+
+test('native worker lock must belong to the selected account', async () => {
+  const transport=createCodexTaskTransport({env:{CODEX_HOME:'/selected-account'},command:async()=>({exitCode:0,
+    stdout:'n/another-account/thread-writer-locks/00000000-0000-0000-0000-000000000001.lock\n'})});
+  await assert.rejects(transport.identity(observed),/ownership is missing/);
+});
+
+test('completed native goals retain post-goal reads verified by a later checksum command',async()=>{
+ const threadId='00000000-0000-0000-0000-000000000001';
+ let checksumStatus='completed';
+ const transport=createCodexTaskTransport({command:async(binary)=>binary==='lsof'
+  ? {exitCode:0,stdout:`n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${threadId}.lock\n`}
+  : {exitCode:0,stdout:JSON.stringify({thread:{id:threadId,cwd:observed.cwd},queued:[],
+    goal:{threadId,status:'complete',objective:'finish',createdAt:10},turns:[{id:'turn',status:'completed',startedAt:11,items:[
+     {type:'commandExecution',id:'read',cwd:'/work',status:'completed',exitCode:0,commandActions:[{type:'read',path:packets[0].path}],aggregatedOutput:packets[0].content+'\nother output'},
+     {type:'commandExecution',id:'hash',cwd:'/work',status:checksumStatus,exitCode:0,aggregatedOutput:`${packets[0].digest.slice(7)}  ${packets[0].path}\n`},
+    ]}]})}});
+ const request={observed,input,prompt:'finish',packets};
+ assert.equal((await transport.observeGoal(request)).state,'started');
+ checksumStatus='failed';
+ assert.equal((await transport.observeGoal(request)).state,'accepted');
+});
+
+test('managed custody cannot accept a receipt without verified hook enforcement',()=>{
+ const goalInput={...input,args:{...input.args,goalDigest:taskDigest('snapshot')}};
+ const identity={sessionId:observed.sessionId,incarnationId:observed.incarnationId,cwd:observed.cwd};
+ const result={...identity,task:{...identity,schema:'harness.goal-receipt/1',effectKey:input.key,promptDigest:taskDigest('finish'),goalDigest:goalInput.args.goalDigest,
+  goal:{threadId:'thread',status:'active',objective:'finish'},threadId:'thread',turnId:'turn',activityId:'activity',packets:[]}};
+ const bareInput={...goalInput,args:{cwd:observed.cwd,goalDigest:goalInput.args.goalDigest}};
+ assert.throws(()=>validateTaskReceipt(result,bareInput,{requireEnforcement:true}),/hook enforcement is unverified/);
+ result.task.enforcement={status:'verified',cwd:observed.cwd,key:'guard',hash:'hash'};
+ assert.equal(validateTaskReceipt(result,bareInput,{requireEnforcement:true}),result);
 });

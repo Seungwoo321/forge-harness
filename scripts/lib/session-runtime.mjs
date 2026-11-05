@@ -325,12 +325,24 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       const target = inventory.filter(item => item.id === owner.sessionId);
       if (target.length !== 1 || target[0].workspaceId !== current.workspaceId || target[0].tty !== current.tty) throw invalid('close target moved before mutation');
       // Keep an exited placeholder when needed: workspace-wide close has no atomic inventory fence.
+      let placeholder = null;
       if (owned.length === 1 && owned[0].id === owner.sessionId) {
         await invoke('cmux', ['new-surface', '--workspace', current.workspaceId, '--type', 'terminal', '--command', '/usr/bin/true', '--focus', 'false'], owner.cwd);
         const after = await workerIdentity(await inspect(owner.sessionId, owner.cwd, owner.worker.executable));
         if (after.incarnationId !== owner.worker.incarnationId || after.threadId !== owner.worker.threadId || after.workspaceId !== current.workspaceId) throw invalid('owner changed while preparing surface closure');
+        const added = terminals(await cmux(['tree', '--all'], owner.cwd)).filter(item => item.workspaceId === current.workspaceId && item.id !== owner.sessionId);
+        if (added.length === 1) placeholder = added[0].id;
       }
       await invoke('cmux', ['close-surface', '--workspace', current.workspaceId, '--surface', owner.sessionId], owner.cwd);
+      // A workspace this harness created for the session is closed once only its own placeholder is left.
+      // Workspaces with any other terminal (a user shell, a dev server) are kept.
+      if (placeholder) {
+        const tree = await cmux(['tree', '--all'], owner.cwd);
+        const workspace = (tree.windows ?? []).flatMap(window => window.workspaces ?? []).find(item => item.id === current.workspaceId);
+        const left = terminals(tree).filter(item => item.workspaceId === current.workspaceId);
+        if (workspace && /^handoff-[a-f0-9]{64}$/.test(workspace.title ?? '') && left.length === 1 && left[0].id === placeholder)
+          await invoke('cmux', ['close-workspace', '--workspace', current.workspaceId], owner.cwd);
+      }
     }
     else await orca(['terminal', 'close', '--terminal', owner.sessionId], owner.cwd);
     return close(input, true);

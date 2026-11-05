@@ -434,7 +434,7 @@ stage 열거값은 `scope | implement | gates | root-cause | review | handoff`�
 | submissionId | string | 제출 고유 ID. 동일 ID의 재제출은 같은 payload digest일 때만 멱등이며 다른 payload는 거부 |
 | status | done / blocked / needs-decision / needs-diagnosis | 전이 요청. done은 비차단 열린 결정과 함께 가능. needs-decision은 단계 완료 불가, needs-diagnosis는 수정 전 진단 요청 |
 | summary | string | 3문장 이내 |
-| acceptance, scopePaths | object[], string[] | scope에서 필수. scopePaths는 제품 루트 상대 경로·glob. 절대 경로·상위 탈출·소유 밖 symlink 거부 |
+| acceptance, scopePaths | object[], string[] | scope에서 필수. scopePaths는 제품 루트 상대 경로·glob. glob 문자가 없는 경로는 그 파일 또는 디렉터리와 그 아래 전부를 뜻한다. 절대 경로·상위 탈출·소유 밖 symlink 거부. 수용 전 단위의 범위 누락은 사용자 승인으로 `unit scope amend`가 경로를 더하고 이전 범위를 기록한다(수용 기준은 바꾸지 않는다). 이탈 Finding은 그 뒤 `unit scope recheck`로 해소한다 |
 | changedPaths | string[] | Git으로 교차 확인 |
 | coverage | [{acceptanceRef, evidenceHint}] | 제안만 하며 증거 집계에 사용하지 않음 |
 | findings | Finding[] | 지적 목록 |

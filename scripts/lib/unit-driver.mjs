@@ -21,6 +21,7 @@ import { acceptedDeliveryMetadata, validateDeliveryContext } from './delivery-fl
 import { validateAcceptedContent } from './delivery.mjs';
 import { resolveFindings } from './finding-resolution.mjs';
 import { recheckScope } from './scope-recheck.mjs';
+import { amendScope } from './scope-amend.mjs';
 import { createContinuityStore } from './continuity-store.mjs';
 import { blockGoal, resumeGoal, appendGoalWork } from './continuity-transitions.mjs';
 import { commitGoalCompletion } from './continuity-completion.mjs';
@@ -1340,7 +1341,13 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
     }
     if (subcommand === 'scope') {
       const [action, unit] = rest;
-      if (action !== 'recheck' || rest.length !== 2 || !unit) usageError('unit scope recheck requires <unit>');
+      if (action === 'amend') {
+        if (rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit scope amend requires <unit> --request <file> --user-input <ref>');
+        const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'scope amend request', 'CLI_USAGE');
+        const amendment = await amendScope({ store: createUnitStateStore(effectiveRoot), unit, request, userInputRef: parsed.options['user-input'], adapters });
+        return formatCliResult({ code: 0, summary: `Scope amended for ${unit}`, details: { unit, amendment } });
+      }
+      if (action !== 'recheck' || rest.length !== 2 || !unit) usageError('unit scope recheck|amend requires <unit>');
       const recheck = await recheckScope({ store: createUnitStateStore(effectiveRoot), unit, adapters });
       return formatCliResult({ code: 0, summary: `Scope rechecked for ${unit}`, details: { unit, recheck } });
     }

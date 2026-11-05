@@ -105,6 +105,7 @@ codex plugin add forge-harness@forge-harness
 | `STAGE_CONTRACT_INVALID` / exit 2 | RESULT의 `issues`를 확인하고 해당 입력의 digest·attempt와 필수 필드 유지 |
 | exit 20 | 정책이 독립 리뷰를 요구한다. 해당 head·fingerprint의 review 단위를 새 세션에서 수행 |
 | `GATE_SNAPSHOT_INVALID` | 게이트 입력이 선언과 다르거나 실행 중 원본이 바뀌었거나 외부 하드링크가 있다. 원본을 고정한 뒤 수용을 다시 실행. `not-applicable` 은 script 가 없는 `typecheck`·`build` 에만 쓸 수 있다 |
+| `scope-guard` (must-fix) | 바뀐 경로가 `scopePaths` 밖이다. glob 없는 경로는 그 디렉터리 아래 전부를 포함한다. 범위 밖 변경을 되돌리거나, 범위 작성 누락이면 사용자 승인으로 `unit scope amend` 후 `unit scope recheck` |
 | `CONTINUITY_STALE` (단위 시작·결속) | 해석된 실행 정책이 목표에 고정된 정책과 다르다. 승인된 변경이면 `goal policy-refresh` 로 목표에 반영 |
 | 관리 세션 시작 `uncertain` | 새로 기동하지 않는다. 같은 요청과 어댑터로 다시 실행해 수신·착수를 재관찰 |
 | 오래된 버전·스킬 미노출 | 카탈로그 갱신 후 재설치·새 대화. `plugin list`로 확인 |

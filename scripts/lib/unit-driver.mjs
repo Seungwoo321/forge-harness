@@ -1345,7 +1345,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const goal = await store.create({goal:request.goal,source:request.source,policy:resolved.policy.session});
       return formatCliResult({ code: 0, summary: `Goal ${id} registered`, details: { goal } });
     }
-    if (noun !== 'unit' || !['start', 'scope', 'finding', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'goal-bind', 'session-stop', 'session-return', 'policy'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
+    if (noun !== 'unit' || !['start', 'scope', 'finding', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'goal-bind', 'session-stop', 'session-return', 'policy', 'reopen'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
     const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
     if (subcommand === 'policy') {
       const [action, unit] = rest;
@@ -1386,6 +1386,32 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const [unit] = rest;
       if (!unit) usageError('unit start requires <unit>');
       return formatCliResult(await runUnitStart({ stateRoot: effectiveRoot, unit, options: parsed.options, cwd }));
+    }
+    if (subcommand === 'reopen') {
+      // A check outside the harness (remote CI, a deployment gate) failed after acceptance. Return the unit to
+      // implementation so the fix goes through gates and independent review instead of being committed outside the unit.
+      const [unit] = rest;
+      if (!unit || rest.length !== 1 || !parsed.options.request) usageError('unit reopen requires <unit> --request <file>');
+      const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'unit reopen request', 'CLI_USAGE');
+      if (!request || Object.keys(request).sort().join(',') !== 'evidence,expectedRevision,reason'
+        || !Number.isSafeInteger(request.expectedRevision) || typeof request.reason !== 'string' || !request.reason.trim()
+        || typeof request.evidence !== 'string' || !request.evidence.trim()) usageError('unit reopen requires expectedRevision, reason and evidence');
+      const store = createUnitStateStore(effectiveRoot);
+      const entries = await createLedgerStore(effectiveRoot).withLock(unit, ledger => ledger.read());
+      const completed = new Set(entries.filter(row => row.event === 'result').map(row => row.seq));
+      if (entries.some(row => row.event === 'intent' && !completed.has(row.seq) && row.effect !== 'session.start'))
+        throw Object.assign(new Error('reconcile pending effects before reopening'), { code: 'EFFECT_UNCERTAIN' });
+      const record = await store.update(unit, current => {
+        if (!current) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
+        if (current.revision !== request.expectedRevision) throw Object.assign(new Error('unit changed since the reopen was requested'), { code: 'STALE_REVISION' });
+        if (!['Accepted', 'Delivering'].includes(current.state) || current.deliveryResult || current.sessionFinalization
+          || (current.stages ?? []).some(stage => (stage.attempts ?? []).some(attempt => !attempt.endedAt)))
+          throw Object.assign(new Error('only an accepted, undelivered unit can be reopened'), { code: 'INVALID_TRANSITION' });
+        const reopened = { ...current, accepted: null, reviewDecision: null, reviewedHead: null, verdict: null, deliveryPlan: null,
+          reopenings: [...(current.reopenings ?? []), { revision: current.revision + 1, from: current.state, reason: request.reason, evidence: request.evidence, at: adapters.now() }] };
+        return current.state === 'Accepted' ? transitionRecord(transitionRecord(reopened, 'SelfGated'), 'Implementing') : transitionRecord(reopened, 'Implementing');
+      });
+      return formatCliResult({ code: 0, summary: `Unit ${unit} reopened for implementation`, details: { unit, state: record.state, revision: record.revision } });
     }
     if (subcommand === 'goal-bind') {
       const [unit] = rest;

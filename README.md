@@ -15,7 +15,7 @@ Run development work through scope → implementation → deterministic gates �
 
 ## 준비
 
-Node.js **22 이상**, Git, 플러그인 명령을 지원하는 Claude Code 또는 Codex가 필요하다. 목표 저장소의 프로세스 잠금은 macOS의 `lockf`, Linux의 `flock`, Windows의 PowerShell을 사용한다. 런타임 Node 의존성은 없다. 개발 검증에만 pnpm을 쓴다. 호스트의 모델 사용에는 해당 호스트의 로그인·구독 또는 API 설정이 필요하다.
+Node.js **22 이상**, Git, 플러그인 명령을 지원하는 Claude Code 또는 Codex가 필요하다. 목표 저장소의 프로세스 잠금은 macOS의 `lockf`, Linux의 `flock`, Windows의 PowerShell을 사용한다. 게이트 명령은 격리 사본에서 실행되며 macOS는 시스템 `sandbox-exec`, Linux는 Bubblewrap(`bwrap`)이 필요하다. 격리 수단이 없으면 게이트를 통과로 기록하지 않는다. 런타임 Node 의존성은 없다. 개발 검증에만 pnpm을 쓴다. 호스트의 모델 사용에는 해당 호스트의 로그인·구독 또는 API 설정이 필요하다.
 
 이 패키지는 제어면과 스킬을 제공한다. 정책·scope·implement 입력 생성은 바로 실행한다. 전체 게이트·전달·세션 전환은 사용 환경의 [런타임 어댑터](docs/runtime-adapters.md)를 명시적으로 연결한다.
 
@@ -83,13 +83,15 @@ codex plugin add forge-harness@forge-harness
 | 구성 | 역할 |
 |---|---|
 | `policy-setup`, `unit`, `gates` | 사용자 설정·제어면 명령 실행 |
+| `goal-register`, `goal-add-work`, `goal-block`, `goal-resume` | 전체 목표 등록·작업 추가·차단·재개 |
+| `session-start`, `session-finish`, `session-stop`, `session-return` | 관리 세션 기동·인계·차단 보고·독립 리뷰 반환 |
 | `scope`, `implement`, `root-cause`, `review`, `handoff` | StageInput을 읽고 계약에 맞는 StageOutput 반환 |
 | `scripts/policy.mjs`, `scripts/unit.mjs` | 정책·상태 전이·증거·체크포인트·원장 소유 |
 | 런타임 모듈 `--adapters` | Git 관찰·게이트·작업관리·전달·세션 실행 연결 |
 
 기본 상태 위치는 Git 공통 디렉터리의 `work-state/`다. worktree끼리 공유한다. workspace/global 정책은 별도 루트로 지정한다. 설정 값과 출처는 [첫 실행 안내](docs/getting-started.md), 어댑터 API는 [런타임 연결](docs/runtime-adapters.md), 전체 계약은 [제품 명세](docs/spec.md)에 있다.
 
-전체 목표는 `goal-register`로 등록하고 관리 세션은 `session-start`로 시작한다. 단위 완료, 실제 차단, 독립 리뷰 반환에는 각각 `session-finish`, `session-stop`, `session-return`을 사용한다. 실행 정책은 cmux 또는 Orca, 계정 설정 디렉터리, 실행 명령, 모델과 effort를 명시한다. Stop 훅은 호스트에서 활성화되고 신뢰된 경우에 작동하며, 사용자 중단과 호스트의 반복 제한은 유지한다.
+전체 목표는 `goal-register`로 등록하고 관리 세션은 `session-start`로 시작한다. 단위 완료, 실제 차단, 독립 리뷰 반환에는 각각 `session-finish`, `session-stop`, `session-return`을 사용한다. 실행 정책은 cmux 또는 Orca, 계정 설정 디렉터리, 실행 명령, 모델과 effort를 명시한다. Stop 훅은 호스트에서 활성화되고 신뢰된 경우에 작동하며, 사용자 중단과 호스트의 반복 제한은 유지한다. 훅 상태를 관찰할 수 있는 작업자(Codex)는 수신 영수증에 검증된 훅이 있어야 시작이 인정되고, 관찰 수단이 없는 작업자(Claude)는 호스트의 훅에 기댄다. 목표의 실행 정책은 등록 시점에 고정된다. 사용자가 승인한 정책 변경은 `goal policy-refresh`로 진행 중인 목표에 반영하며, 목표를 다시 만들지 않는다.
 
 플러그인은 Node·Git 명령을 실행하고 프로젝트 파일, Git 체크포인트 ref, 로컬 작업 기록을 쓸 수 있다. 연결한 어댑터와 호스트 권한이 실제 외부 효과를 결정한다. 런타임 모듈은 신뢰하는 로컬 코드만 사용한다. 모델 호출은 호스트가 맡으며 패키지 자체에는 원격 MCP 서버나 분석 수집 코드가 없다. Claude Code의 시작 훅은 정책 유무 안내를 출력한다.
 
@@ -102,6 +104,9 @@ codex plugin add forge-harness@forge-harness
 | `ADAPTER_MISSING` / exit 4 | [런타임 모듈](docs/runtime-adapters.md)을 연결하고 같은 `--adapters`를 다음 명령에도 전달 |
 | `STAGE_CONTRACT_INVALID` / exit 2 | RESULT의 `issues`를 확인하고 해당 입력의 digest·attempt와 필수 필드 유지 |
 | exit 20 | 정책이 독립 리뷰를 요구한다. 해당 head·fingerprint의 review 단위를 새 세션에서 수행 |
+| `GATE_SNAPSHOT_INVALID` | 게이트 입력이 선언과 다르거나 실행 중 원본이 바뀌었거나 외부 하드링크가 있다. 원본을 고정한 뒤 수용을 다시 실행. `not-applicable` 은 script 가 없는 `typecheck`·`build` 에만 쓸 수 있다 |
+| `CONTINUITY_STALE` (단위 시작·결속) | 해석된 실행 정책이 목표에 고정된 정책과 다르다. 승인된 변경이면 `goal policy-refresh` 로 목표에 반영 |
+| 관리 세션 시작 `uncertain` | 새로 기동하지 않는다. 같은 요청과 어댑터로 다시 실행해 수신·착수를 재관찰 |
 | 오래된 버전·스킬 미노출 | 카탈로그 갱신 후 재설치·새 대화. `plugin list`로 확인 |
 | 설치·인증 실패 | `claude --version` / `codex --version`과 해당 `plugin --help` 확인. 로그인은 호스트 절차 사용 |
 

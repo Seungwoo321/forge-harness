@@ -110,6 +110,19 @@ test('deferred acceptance criteria block terminal close before tracker projectio
   assert.equal((await store.read(unit.unit)).state, 'Delivered');
 });
 
+test('deferred acceptance criteria handed to a recorded next unit do not block terminal close', async t => {
+  const { stateRoot, store, adapters } = await fixture(t);
+  const unit = record('unit-deferred-next', 'Delivered');
+  unit.acceptance = [{ id: 'AC-1', status: 'deferred' }];
+  unit.next = { unit: 'unit-next', sameSession: true };
+  await store.create(unit);
+  const output = JSON.parse((await runUnitCli(['unit', 'close', unit.unit], {
+    stateRoot,
+    adapters: { ...adapters, tracker: { async read() { return null; }, async project() {} } },
+  })).split('\n').at(-1).slice('RESULT '.length));
+  assert.notEqual(output.error, 'DEFERRED_ACCEPTANCE');
+});
+
 test('worktrees sharing a Git common directory use the same unit storage root', async t => {
   const { root, store } = await fixture(t);
   const commonDir = path.join(root, 'common.git');

@@ -29,7 +29,8 @@ export function validateTaskReceipt(result, input, {requireEnforcement = false} 
     || (goalReceipt ? !/^sha256:[a-f0-9]{64}$/.test(input.args.goalDigest ?? '') || receipt.goalDigest !== input.args.goalDigest || receipt.goal?.threadId !== receipt.threadId || !['active','complete'].includes(receipt.goal?.status) || taskDigest(receipt.goal.objective ?? '') !== receipt.promptDigest : receipt.requestId === receipt.activityId)
     || !Array.isArray(receipt.packets)
     // A delivery to the goal owner is received through its result packet; starts bind every packet.
-    || !(input.effect === 'session.deliver' && input.args.resultPath ? ['result'] : ['handoff', 'result', 'goal']).every(name => input.args[`${name}Path`] === undefined || receipt.packets.some(ref =>
+    // Verification may pass the intent without its effect name; a delivery is identified by its recipient and result.
+    || !((input.effect === 'session.deliver' || input.args.recipient) && input.args.resultPath ? ['result'] : ['handoff', 'result', 'goal']).every(name => input.args[`${name}Path`] === undefined || receipt.packets.some(ref =>
       ref.path === input.args[`${name}Path`] && ref.digest === input.args[`${name}Digest`]))) {
     throw taskError('native request/start receipt does not match the intended task');
   }

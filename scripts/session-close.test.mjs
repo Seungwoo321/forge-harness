@@ -21,7 +21,7 @@ function fixture(mode) {
       ...(solo?[]:[{ id: 'receiver', type: 'terminal', tty: 'tty2' }]),
       ...(unrelated?[{id:'user-shell',type:'terminal',tty:'tty4'}]:[]),
     ] }] }, ...(solo?[{id:'receiver-workspace',panes:[{surfaces:[{id:'receiver',type:'terminal',tty:'tty2'}]}]}]:[])] }] });
-    else if (binary === 'cmux' && args.includes('new-surface')) { placeholder = true; }
+    else if (binary === 'cmux' && args.includes('new-surface')) { placeholder = true; stdout = JSON.stringify({ surface_id: 'placeholder', workspace_id: 'workspace' }); }
     else if (binary === 'cmux' && args.includes('close-workspace')) { workspaceClosed += 1; }
     else if (binary === 'cmux' && args.includes('close-surface')) {
       if(mode==='solo-race') unrelated = true;

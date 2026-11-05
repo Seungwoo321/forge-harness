@@ -30,6 +30,11 @@ test('Claude receipt requires exact process session, prompt, packet contents and
  const result={type:'user',sessionId:id,uuid:'result-1',parentUuid:'assistant-1',message:{content:[{type:'tool_result',tool_use_id:'tool-1',content:'1\tgoal'}]}};
  await writeFile(file,[readUser,call,result].map(JSON.stringify).join('\n')+'\n');
  assert.equal((await transport.observe(short)).state,'started');
+ // A delivery reaches an owner whose shell moved elsewhere; a start prompt must arrive at the launch cwd.
+ await writeFile(file,[{...readUser,cwd:'/work/packages/a'},call,result].map(JSON.stringify).join('\n')+'\n');
+ assert.equal((await transport.observe(short)).state,'started');
+ await writeFile(file,[{...user,cwd:'/work/packages/a'},assistant].map(JSON.stringify).join('\n')+'\n');
+ assert.equal((await transport.observe(request)).state,'startup');
  result.message.content[0].content='1\tchanged';
  await writeFile(file,[readUser,call,result].map(JSON.stringify).join('\n')+'\n');
  assert.equal((await transport.observe(short)).state,'accepted');
@@ -60,4 +65,23 @@ test('Claude native goal requires matching active status, command and descendant
  await save([status,command,{...activity,parentUuid:'other'}]);assert.equal((await transport.observeGoal(request)).state,'accepted');
  await save([status,command,activity,{...status,attachment:{type:'goal_status',met:true,condition:prompt}}]);
  assert.equal((await transport.observeGoal(request)).goal.status,'complete');
+});
+
+test('Claude packet reads count after the worker changes its shell directory; the goal command stays bound to the start cwd',async t=>{
+ const root=await mkdtemp(path.join(tmpdir(),'claude-goal-cwd-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const id='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', project=path.join(root,'projects','project');await mkdir(project,{recursive:true});
+ const file=path.join(project,`${id}.jsonl`), observed={pid:123,cwd:'/work'}, prompt='finish';
+ const transport=createClaudeTaskTransport({command:async()=>({exitCode:0,stdout:`claude --session-id ${id}`}),env:{CLAUDE_CONFIG_DIR:root}});
+ const at=cwd=>({sessionId:id,cwd});
+ const status={...at('/work'),type:'attachment',attachment:{type:'goal_status',met:false,condition:prompt}};
+ const command={...at('/work'),type:'user',uuid:'request',message:{content:`<command-name>/goal</command-name>\n            <command-message>goal</command-message>\n            <command-args>${prompt}</command-args>`}};
+ const moved={...at('/work/packages/a'),type:'assistant',uuid:'moved',parentUuid:'request',message:{content:[{type:'text',text:'cd packages/a'}]}};
+ const packet={path:'/work/handoff',content:'context',digest:taskDigest('context')};
+ const read={...at('/work/packages/a'),type:'assistant',uuid:'read',parentUuid:'moved',message:{content:[{type:'tool_use',name:'Read',id:'read-1',input:{file_path:packet.path}}]}};
+ const result={...at('/work/packages/a'),type:'user',uuid:'result',parentUuid:'read',message:{content:[{type:'tool_result',tool_use_id:'read-1',content:'1\tcontext'}]}};
+ const save=rows=>writeFile(file,rows.map(JSON.stringify).join('\n')+'\n');
+ await save([status,command,moved,read,result]);
+ assert.equal((await transport.observeGoal({observed,prompt,packets:[packet]})).state,'started');
+ await save([status,{...command,cwd:'/elsewhere'},moved,read,result]);
+ await assert.rejects(transport.observeGoal({observed,prompt,packets:[packet]}),/missing or ambiguous/);
 });

@@ -39,14 +39,15 @@ export function createClaudeTaskTransport({ command, env, submitInput }) {
       const rows = await transcript(threadId);
       if (await binding(request.observed) !== threadId) throw taskError('Claude process changed during observation');
       if (!rows) return {state:'absent'};
-      const relevant = rows.filter(row => row.sessionId?.toLowerCase() === threadId && row.isSidechain !== true && row.cwd === request.observed.cwd);
+      // Rows follow the shell's working directory, which the worker may change; only the goal command is bound to the start cwd.
+      const relevant = rows.filter(row => row.sessionId?.toLowerCase() === threadId && row.isSidechain !== true);
       const statuses = relevant.filter(row => row.type === 'attachment' && row.attachment?.type === 'goal_status');
       const status = statuses.at(-1)?.attachment;
       if (!status) return {state:'absent'};
       if (status.condition !== request.prompt || typeof status.met !== 'boolean') throw taskError('native goal differs from the intended active goal');
       const command = `<command-name>/goal</command-name>\n            <command-message>goal</command-message>\n            <command-args>${request.prompt}</command-args>`;
       const matches = relevant.filter(row => row.type === 'user' && row.isMeta !== true && textOf(row.message) === command && typeof row.uuid === 'string');
-      if (matches.length !== 1) throw taskError('native goal command is missing or ambiguous');
+      if (matches.length !== 1 || matches[0].cwd !== request.observed.cwd) throw taskError('native goal command is missing or ambiguous');
       if (relevant.slice(relevant.indexOf(statuses.at(-1)) + 1).some(row => row.type === 'user'
         && /<local-command-stdout>\s*(?:Goal cleared:|No goal set)/.test(textOf(row.message)))) throw taskError('native goal was cleared');
       const descendants = new Set([matches[0].uuid]);
@@ -78,7 +79,8 @@ export function createClaudeTaskTransport({ command, env, submitInput }) {
       if (await binding(request.observed) !== threadId) throw taskError('Claude process changed during observation');
       if (!rows) return {state:request.input.effect === 'session.deliver' ? 'ready' : 'startup',fence:threadId,notApplied:true};
       const matches = rows.filter(row => row.type === 'user' && row.isSidechain !== true && row.sessionId?.toLowerCase() === threadId
-        && row.cwd === request.observed.cwd && textOf(row.message) === request.prompt && typeof row.uuid === 'string');
+        // A delivery reaches an existing owner whose shell may have moved; a start prompt arrives at the launch cwd.
+        && (request.input.effect === 'session.deliver' || row.cwd === request.observed.cwd) && textOf(row.message) === request.prompt && typeof row.uuid === 'string');
       if (matches.length > 1) throw taskError('Claude request appears more than once');
       if (!matches.length) return request.input.effect === 'session.deliver' ? {state:'ready',fence:threadId,notApplied:true} : {state:'startup'};
       const user=matches[0], index=rows.indexOf(user), descendants=new Set([user.uuid]);

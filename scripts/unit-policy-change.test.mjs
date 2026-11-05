@@ -45,6 +45,17 @@ test('public policy change preserves history, revalidates acceptance and retries
   assert.equal((await f.run({...request,delivery:'push'})).error,'POLICY_CHANGE_CONFLICT');
 });
 
+test('public review policy change permits mandatory review without changing delivery or prior evidence', async t => {
+  const f=await fixture(t);
+  await f.store.update(f.unit,record=>({...record,policyOverrides:{review:{mode:'none',by:'session',triggers:[]}}}));
+  const before=await f.read(), request={id:'review-change',expectedRevision:before.revision,review:{mode:'required',by:'session',triggers:[]},reason:'User authorized independent review'};
+  const result=await f.run(request);assert.equal(result.code,0,JSON.stringify(result));
+  const after=await f.read();assert.equal(after.state,'SelfGated');assert.equal(after.policyOverrides.review.mode,'required');
+  assert.equal(after.policy.delivery,'none');assert.deepEqual(after.evidence,before.evidence);assert.equal(after.accepted,null);
+  assert.equal((await f.run(request)).change.duplicate,true);
+  assert.equal((await f.run({...request,id:'invalid',expectedRevision:after.revision,review:{mode:'required'}})).error,'POLICY_CHANGE_INVALID');
+});
+
 test('unauthorized, stale, unsafe and uncertain changes never mutate state', async t => {
   const f=await fixture(t); let before=await f.read(); const request=await f.request();
   f.deny(); assert.equal((await f.run(request)).error,'EFFECT_APPROVAL_REQUIRED'); assert.deepEqual(await f.read(),before);

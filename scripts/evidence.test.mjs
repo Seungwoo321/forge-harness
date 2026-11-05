@@ -20,6 +20,9 @@ test('gate fingerprints are stable across file order and change with content or 
   assert.equal(first, gateFingerprint({ ...input, files: [{ path: 'a', content: '1' }, { path: 'b', content: '2' }] }));
   assert.notEqual(first, gateFingerprint({ ...input, files: [{ path: 'a', content: '1', mode: 0o755 }, { path: 'b', content: '2' }] }));
   assert.notEqual(first, gateFingerprint({ ...input, files: [{ path: 'a', content: 'changed' }, { path: 'b', content: '2' }] }));
+  assert.notEqual(first, gateFingerprint({ ...input, files: [{ path: 'a', content: '1' }, { path: 'b', content: '2' }], format:'tap', acPattern:'AC-1' }));
+  assert.notEqual(gateFingerprint({ ...input, files: [{ path: 'a', content: '1' }], format:'exec', resultFormat:'text' }),gateFingerprint({ ...input, files: [{ path: 'a', content: '1' }], format:'exec', resultFormat:'json' }));
+  assert.notEqual(gateFingerprint({ ...input, files: [{ path: 'a', content: '1' }] }),gateFingerprint({ ...input, files: [{ path: 'a', content: '1' }], outputDirectories:['cache'] }));
   assert.equal(gateFingerprint({ ...input, files: [] }), null);
 });
 

@@ -172,8 +172,16 @@ export async function resumeUnitFailure({ store, unit, snapshot }) {
   const recovery = decideResume({ record, ...snapshot });
   if (recovery.action !== 'resume') return { record, recovery };
   const updated = ['Blocked', 'Stopped'].includes(record.state)
-    ? await store.update(unit, current => ({ ...current, ...resumeFailure(current) }))
-    : record;
+    ? await store.update(unit, current => {
+      if (current.sessionFinalization?.mode === 'stopped' && !current.sessionFinalization.closeReceipt?.result?.closed)
+        throw Object.assign(new Error('stopped owner closure is not verified'), {code:'SESSION_CLOSE_PENDING'});
+      const resumed = { ...current, ...resumeFailure(current) };
+      if (current.sessionFinalization?.mode === 'stopped') {
+        resumed.sessionHistory = [...(current.sessionHistory ?? []), current.sessionFinalization];
+        resumed.sessionFinalization = null;
+      }
+      return resumed;
+    }) : record;
   const stage = ({ Scoped: 'scope', Implementing: 'implement', SelfGated: 'gates', InReview: 'review', Accepted: 'delivery', Delivering: 'delivery', Delivered: 'handoff' })[updated.state];
   return { record: updated, stage, recovery };
 }

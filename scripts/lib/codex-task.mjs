@@ -1,19 +1,36 @@
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { taskDigest, taskError } from './session-task.mjs';
 
 const queryScript = fileURLToPath(new URL('../codex-task-query.mjs', import.meta.url));
 const textOf = item => (item.content ?? []).map(part => part.type === 'text' ? part.text : '').join('');
+const readPacket = (packet, value, verification = []) => {
+  if (value.type !== 'commandExecution' || value.status !== 'completed' || value.exitCode !== 0) return false;
+  const output = value.aggregatedOutput ?? '';
+  const read = value.commandActions?.some(action => action.type === 'read'
+    && (action.path === packet.path || path.resolve(value.cwd, action.path ?? '') === packet.path));
+  if (read && taskDigest(output) === packet.digest) return true;
+  const outputs = read ? [value, ...verification] : [value];
+  return Boolean(packet.content && output.includes(packet.content) && outputs.some(item => item.type === 'commandExecution'
+    && item.status === 'completed' && item.exitCode === 0 && item.aggregatedOutput?.split('\n').some(line => {
+    const match = /^([a-f0-9]{64}) [ *](.+)$/.exec(line);
+    return match && `sha256:${match[1]}` === packet.digest && path.resolve(item.cwd, match[2]) === packet.path;
+  })));
+};
 
-export function createCodexTaskTransport({ command, executable = 'codex', submitInput }) {
+export function createCodexTaskTransport({ command, executable = 'codex', submitInput, env }) {
+  const account = path.resolve(env?.CODEX_HOME ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'));
   async function binding(observed) {
     if (!Number.isSafeInteger(observed.pid)) throw taskError('worker PID is unavailable');
     const result = await command('lsof', ['-a', '-p', String(observed.pid), '-Fn'], { cwd: observed.cwd });
     if (result.exitCode !== 0 || result.signal) throw taskError('worker thread ownership is unavailable');
-    const ids = [...new Set(result.stdout.split('\n').map(line => /\/thread-writer-locks\/([a-f0-9-]{36})\.lock$/.exec(line)?.[1]).filter(Boolean))];
+    const lockRoot = `n${path.join(account, 'thread-writer-locks')}/`;
+    const ids = [...new Set(result.stdout.split('\n').filter(line => line.startsWith(lockRoot))
+      .map(line => /^([a-f0-9-]{36})\.lock$/.exec(line.slice(lockRoot.length))?.[1]).filter(Boolean))];
     if (!ids.length) throw taskError('worker thread ownership is missing');
     if (ids.length > 1) {
-      const identified = await command(process.execPath, [queryScript], { cwd: observed.cwd,
+      const identified = await command(process.execPath, [queryScript], { cwd: observed.cwd, env,
         input: JSON.stringify({ executable, operation: 'identify', threadIds: ids, cwd: observed.cwd }) });
       if (identified.exitCode !== 0 || identified.signal) throw taskError('worker primary thread is missing or ambiguous');
       const { threadId } = JSON.parse(identified.stdout);
@@ -24,8 +41,8 @@ export function createCodexTaskTransport({ command, executable = 'codex', submit
   }
   async function query(request, operation = 'read') {
     const threadId = await binding(request.observed);
-    const result = await command(process.execPath, [queryScript], { cwd: request.observed.cwd,
-      input: JSON.stringify({ executable, threadId, operation, prompt: request.prompt, clientId: request.input.key }) });
+    const result = await command(process.execPath, [queryScript], { cwd: request.observed.cwd, env,
+      input: JSON.stringify({ executable, threadId, cwd:request.observed.cwd, operation, prompt: request.prompt, clientId: request.input.key }) });
     if (result.exitCode !== 0 || result.signal) throw taskError('native worker history is unavailable');
     const data = JSON.parse(result.stdout);
     if (data.thread?.id !== threadId || data.thread.cwd !== request.observed.cwd || await binding(request.observed) !== threadId) throw taskError('worker thread changed during observation');
@@ -33,6 +50,37 @@ export function createCodexTaskTransport({ command, executable = 'codex', submit
   }
   return {
     async identity(observed) { return { threadId: await binding(observed) }; },
+    async goal(observed) {
+      const data = await query({ observed, input: {} }, 'goal');
+      return data.goal;
+    },
+    async observeGoal(request) {
+      const data = await query(request, 'goal-observe');
+      if (!data.goal) return { state: 'absent' };
+      if (data.goal.threadId !== data.threadId || data.goal.objective !== request.prompt || !['active','complete'].includes(data.goal.status)) {
+        throw taskError('native goal differs from the intended runnable or completed goal');
+      }
+      // The goal timestamp has second precision; only later events prove ordering.
+      const cutoff = Number.isSafeInteger(data.goal.createdAt) ? (data.goal.createdAt + 1) * 1000 : Infinity;
+      const hookEntry = data.hooks?.data?.find(entry => entry.cwd === request.observed.cwd);
+      const guard = hookEntry?.errors?.length === 0 && hookEntry.hooks?.find(hook => hook.pluginId === 'forge-harness@forge-harness'
+        && hook.source === 'plugin' && hook.eventName === 'stop' && hook.enabled === true && hook.async === false
+        && ['trusted','managed'].includes(hook.trustStatus) && hook.handlerType === 'command'
+        && /[\/\\]continuity-stop-hook\.mjs["']?$/.test(hook.command));
+      const enforcement = guard ? {status:'verified',provider:'codex',scope:'account-cwd',cwd:request.observed.cwd,key:guard.key,hash:guard.currentHash,trust:guard.trustStatus}
+        : {status:'unverified',provider:'codex',scope:'account-cwd'};
+      const eligible = data.turns.map(turn => ({ ...turn, items: turn.items.filter(item =>
+        Number.isSafeInteger(turn.startedAt) && turn.startedAt * 1000 >= cutoff
+        || Number.isSafeInteger(item.startedAtMs) && item.startedAtMs >= cutoff) }));
+      const packets = request.packets.filter(packet => eligible.some(turn => turn.items.some((item, index) => readPacket(packet, item, turn.items.slice(index + 1)))));
+      for (const turn of eligible) {
+        const activity = turn.items.find(item => ['agentMessage', 'commandExecution', 'mcpToolCall', 'dynamicToolCall'].includes(item.type));
+        if (activity && packets.length === request.packets.length && ['inProgress', 'completed', 'interrupted', 'failed'].includes(turn.status)) {
+          return { state: 'started', threadId: data.threadId, goal: data.goal, enforcement, turnId: turn.id, activityId: activity.id, packets: packets.map(({path,digest}) => ({path,digest})) };
+        }
+      }
+      return { state: 'accepted', threadId: data.threadId, goal: data.goal };
+    },
     async observe(request) {
       const data = await query(request);
       const matches = data.turns.flatMap(turn => turn.items.filter(item => item.type === 'userMessage' && textOf(item) === request.prompt).map(item => ({ turn, item })));
@@ -43,18 +91,7 @@ export function createCodexTaskTransport({ command, executable = 'codex', submit
         const activity = following.find(value => ['agentMessage', 'commandExecution', 'mcpToolCall', 'dynamicToolCall'].includes(value.type));
         if (!activity || !['inProgress', 'completed', 'interrupted', 'failed'].includes(turn.status)) return { state: 'accepted' };
         const packets = request.packets.filter(packet => request.prompt.includes(packet.digest) && request.prompt.includes(packet.content)
-          || following.some(value => {
-            if (value.type !== 'commandExecution' || value.status !== 'completed' || value.exitCode !== 0) return false;
-            const output = value.aggregatedOutput ?? '';
-            const read = value.commandActions?.some(action => action.type === 'read'
-              && (action.path === packet.path || path.resolve(value.cwd, action.path ?? '') === packet.path));
-            if (read && taskDigest(output) === packet.digest) return true;
-            const checksum = output.split('\n').some(line => {
-              const match = /^([a-f0-9]{64}) [ *](.+)$/.exec(line);
-              return match && `sha256:${match[1]}` === packet.digest && path.resolve(value.cwd, match[2]) === packet.path;
-            });
-            return Boolean(checksum && packet.content && output.includes(packet.content));
-          }));
+          || following.some(value => readPacket(packet, value)));
         return { state: 'started', promptDigest: taskDigest(request.prompt), threadId: data.threadId, requestId: item.id,
           turnId: turn.id, turnStatus: turn.status, activityId: activity.id, packets: packets.map(({ path, digest }) => ({ path, digest })) };
       }

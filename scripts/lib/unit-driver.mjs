@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { mkdir, open, readFile, readdir, rename, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, readdir, rename, rm } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { createLedgerStore, executeEffect } from './ledger.mjs';
 import { effectDefinition, prepareEffect, resolvePolicy } from './policy.mjs';
@@ -20,8 +21,16 @@ import { acceptedDeliveryMetadata, validateDeliveryContext } from './delivery-fl
 import { validateAcceptedContent } from './delivery.mjs';
 import { resolveFindings } from './finding-resolution.mjs';
 import { recheckScope } from './scope-recheck.mjs';
-import { changeUnitDelivery } from './unit-policy-change.mjs';
+import { createContinuityStore } from './continuity-store.mjs';
+import { blockGoal, resumeGoal, appendGoalWork } from './continuity-transitions.mjs';
+import { commitGoalCompletion } from './continuity-completion.mjs';
+import { commitGoalContinuation } from './continuity-finish.mjs';
+import { startGoalSession } from './continuity-start.mjs';
+import { prepareSessionReturn } from './continuity-return.mjs';
+import { stopGoalSession } from './continuity-stop.mjs';
+import { changeUnitPolicy } from './unit-policy-change.mjs';
 import { attemptsFor } from './stage-attempts.mjs';
+import { capturedGateReport, executeCapturedGate, persistCapturedReport } from './gate-execution.mjs';
 
 const controlPlaneFields = new Set([
   'request', 'unit', 'kind', 'goal', 'policy', 'policySources', 'canon', 'tracker', 'isolation',
@@ -184,8 +193,11 @@ async function prepareReviewInput({ record, adapters, stateRoot }) {
     diffBytes = `${JSON.stringify(diffContent, null, 2)}\n`;
   }
   const diff = { path: file, digest: `sha256:${createHash('sha256').update(diffBytes).digest('hex')}` };
+  const goal = record.continuity?.goalId ? await createContinuityStore(stateRoot).read(record.continuity.goalId) : null;
+  if (record.continuity && !goal) throw Object.assign(new Error('review goal is missing'), {code:'CONTINUITY_REQUIRED'});
   const handoff = {
     request: record.request, acceptance: record.acceptance, canon: record.canon,
+    ...(goal ? { continuity: { goal: goal.goal, source: goal.source, revision: goal.revision } } : {}),
     changedPaths: record.changedPaths, diff,
     implementation: attemptsFor(record, 'implement').filter(attempt => attempt.endedAt).map(attempt => ({
       attempt: attempt.n, summary: attempt.summary ?? null, outputDigest: attempt.outputDigest,
@@ -512,6 +524,15 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
     throw error;
   }
   const reviewedRecord = reviewTarget ?? current;
+  if (stage === 'review' && current.kind === 'review' && reviewedRecord.continuity?.goalId) {
+    const goal = await createContinuityStore(stateRoot).read(reviewedRecord.continuity.goalId);
+    const custody = goal?.reviews?.findLast(item => item.unit === unit && item.targetUnit === reviewedRecord.unit);
+    if (!custody || current.continuity?.goalId !== reviewedRecord.continuity.goalId || typeof adapters.session?.observe !== 'function')
+      throw Object.assign(new Error('independent review session is not registered'), {code:'SESSION_OWNER_MISMATCH'});
+    const owner = await adapters.session.observe({cwd:custody.cwd,targetCwd:custody.cwd});
+    if (owner.sessionId !== custody.sessionId || owner.incarnationId !== custody.incarnationId || owner.cwd !== custody.cwd)
+      throw Object.assign(new Error('review submission must come from the independent review owner'), {code:'SESSION_OWNER_MISMATCH'});
+  }
   if (stage === 'review') {
     if (reviewedRecord.state !== 'InReview' || !reviewedRecord.head || !reviewedRecord.contentFingerprint || input.targetUnit !== reviewedRecord.unit
       || input.head !== reviewedRecord.head || input.contentFingerprint !== reviewedRecord.contentFingerprint) {
@@ -695,6 +716,7 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
 
 async function runEffect({ stateRoot, unit, options, adapters, cwd }) {
   if (!options.effect || !options.args) usageError('unit effect requires --effect <kind> --args <file>');
+  if (options.effect.startsWith('session.')) throw Object.assign(new Error('session effects require the managed lifecycle commands'), { code: 'EFFECT_DENIED' });
   const store = createUnitStateStore(stateRoot);
   const record = await store.read(unit);
   if (!record) {
@@ -804,6 +826,11 @@ async function runResume({ stateRoot, unit, options }) {
   if (!options.snapshot) usageError('unit resume requires --snapshot <file>');
   const snapshot = await readJsonFile(path.resolve(options.snapshot), 'resume snapshot', 'CLI_USAGE');
   const boundary = classifySessionBoundary(snapshot.event);
+  const existing = await createUnitStateStore(stateRoot).read(unit);
+  if (existing?.continuity?.goalId) {
+    const goal = await createContinuityStore(stateRoot).read(existing.continuity.goalId);
+    if (!goal || goal.goal.status !== 'active' || !goal.goal.remaining.includes(unit)) throw Object.assign(new Error('goal must be resumed before its unit'), {code:'GOAL_BLOCKED'});
+  }
   const pendingLedger = await createLedgerStore(stateRoot).withLock(unit, ledger => ledger.read());
   const result = await resumeUnitFailure({ store: createUnitStateStore(stateRoot), unit, snapshot: { ...snapshot, ledger: pendingLedger } });
   return {
@@ -826,13 +853,17 @@ async function runSessionFinish({ stateRoot, unit, options, adapters }) {
 
 function gateEvidenceAdapter(store, unit, adapters, record) {
   return {
-    latest: async gate => (await store.read(unit)).evidence?.filter(item => item.gate === gate).at(-1) ?? null,
-    run: gate => adapters.gates.run(gate, { unit, record }),
+    latest: async gate => {
+      const prior=(await store.read(unit)).evidence?.filter(item => item.gate === gate).at(-1) ?? null;
+      if (prior?.execution?.kind === 'isolated-snapshot-v1' && !(await validCapturedReport(prior))) return {...prior,status:'stale',covers:[]};
+      return prior;
+    },
+    run: async () => { throw Object.assign(new Error('gate execution is not configured'),{code:'ADAPTER_MISSING'}); },
     persist: async (gate, update) => {
       let evidence;
       await store.update(unit, current => {
         evidence = update(current.evidence?.filter(item => item.gate === gate).at(-1) ?? null);
-        const updated = { ...current, evidence: [...(current.evidence ?? []).filter(item => item.gate !== evidence.gate), evidence] };
+        const updated = { ...current, evidence: [...(current.evidence ?? []), evidence] };
         if (!current.accepted || !hasInvalidEvidence(updated.evidence)) return updated;
         Object.assign(updated, { accepted: null, reviewDecision: null, reviewedHead: null, verdict: null, deliveryResult: null, terminalProjection: null });
         if (['Accepted', 'Delivering', 'Delivered'].includes(current.state)) return transitionRecord(updated, 'SelfGated');
@@ -845,11 +876,28 @@ function gateEvidenceAdapter(store, unit, adapters, record) {
   };
 }
 
+async function validCapturedReport(record) {
+  if (typeof record?.report !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(record.digest ?? '')) return false;
+  try { return `sha256:${createHash('sha256').update(await readFile(record.report)).digest('hex')}` === record.digest; }
+  catch { return false; }
+}
+
+async function runIsolatedGate({gate,stateRoot,unit,adapters,cwd}) {
+  if (typeof adapters.command !== 'function') throw Object.assign(new Error('isolated gate execution requires the core command adapter'),{code:'ADAPTER_MISSING'});
+  const directory=await mkdtemp(path.join(os.tmpdir(),'forge-gate-'));
+  try {
+    const execution=await executeCapturedGate({gate,directory,sourceRoot:cwd,command:adapters.command});
+    const parsed=capturedGateReport({gate,execution,reportPath:'captured'});
+    const reportPath=await persistCapturedReport({stateRoot:path.resolve(stateRoot),unit,content:execution.stdout});
+    return {...parsed,reportPath};
+  } finally {await rm(directory,{recursive:true,force:true});}
+}
+
 async function runEvidenceRerun({ stateRoot, unit, gateId, adapters, cwd }) {
   const store = createUnitStateStore(stateRoot);
   const record = await store.read(unit);
   if (!record) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
-  if (typeof adapters.gates?.describe !== 'function' || typeof adapters.gates?.run !== 'function') {
+  if (typeof adapters.gates?.describe !== 'function') {
     throw Object.assign(new Error('evidence rerun requires a gate adapter'), { code: 'ADAPTER_MISSING' });
   }
   const gate = await adapters.gates.describe(gateId, { unit, record });
@@ -869,7 +917,7 @@ async function runEvidenceRerun({ stateRoot, unit, gateId, adapters, cwd }) {
   adapter.run = async () => {
     const result = gate.applicability
       ? { exit: 0, ok: true, report: applicabilityBytes.toString('utf8'), reportPath: 'package.json', covers: [] }
-      : await adapters.gates.run(gate, { unit, record });
+      : await runIsolatedGate({gate,stateRoot,unit,adapters,cwd});
     const checked = await adapters.gates.describe(gateId, { unit, record });
     if (!checked || checked.id !== gateId || gateFingerprint(checked) !== fingerprint
       || gate.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(applicabilityBytes)) {
@@ -877,7 +925,7 @@ async function runEvidenceRerun({ stateRoot, unit, gateId, adapters, cwd }) {
     }
     return result;
   };
-  const outcome = await runGate({ gate, fingerprint, adapter, independent: true });
+  const outcome = await runGate({ gate, fingerprint, adapter, independent: true, enforceSnapshot: true });
   return formatCliResult({ code: outcome.nondeterministic ? 4 : outcome.pending ? 3 : ['passed','not-applicable'].includes(outcome.record.status) ? 0 : 1,
     summary: `Evidence ${gateId}: ${outcome.record.status}`, details: { unit, ...outcome } });
 }
@@ -889,7 +937,7 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
   if (!['SelfGated', 'InReview', 'Accepted'].includes(record.state)) {
     throw Object.assign(new Error(`acceptance cannot run while unit is ${record.state}`), { code: 'INVALID_TRANSITION' });
   }
-  if (typeof adapters.git?.inspectUnit !== 'function' || typeof adapters.gates?.describe !== 'function' || typeof adapters.gates?.run !== 'function') {
+  if (typeof adapters.git?.inspectUnit !== 'function' || typeof adapters.gates?.describe !== 'function') {
     throw Object.assign(new Error('acceptance requires Git and gate adapters'), { code: 'ADAPTER_MISSING' });
   }
   const profile = selectProfile(record.kind);
@@ -918,7 +966,7 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
     const gateAdapter = gateEvidenceAdapter(store, unit, adapters, record);
     const executeGate = gate.applicability
       ? async () => ({ exit: 0, ok: true, report: applicabilityBytes.toString('utf8'), reportPath: 'package.json', covers: [] })
-      : gateAdapter.run;
+      : async () => runIsolatedGate({gate,stateRoot,unit,adapters,cwd});
     gateAdapter.run = async currentGate => {
       const result = await executeGate(currentGate);
       const checked = await adapters.gates.describe(gateId, { unit, record });
@@ -928,13 +976,14 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
       }
       return result;
     };
-    await runGate({ gate, fingerprint, adapter: gateAdapter });
+    await runGate({ gate, fingerprint, adapter: gateAdapter, enforceSnapshot: true });
     const checkedGate = await adapters.gates.describe(gateId, { unit, record });
     if (!checkedGate || checkedGate.id !== gateId || gateFingerprint(checkedGate) !== fingerprint
       || gate.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(applicabilityBytes)) {
       await store.update(unit, current => {
-        const updated = { ...current, evidence: (current.evidence ?? []).map(item => item.gate === gateId
-          ? { ...item, status: 'stale', covers: [] } : item), accepted: null, reviewDecision: null, reviewedHead: null, verdict: null };
+        const previous=current.evidence?.filter(item=>item.gate === gateId).at(-1);
+        const updated = { ...current, evidence: previous ? [...(current.evidence ?? []),{...previous,status:'stale',covers:[]}] : current.evidence,
+          accepted: null, reviewDecision: null, reviewedHead: null, verdict: null };
         return ['InReview', 'Accepted'].includes(current.state) ? transitionRecord(updated, 'SelfGated') : updated;
       });
       throw Object.assign(new Error(`gate ${gateId} inputs changed during execution`), { code: 'EVIDENCE_STALE' });
@@ -968,7 +1017,7 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
     acceptance: record.acceptance ?? [], evidence: record.evidence ?? [], requiredGates: profile.gates,
     head: target.head, contentFingerprint: target.contentFingerprint,
     currentHead: checkedTarget?.head, currentContentFingerprint: checkedTarget?.contentFingerprint,
-    reviewRequired: reviewResolution.required, review, findings: record.findings ?? [],
+    reviewRequired: reviewResolution.required, review, findings: record.findings ?? [], enforceSnapshot:true,
   });
   if (!evaluation.ok && evaluation.nextState === 'SelfGated') {
     record = await store.update(unit, current => {
@@ -1015,6 +1064,8 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
       const described = await adapters.gates.describe(id, { unit, record: current });
       if (!described || described.id !== id || gateFingerprint(described) !== gateFingerprints.get(id)) { commitFailure = `Gate ${id} inputs changed during acceptance`; return current; }
       if (described.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(Buffer.from(described.files.find(file => file.path === 'package.json').content))) { commitFailure = `Gate ${id} project configuration changed during acceptance`; return current; }
+      const proof=current.evidence?.filter(item=>item.gate === id).at(-1);
+      if (!described.applicability && !(await validCapturedReport(proof))) { commitFailure = `Gate ${id} captured report changed during acceptance`; return current; }
     }
     const currentReviewResolution = resolveReview({
       kind: current.kind, policy, findings: current.findings ?? [], failures: current.failures ?? [],
@@ -1027,7 +1078,7 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
       acceptance: current.acceptance ?? [], evidence: current.evidence ?? [], requiredGates: profile.gates,
       head: target.head, contentFingerprint: target.contentFingerprint,
       currentHead: finalTarget.head, currentContentFingerprint: finalTarget.contentFingerprint,
-      reviewRequired: currentReviewResolution.required, findings: current.findings ?? [],
+      reviewRequired: currentReviewResolution.required, findings: current.findings ?? [], enforceSnapshot:true,
       review: current.reviewedHead ? {
         verdict: current.verdict, head: current.reviewedHead, contentFingerprint: current.reviewDecision?.contentFingerprint,
         findings: current.findings ?? [], verdictBy: current.reviewDecision?.by ?? 'session',
@@ -1084,10 +1135,15 @@ async function runUnitStart({ stateRoot, unit, options, cwd }) {
   }
 
   const store = createUnitStateStore(stateRoot);
+  const reviewTarget = request.kind === 'review' ? await store.read(request.targetUnit) : null;
+  const goalId = request.goalId ?? reviewTarget?.continuity?.goalId;
+  if (request.kind === 'review' && reviewTarget?.continuity?.goalId && goalId !== reviewTarget.continuity.goalId)
+    throw Object.assign(new Error('review must use its target goal'), {code:'CONTINUITY_INVALID'});
   const previous = await store.read(unit);
   if (previous) {
     if (previous.kind !== request.kind || previous.request?.text !== request.request.text
-      || previous.request?.userInputRef !== request.request.userInputRef) {
+      || previous.request?.userInputRef !== request.request.userInputRef
+      || (previous.continuity?.goalId ?? null) !== (goalId ?? null)) {
       const error = new Error(`unit already exists with a different start request: ${unit}`);
       error.code = 'UNIT_START_CONFLICT';
       throw error;
@@ -1103,11 +1159,27 @@ async function runUnitStart({ stateRoot, unit, options, cwd }) {
     unit: request.policyOverrides ?? {}, user: request.userOverrides ?? {},
     nonInteractive: options['non-interactive'] === true,
   });
+  let continuity;
+  if (goalId !== undefined) {
+    continuity = await createContinuityStore(stateRoot).read(goalId);
+    const goalUnit = request.kind === 'review' ? request.targetUnit : unit;
+    if (!continuity || continuity.goal.status !== 'active' || !continuity.goal.remaining.includes(goalUnit)) {
+      throw Object.assign(new Error('unit must be listed in an active goal'), { code: 'CONTINUITY_INVALID' });
+    }
+    if (JSON.stringify(stable(policy.policy.session)) !== JSON.stringify(stable(continuity.policy)))
+      throw Object.assign(new Error('resolved execution policy differs from the registered goal'), { code: 'CONTINUITY_STALE' });
+    const source = await readFile(continuity.source.path);
+    if (`sha256:${createHash('sha256').update(source).digest('hex')}` !== continuity.source.digest)
+      throw Object.assign(new Error('goal source changed'), { code: 'CONTINUITY_STALE' });
+  }
   const state = request.kind === 'review' ? 'InReview' : 'Scoped';
   const record = await store.create({
     schema: 'harness.unit/1', unit, kind: request.kind, state,
-    request: { text: request.request.text, userInputRef: request.request.userInputRef },
+    request: { text: request.request.text, userInputRef: request.request.userInputRef,
+      ...(continuity ? { overallGoal: { id: continuity.goal.id, objective: continuity.goal.objective, criteria: continuity.goal.criteria, source: continuity.source } } : {}) },
     ...(request.targetUnit ? { targetUnit: request.targetUnit } : {}),
+    ...(request.kind !== 'review' || continuity ? { continuityRequired: true } : {}),
+    ...(continuity ? { continuity: { goalId: continuity.goal.id } } : {}),
     goal: { class: policy.policy.goal.class, source: policy.policySources['goal.class'] },
     policy: policy.policy, policySources: policy.policySources,
     ...(request.policyOverrides ? { policyOverrides: request.policyOverrides } : {}),
@@ -1160,13 +1232,73 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
       return await runEvidenceRerun({ stateRoot: effectiveRoot, unit, gateId: parsed.options.gate, adapters, cwd });
     }
-    if (noun !== 'unit' || !['start', 'scope', 'finding', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'policy'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
+    if (noun === 'goal') {
+      const [id] = rest;
+      if (!id || rest.length !== 1 || !['create', 'show', 'block', 'resume', 'reconcile', 'add-work'].includes(subcommand)) usageError('usage: goal create|show <id> [--request <file>]');
+      const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
+      const store = createContinuityStore(effectiveRoot);
+      if (subcommand === 'show') {
+        const goal = await store.read(id);
+        if (!goal) throw Object.assign(new Error('goal not found'), { code: 'GOAL_NOT_FOUND' });
+        return formatCliResult({ code: 0, summary: `Goal ${id}`, details: { goal } });
+      }
+      if (subcommand === 'reconcile') {
+        const current = await store.read(id);
+        if (!current) throw Object.assign(new Error('goal not found'), { code:'GOAL_NOT_FOUND' });
+        const unit = current.completion?.unit ?? current.goal.remaining[0];
+        if (!unit) throw Object.assign(new Error('goal completion is not ready for reconciliation'), { code:'GOAL_INCOMPLETE' });
+        const unitStore = createUnitStateStore(effectiveRoot);
+        const record = await unitStore.read(unit);
+        const goal = record?.goalContinuation ? await commitGoalContinuation({continuityStore:store,unitStore,goalId:id,unit})
+          : await commitGoalCompletion({continuityStore:store,unitStore,goalId:id,unit});
+        return formatCliResult({code:0,summary:`Goal ${id} reconciled`,details:{goal}});
+      }
+      if (subcommand === 'add-work') {
+        if (!parsed.options.request) usageError('goal add-work requires --request <file>');
+        const request = await readJsonFile(path.resolve(cwd,parsed.options.request), 'goal work request', 'CLI_USAGE');
+        const goal = await store.transaction(id, current => appendGoalWork(current,request));
+        return formatCliResult({code:0,summary:`Goal ${id} work recorded`,details:{goal}});
+      }
+      if (['block', 'resume'].includes(subcommand)) {
+        if (!parsed.options.request) usageError('goal block|resume requires --request <file>');
+        const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'goal transition request', 'CLI_USAGE');
+        const record = await createUnitStateStore(effectiveRoot).read(request.unit);
+        if (!record || record.continuity?.goalId !== id || record.state !== 'Stopped')
+          throw Object.assign(new Error('goal blocker requires its stopped unit'), {code:'CONTINUITY_INVALID'});
+        if (subcommand === 'resume' && !record.sessionFinalization?.closeReceipt?.result?.closed)
+          throw Object.assign(new Error('stopped owner must be verified closed before goal resume'), {code:'SESSION_CLOSE_PENDING'});
+        if (subcommand === 'block') {
+          const failure = record.failures?.at(-1);
+          if (!failure || failure.path !== request.evidence || !failure.path.startsWith(`units/${request.unit}/failures/`))
+            throw Object.assign(new Error('blocker evidence must reference the recorded unit failure'), {code:'CONTINUITY_INVALID'});
+          const bytes = await readFile(path.resolve(effectiveRoot,failure.path));
+          if (`sha256:${createHash('sha256').update(bytes).digest('hex')}` !== failure.digest)
+            throw Object.assign(new Error('recorded failure changed'), {code:'CONTINUITY_STALE'});
+        }
+        const goal = await store.transaction(id, current => subcommand === 'block' ? blockGoal(current, request) : resumeGoal(current, request));
+        return formatCliResult({ code: 0, summary: `Goal ${id} ${subcommand === 'block' ? 'blocked' : 'resumed'}`, details: { goal } });
+      }
+      if (!parsed.options.request) usageError('goal create requires --request <file>');
+      const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'goal request', 'CLI_USAGE');
+      if (request.goal?.id !== id) usageError('goal id must match the request');
+      const source = await readFile(request.source?.path ?? '');
+      if (`sha256:${createHash('sha256').update(source).digest('hex')}` !== request.source?.digest) throw Object.assign(new Error('goal source digest does not match'), { code: 'CONTINUITY_STALE' });
+      if (request.policy !== undefined) usageError('execution policy comes from the resolved work policy');
+      const projectRoot = path.resolve(cwd, parsed.options['project-root'] ?? '.');
+      const resolved = await resolveStoredPolicy({stateRoot:effectiveRoot,projectRoot,
+        ...(parsed.options['workspace-root'] ? {workspaceRoot:path.resolve(cwd,parsed.options['workspace-root'])} : {}),
+        ...(parsed.options['global-root'] ? {globalRoot:path.resolve(cwd,parsed.options['global-root'])} : {}),
+        nonInteractive:parsed.options['non-interactive'] === true});
+      const goal = await store.create({goal:request.goal,source:request.source,policy:resolved.policy.session});
+      return formatCliResult({ code: 0, summary: `Goal ${id} registered`, details: { goal } });
+    }
+    if (noun !== 'unit' || !['start', 'scope', 'finding', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'goal-bind', 'session-stop', 'session-return', 'policy'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
     const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
     if (subcommand === 'policy') {
       const [action, unit] = rest;
       if (action !== 'change' || rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit policy change requires <unit> --request <file> --user-input <ref>');
       const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'unit policy change request', 'CLI_USAGE');
-      const change = await changeUnitDelivery({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, request, userInputRef: parsed.options['user-input'], adapters });
+      const change = await changeUnitPolicy({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, request, userInputRef: parsed.options['user-input'], adapters });
       return formatCliResult({ code: 0, summary: `Policy changed for ${unit}`, details: { unit, change } });
     }
     if (subcommand === 'finding') {
@@ -1195,6 +1327,47 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const [unit] = rest;
       if (!unit) usageError('unit start requires <unit>');
       return formatCliResult(await runUnitStart({ stateRoot: effectiveRoot, unit, options: parsed.options, cwd }));
+    }
+    if (subcommand === 'goal-bind') {
+      const [unit] = rest;
+      if (!unit || rest.length !== 1 || !parsed.options.request) usageError('unit goal-bind requires <unit> --request <file>');
+      const request = await readJsonFile(path.resolve(cwd,parsed.options.request), 'goal binding request', 'CLI_USAGE');
+      const goal = await createContinuityStore(effectiveRoot).read(request.goalId);
+      const store = createUnitStateStore(effectiveRoot);
+      const before = await store.read(unit);
+      if (!goal || goal.goal.status !== 'active' || !goal.goal.remaining.includes(unit) || !before || before.state !== 'Scoped' || (before.stages ?? []).length !== 0)
+        throw Object.assign(new Error('unit must be unscoped and listed in an active goal'), {code:'CONTINUITY_INVALID'});
+      const source = await readFile(goal.source.path);
+      if (`sha256:${createHash('sha256').update(source).digest('hex')}` !== goal.source.digest || JSON.stringify(stable(before.policy?.session)) !== JSON.stringify(stable(goal.policy)))
+        throw Object.assign(new Error('goal source or execution policy differs'), {code:'CONTINUITY_STALE'});
+      const record = await store.update(unit, current => {
+        if (current.revision !== before.revision || (current.continuity?.goalId && current.continuity.goalId !== goal.goal.id))
+          throw Object.assign(new Error('unit changed during goal binding'), {code:'CONTINUITY_STALE'});
+        if (current.continuity?.goalId === goal.goal.id && current.continuityRequired) return current;
+        return {...current,continuityRequired:true,continuity:{goalId:goal.goal.id},request:{...current.request,overallGoal:{id:goal.goal.id,objective:goal.goal.objective,criteria:goal.goal.criteria,source:goal.source}}};
+      });
+      return formatCliResult({code:0,summary:`Unit ${unit} bound to goal`,details:{unit,goalId:record.continuity.goalId}});
+    }
+    if (subcommand === 'session-return') {
+      const [unit] = rest;
+      if (!unit || rest.length !== 1 || !parsed.options.request) usageError('unit session-return requires <unit> --request <file>');
+      const request = await readJsonFile(path.resolve(cwd,parsed.options.request), 'session return request', 'CLI_USAGE');
+      const {code,summary,...details} = await prepareSessionReturn({stateRoot:effectiveRoot,unit,request,store:createUnitStateStore(effectiveRoot),adapters,mode:'review'});
+      return formatCliResult({code,summary,details:{...details,stateRoot:effectiveRoot}});
+    }
+    if (subcommand === 'session-stop') {
+      const [unit] = rest;
+      if (!unit || rest.length !== 1 || !parsed.options.request) usageError('unit session-stop requires <unit> --request <file>');
+      const request = await readJsonFile(path.resolve(cwd,parsed.options.request), 'session stop request', 'CLI_USAGE');
+      const {code,summary,...details} = await stopGoalSession({stateRoot:effectiveRoot,unit,request,store:createUnitStateStore(effectiveRoot),adapters});
+      return formatCliResult({code,summary,details:{...details,stateRoot:effectiveRoot}});
+    }
+    if (subcommand === 'session-start') {
+      const [unit] = rest;
+      if (!unit || rest.length !== 1 || !parsed.options.request) usageError('unit session-start requires <unit> --request <file>');
+      const request = await readJsonFile(path.resolve(cwd,parsed.options.request), 'session start request', 'CLI_USAGE');
+      const result = await startGoalSession({stateRoot:effectiveRoot,unit,request,store:createUnitStateStore(effectiveRoot),adapters});
+      return formatCliResult({code:result.status === 'uncertain' ? 3 : 0,summary:`Goal session ${result.status}`,details:{unit,result}});
     }
     if (subcommand === 'effect') {
       const [unit] = rest;

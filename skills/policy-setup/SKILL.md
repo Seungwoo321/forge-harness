@@ -16,9 +16,15 @@ Use this step when `policy resolve --json` returns `POLICY_UNSET`, when the user
 3. Build a `PolicyDraft` JSON file and call `policy set --level <project|workspace|global> --draft <file>`. Workspace setup also supplies `--workspace-root`; global setup supplies the provider configuration root. The CLI owns validation, persistence, confirmation metadata, and source reporting.
 4. Return the confirmed policy and field sources to the unit driver so it can resume the original unit.
 
+## Session execution
+
+For managed goals, resolve `session.runtime`, `session.provider`, `session.account` (absolute provider configuration directory), `session.model`, `session.effort`, and the explicit executable `session.argv` from the user's existing policy and account configuration. Optional `session.roles` overrides those fields for `implementation`, `review`, `diagnosis`, or `resolver`. Preserve the approved permissions and account; do not assume a shell alias is available to a noninteractive process. Store no secret in policy. Ask only when an account or permission choice is genuinely unknown, and do not silently select another account.
+
 ## Change
 
 Change only after an explicit user request. Ask for the intended values and a short reason, then call `policy set --change --reason <reason> --user-input-ref <confirmed-input-reference>` with the complete draft. The CLI records the prior policy and confirmation provenance.
+
+For a submitted, undelivered unit, use the unit control plane's `unit policy change <unit> --request <file> --user-input <confirmed-input-reference>` instead. The request contains an id, the current expected revision, a reason, and exactly one of `delivery` or the complete `review` object. Preserve the existing unit and re-run acceptance after the authorized change. A required independent review can resolve an applicability conflict without changing delivery.
 
 ## Show
 

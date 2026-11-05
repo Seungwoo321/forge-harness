@@ -7,19 +7,22 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { createUnitStateStore } from './lib/unit-state.mjs';
 import { createLedgerStore } from './lib/ledger.mjs';
+import { createContinuityStore } from './lib/continuity-store.mjs';
+import { createHash } from 'node:crypto';
 
 const cli = fileURLToPath(new URL('./unit.mjs', import.meta.url));
 const runtimeModule = new URL('./lib/session-runtime.mjs', import.meta.url).href;
 const fields = { title: 'Completed work', objective: 'complete work', acceptance: 'AC-1 passes', tracking: 'none', decision: 'approved successor', changed: 'src/main.mjs', verification: 'tests pass', remainingRisk: 'none', nextFirstAction: 'read packet' };
 const packet = ['목표: finish', '수용 기준: AC-1', '작업관리: none', '결정: approved', '변경: src/main.mjs', '검증: tests', '남은 일·위험: none', '다음 단위 첫 행동: read packet'].join('\n');
 
-async function fixture(t, { state = 'Delivered', runtime = null, mode = 'success', separate = false } = {}) {
+async function fixture(t, { state = 'Delivered', runtime = null, mode = 'success', separate = false, managed = false, managedProvider = 'codex' } = {}) {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'unit-executable-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const cwd = path.join(root, 'product checkout');
   const parentCwd = separate ? path.join(root, 'coordinator') : cwd;
   const bin = path.join(root, 'bin');
   await mkdir(cwd);
+  await writeFile(path.join(cwd, 'gate.mjs'), 'console.log(JSON.stringify({ok:true,covers:["AC-1"]}))');
   await mkdir(bin);
   if (separate) await mkdir(parentCwd);
   const stateRoot = path.join(root, 'state');
@@ -49,7 +52,7 @@ export async function createRuntimeAdapters({cwd,adapters}) {
   const mode = process.env.TEST_MODE;
   const receipt = input => { const identity={sessionId:'child',incarnationId:'child-incarnation',cwd:input.args.cwd,executable:'worker'}; return {...identity,task:{schema:'harness.task-receipt/1',effectKey:input.key,...identity,promptDigest:taskDigest('native prompt'),threadId:'thread',requestId:'request',turnId:'turn',activityId:'activity',packets:['handoff','result'].filter(name=>input.args[name+'Path']).map(name=>({path:input.args[name+'Path'],digest:input.args[name+'Digest']}))}}};
   const sessionRunner = process.env.TEST_RUNTIME ? createSessionRunner({runtime:process.env.TEST_RUNTIME,command:adapters.command,pollAttempts:1,
-    taskTransport:{async observe({prompt,packets}) {return {state:'started',promptDigest:taskDigest(prompt),threadId:'thread',requestId:'request',turnId:'turn',activityId:'activity',packets}}},
+    taskTransport:{async identity() { const state=JSON.parse(await readFile(process.env.TEST_NATIVE)); return {threadId:/--session-id' '([^']+)'/.exec(state.command ?? '')?.[1] ?? 'thread'}; }, async observe({prompt,packets}) {return {state:'started',promptDigest:taskDigest(prompt),threadId:'thread',requestId:'request',turnId:'turn',activityId:'activity',packets}}},
     parent:{sessionId:'parent',incarnationId:${JSON.stringify(incarnationId)},cwd:parentCwd},launch:args=>['worker','--unit',args.unit],
     async runtimeRpc(method,params){const result=await adapters.command('orca-rpc',[method,JSON.stringify(params)],{cwd});if(result.exitCode!==0)throw Error('RPC failed');return JSON.parse(result.stdout)}}) : {
     contractVersion:'harness.session-adapter/1',capabilities:['fix-forward','failure-classification-five-way','retry-limit','ops-e0-only','policy-review'],
@@ -58,7 +61,7 @@ export async function createRuntimeAdapters({cwd,adapters}) {
     async verify(input){await trace({event:'verify',...input});if(mode==='finalize'&&input.effect==='session.close'&&JSON.parse(await readFile(process.env.TEST_NATIVE,'utf8')).closed)return {status:'completed',result:{closed:true,sessionId:'parent',incarnationId:${JSON.stringify(incarnationId)}}};return {status:'unknown'}}
   };
   return {sessionRunner,git:{async inspectUnit({record}) {await trace({event:'inspect',state:record.state,cwd});const inspections=(await readFile(process.env.TEST_TRACE,'utf8')).trim().split('\\n').map(JSON.parse).filter(row=>row.event==='inspect').length;return {head:'head-1',contentFingerprint:mode==='changed'||(mode==='late-close-change'&&inspections>=3)?'changed':'fp-1'}}},
-    gates:{async describe(id){await trace({event:'describe',id,cwd});return {id,command:['gate',id],files:[{path:'src/main.mjs',content:'source'}],format:'exec',reportPath:'reports/'+id+'.json'}},
+    gates:{async describe(id){await trace({event:'describe',id,cwd});return {id,command:[process.execPath,'gate.mjs'],files:[{path:'gate.mjs',content:await readFile(cwd+'/gate.mjs','utf8')}],format:'exec',resultFormat:'json',reportPath:'reports/'+id+'.json'}},
       async run(gate){await trace({event:'gate',id:gate.id,cwd});return {exit:0,ok:true,covers:['AC-1'],report:'{}',reportPath:gate.reportPath,verdict:'green',path:gate.reportPath,key:'original:'+gate.id}}}};
 }`);
   if (runtime) {
@@ -74,7 +77,7 @@ if(binary==='ps'){
  const child=args.includes('202')||args.includes('203')||args.includes('ttys2');const mode=process.env.TEST_MODE;
  if(args.includes('pid=,pgid=,tpgid=,comm=')){
   if(child){s.scans=(s.scans??0)+1;writeFileSync(process.env.TEST_NATIVE,JSON.stringify(s))}
-  let rows=child?'202 202 202 worker\\n':'101 101 101 worker\\n';
+  let rows=child?('202 202 202 '+(process.env.TEST_MANAGED?process.env.TEST_PROVIDER:'worker')+'\\n'):'101 101 101 worker\\n';
   if(child&&mode.startsWith('wrapped')){
    rows='202 202 202 /usr/bin/login\\n203 202 202 /bin/worker\\n';
    if(mode==='wrapped-mismatch')rows=rows.replace('/bin/worker','/bin/shell');
@@ -87,7 +90,7 @@ if(binary==='ps'){
  }else if(args.includes('lstart=')){
   if(child){s.starts=(s.starts??0)+1;writeFileSync(process.env.TEST_NATIVE,JSON.stringify(s))}
   process.stdout.write(child&&mode==='wrapped-reused'&&s.starts>1?'CHANGED\\n':'START\\n');
- }else process.stdout.write(args.includes('tty=,pgid=,comm=')?(child?'ttys2 202 worker\\n':'ttys1 101 worker\\n'):'worker\\n');
+ }else process.stdout.write(args.includes('tty=,pgid=,comm=')?(child?('ttys2 202 '+(process.env.TEST_MANAGED?process.env.TEST_PROVIDER:'worker')+'\\n'):'ttys1 101 worker\\n'):'worker\\n');
 }
 else if(binary==='lsof'){
  const child=args.includes('202')||args.includes('203');const mode=process.env.TEST_MODE;
@@ -98,7 +101,7 @@ else if(binary==='lsof'){
 else if(binary==='orca-rpc'){
  const params=JSON.parse(args[1]);const child=params.terminal==='child';
  s.epoch=(s.epoch??0)+1;writeFileSync(process.env.TEST_NATIVE,JSON.stringify(s));
- const evidence={authorityGeneration:'generation-1',observationEpoch:s.epoch,capturedAgeMs:0,ptyId:params.terminal,ptyIncarnationId:params.expectedIncarnationId,verdict:'live',processName:'worker',fence:{platform:'posix',shellPid:1,shellStartTime:'START',tty:child?'ttys2':'ttys1',foregroundPgid:child?202:101,process:{pid:child?202:101,startTime:'START'}}};
+ const evidence={authorityGeneration:'generation-1',observationEpoch:s.epoch,capturedAgeMs:0,ptyId:params.terminal,ptyIncarnationId:params.expectedIncarnationId,verdict:'live',processName:child&&process.env.TEST_MANAGED?process.env.TEST_PROVIDER:'worker',fence:{platform:'posix',shellPid:1,shellStartTime:'START',tty:child?'ttys2':'ttys1',foregroundPgid:child?202:101,process:{pid:child?202:101,startTime:'START'}}};
  if(process.env.TEST_MODE==='native-no-process')evidence.verdict='unknown';
  if(process.env.TEST_MODE==='native-stale')evidence.capturedAgeMs=2001;
  if(child&&process.env.TEST_MODE==='native-process-changed'){s.inspections=(s.inspections??0)+1;writeFileSync(process.env.TEST_NATIVE,JSON.stringify(s));if(s.inspections>1)evidence.fence.process.startTime='CHANGED'}
@@ -115,8 +118,8 @@ else if(binary==='cmux'){
   output({windows:[{id:'window',workspaces:[{id:'parent-workspace',title:'parent',panes:[{surfaces:[{id:'parent',type:'terminal',tty:'ttys1'}]}]},...(child?[{id:'child-workspace',title:s.title,panes:[{surfaces:[{id:'child',type:'terminal',tty:'ttys2'},...extra]}]}]:[])]}]});
  }
 } else {
- const terminal=id=>({handle:id,incarnationId:id+'-incarnation',worktreePath:id==='parent'?'/registered/coordinator-root':process.env.TEST_PRODUCT,connected:true,writable:true,title:s.title,worktreeId:'worktree',executionHostId:'local'});
- if(args.includes('create')){s.child=true;s.title=args[args.indexOf('--title')+1];writeFileSync(process.env.TEST_NATIVE,JSON.stringify(s));output({ok:true,result:{terminal:terminal('child')}})}
+ const terminal=id=>({handle:id,incarnationId:id+'-incarnation',worktreePath:id==='parent'?'/registered/coordinator-root':process.env.TEST_PRODUCT,connected:true,writable:true,orphaned:id==='child'&&process.env.TEST_MODE==='native-orphan',title:['native-title-changed','native-orphan'].includes(process.env.TEST_MODE)?'renamed':s.title,worktreeId:'worktree',executionHostId:'local'});
+ if(args.includes('create')){s.child=true;s.title=args[args.indexOf('--title')+1];s.command=args[args.indexOf('--command')+1];writeFileSync(process.env.TEST_NATIVE,JSON.stringify(s));output({ok:true,result:{terminal:terminal('child')}})}
  else if(args.includes('list'))output({ok:true,result:{terminals:child?[terminal('child')]:[]}});
  else output({ok:true,result:{terminal:terminal(args[args.indexOf('--terminal')+1])}});
 }
@@ -129,7 +132,7 @@ else if(binary==='cmux'){
   }
   const run = command => {
     const process = spawnSync(globalThis.process.execPath, [cli, 'unit', command, 'unit-a', '--adapters', providers, '--state-root', stateRoot, '--project-root', cwd, ...(command === 'finish' ? ['--request', request] : [])], {
-      cwd, encoding: 'utf8', env: { ...globalThis.process.env, PATH: `${bin}${path.delimiter}${globalThis.process.env.PATH}`, ORCA_TERMINAL_HANDLE: 'parent', TEST_TRACE: trace, TEST_NATIVE: nativeState, TEST_RUNTIME: runtime ?? '', TEST_MODE: mode, TEST_PARENT: parentCwd, TEST_PRODUCT: cwd },
+      cwd, encoding: 'utf8', env: { ...globalThis.process.env, PATH: `${bin}${path.delimiter}${globalThis.process.env.PATH}`, ORCA_TERMINAL_HANDLE: 'parent', TEST_TRACE: trace, TEST_NATIVE: nativeState, TEST_RUNTIME: runtime ?? '', TEST_MODE: mode, TEST_PARENT: parentCwd, TEST_PRODUCT: cwd, TEST_MANAGED: managed ? '1' : '', TEST_PROVIDER: managedProvider },
     });
     const line = process.stdout.trim().split('\n').at(-1);
     assert.match(line ?? '', /^RESULT /, process.stderr);
@@ -137,7 +140,7 @@ else if(binary==='cmux'){
   };
   const rows = async () => { try { return (await readFile(trace, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line)); } catch (error) { if (error.code === 'ENOENT') return []; throw error; } };
   const ledger = () => createLedgerStore(stateRoot).withLock('unit-a', entries => entries.read());
-  return { root, cwd, parentCwd, store, request, providers, run, rows, ledger };
+  return { root, cwd, parentCwd, stateRoot, store, request, providers, run, rows, ledger };
 }
 
 test('public executable rejects process-only generic runner completion', async t => {
@@ -245,19 +248,18 @@ for (const mode of ['wrapped-mismatch', 'wrapped-background', 'wrapped-ambiguous
   });
 }
 
-test('public executable injects Git and gate providers and preserves original evidence identity', async t => {
+test('public executable injects Git and gate descriptions and records isolated execution evidence', async t => {
   const f = await fixture(t, { state: 'SelfGated' });
   assert.equal(f.run('accept').code, 0);
   const record = await f.store.read('unit-a');
   assert.equal(record.state, 'Accepted');
   assert.equal(record.evidence.length, 5);
   for (const evidence of record.evidence) {
-    assert.equal(evidence.verdict, 'green');
-    assert.equal(evidence.path, `reports/${evidence.gate}.json`);
-    assert.equal(evidence.report, evidence.path);
-    assert.equal(evidence.key, `original:${evidence.gate}`);
+    assert.equal(evidence.execution.kind, 'isolated-snapshot-v1');
+    assert.equal(evidence.execution.fingerprint, evidence.fingerprint);
+    assert.match(await readFile(evidence.report, 'utf8'), /AC-1/);
   }
-  assert.ok((await f.rows()).filter(row => row.event === 'gate').every(row => row.cwd === f.cwd));
+  assert.ok((await f.rows()).filter(row => row.event === 'describe').every(row => row.cwd === f.cwd));
   assert.equal(f.run('finish').code, 3);
 });
 
@@ -363,3 +365,25 @@ test('public executable starts a detached finalizer that survives the finish cal
   assert.equal(f.run('finalize').code, 0);
   assert.equal((await f.rows()).filter(row => row.event === 'execute' && row.effect === 'session.close').length, 1);
 });
+
+for (const runtime of ['cmux','orca']) for (const provider of ['codex','claude']) for (const mode of runtime === 'orca' ? ['success','native-title-changed','native-orphan'] : ['success']) {
+  test(`managed ${runtime} ${provider} launch preserves pending goal and configured account (${mode})`, async t => {
+    const f = await fixture(t,{runtime,mode,state:'Accepted',separate:true,managed:true,managedProvider:provider});
+    const source = path.join(f.root,'goal.md'); await writeFile(source,'goal');
+    const digest = `sha256:${createHash('sha256').update('goal').digest('hex')}`;
+    const goals = createContinuityStore(f.stateRoot);
+    await goals.create({goal:{id:'g1',objective:'finish',criteria:['tested'],remaining:['unit-a','unit-next'],status:'active'},policy:{runtime,provider,account:'/account',model:'model',effort:'high',argv:[provider]},source:{path:source,digest}});
+    const incarnationId = runtime === 'cmux' ? 'ttys1:101:START' : 'parent-incarnation';
+    await goals.transaction('g1',current=>({...current,revision:current.revision+1,bootstraps:[{unit:'unit-a',sessionId:'parent',incarnationId,cwd:f.parentCwd}]}));
+    await f.store.update('unit-a',current=>({...current,continuityRequired:true,continuity:{goalId:'g1'}}));
+    const outcome = f.run('finish');
+    assert.equal(outcome.code,3,JSON.stringify(outcome));
+    const started = (await f.rows()).find(row=>row.binary===runtime && row.args.includes(runtime==='cmux'?'new-workspace':'create'));
+    assert.ok(started,JSON.stringify(await f.rows()));
+    const command = started.args[started.args.indexOf('--command')+1];
+    assert.ok(command.includes(provider === 'codex' ? "CODEX_HOME='/account'" : "CLAUDE_CONFIG_DIR='/account'")); assert.doesNotMatch(command,/goal snapshot/);
+    const ledger = await f.ledger(); const intent = ledger.find(row=>row.effect==='session.start');
+    assert.ok(intent.args.goalPath); assert.ok(intent.args.goalDigest);
+    assert.equal(ledger.some(row=>row.event==='result' && row.seq===intent.seq),false,JSON.stringify(ledger));
+  });
+}

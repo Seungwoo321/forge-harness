@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { observeTask, taskDigest, validateTaskReceipt } from './lib/session-task.mjs';
+import { observeTask, observeGoalTask, taskDigest, validateTaskReceipt } from './lib/session-task.mjs';
 import { createCodexTaskTransport } from './lib/codex-task.mjs';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
@@ -24,6 +24,27 @@ test('pending input submits conditionally once; accepted input never submits twi
     assert.equal((await observeTask({ transport, observed, input, prompt: 'prompt', packets, submit: true })).task.activityId, 'tool');
   }
   assert.equal(sends, 1);
+});
+
+test('native goal submission is never repeated after an uncertain result', async () => {
+  let state='absent', sends=0;
+  const goalInput={...input,args:{...input.args,goalPath:packets[0].path,goalDigest:packets[0].digest}};
+  const evidence={state:'started',threadId:'thread',turnId:'turn',activityId:'activity',packets,
+    goal:{threadId:'thread',status:'active',objective:'finish'}};
+  const transport={observeGoal:async()=>state==='started'?evidence:{state}};
+  const submission={}, options={transport,observed,input:goalInput,prompt:'finish',packets,submission,submit:async(_request,mark)=>{mark();sends+=1;}};
+  await assert.rejects(observeGoalTask(options),/has not started/);
+  await assert.rejects(observeGoalTask(options),/has not started/);
+  await assert.rejects(observeGoalTask({...options,submission:undefined}),/has not started/);
+  assert.equal(sends,1);
+  assert.throws(()=>validateTaskReceipt({...observed,task:{...observed,...started,schema:'harness.task-receipt/1',effectKey:goalInput.key}},goalInput),/receipt/);
+  const preflight = {};
+  await assert.rejects(observeGoalTask({...options,submission:preflight,submit:async()=>{throw Error('not ready');}}),/not ready/);
+  assert.equal(preflight.attempted,undefined);
+  state='started';
+  assert.equal((await observeGoalTask(options)).task.schema,'harness.goal-receipt/1');
+  evidence.goal.objective='wrong';
+  await assert.rejects(observeGoalTask(options),/receipt/);
 });
 
 test('native metadata selects the unique primary thread among child locks and rejects ambiguity', async t => {
@@ -51,13 +72,46 @@ test('multi-lock identity must belong to the observed process and remains fenced
   const child = '00000000-0000-0000-0000-000000000002';
   let chosen = root;
   const transport = createCodexTaskTransport({ command: async (binary, _args, options) => {
-    if (binary === 'lsof') return { exitCode: 0, stdout: `n/x/thread-writer-locks/${child}.lock\nn/x/thread-writer-locks/${root}.lock\n` };
+    if (binary === 'lsof') return { exitCode: 0, stdout: `n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${child}.lock\nn${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${root}.lock\n` };
     assert.equal(JSON.parse(options.input).operation, 'identify');
     return { exitCode: 0, stdout: JSON.stringify({ threadId: chosen }) };
   } });
   assert.deepEqual(await transport.identity(observed), { threadId: root });
   chosen = 'unowned';
   await assert.rejects(transport.identity(observed), /not owned/);
+});
+
+test('native goal observation is bound to the same worker thread and directory', async () => {
+  const threadId = '00000000-0000-0000-0000-000000000001';
+  let cwd = observed.cwd;
+  const transport = createCodexTaskTransport({ command: async (binary, _args, options) => {
+    if (binary === 'lsof') return { exitCode: 0, stdout: `n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${threadId}.lock\n` };
+    const request = JSON.parse(options.input);
+    assert.equal(request.operation, 'goal');
+    return { exitCode: 0, stdout: JSON.stringify({ thread: { id: threadId, cwd }, goal: { threadId, status: 'active', objective: 'complete work' } }) };
+  } });
+  assert.equal((await transport.goal(observed)).objective, 'complete work');
+  cwd = '/other';
+  await assert.rejects(transport.goal(observed), /thread changed/);
+});
+
+test('goal activity must follow native goal creation and needs no ordinary user message', async () => {
+  const threadId = '00000000-0000-0000-0000-000000000001';
+  let startedAt = 10, itemStartedAt = 10999;
+  const transport = createCodexTaskTransport({ command: async (binary, _args, options) => {
+    if (binary === 'lsof') return { exitCode: 0, stdout: `n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${threadId}.lock\n` };
+    assert.equal(JSON.parse(options.input).operation, 'goal-observe');
+    return { exitCode: 0, stdout: JSON.stringify({ thread: { id: threadId, cwd: observed.cwd },
+      goal: { threadId, status: 'active', objective: 'finish', createdAt: 10 },
+      turns: [{ id: 'turn', startedAt, status: 'inProgress', items: [{ type: 'agentMessage', id: 'activity', startedAtMs:itemStartedAt }] }], queued: [] }) };
+  } });
+  const request = { observed, input, prompt: 'finish', packets: [] };
+  assert.equal((await transport.observeGoal(request)).state, 'accepted');
+  itemStartedAt = 11000;
+  assert.equal((await transport.observeGoal(request)).activityId, 'activity');
+  itemStartedAt = 10999; startedAt = 11;
+  assert.equal((await transport.observeGoal(request)).activityId, 'activity');
+  await assert.rejects(transport.observeGoal({ ...request, prompt: 'different' }), /differs/);
 });
 
 test('upgrading a legacy full-packet delivery observes its receipt or queue without submitting a new prompt', async t => {
@@ -73,7 +127,7 @@ test('upgrading a legacy full-packet delivery observes its receipt or queue with
     let stdout;
     if (binary === 'cmux' && args.includes('tree')) stdout = JSON.stringify({ windows: [{ workspaces: [{ id: 'workspace', panes: [{ surfaces: [{ id: 'receiver', type: 'terminal', tty: 'tty2' }] }] }] }] });
     else if (binary === 'ps') stdout = args.includes('pid=,pgid=,tpgid=,comm=') ? '22 22 22 codex\n' : 'START';
-    else if (binary === 'lsof') stdout = args.includes('-d') ? `p22\nn${root}\n` : `n/x/thread-writer-locks/${threadId}.lock\n`;
+    else if (binary === 'lsof') stdout = args.includes('-d') ? `p22\nn${root}\n` : `n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${threadId}.lock\n`;
     else if (binary === process.execPath) stdout = JSON.stringify({ thread: { id: threadId, cwd: root },
       queued: state === 'queued' ? [{ clientUserMessageId: 'key' }] : [], turns: state === 'queued' ? [] : [{ id: 'turn', status: 'completed', items: [
         { type: 'userMessage', id: 'request', content: [{ type: 'text', text: prompt }] },
@@ -146,7 +200,7 @@ test('native Codex evidence binds writer lock, exact prompt and actual packet re
   let turnStatus = 'interrupted';
   let mode = 'started';
   const command = async (binary, _args, options) => {
-    if (binary === 'lsof') return { exitCode: 0, stdout: `n/config/thread-writer-locks/${threadId}.lock\n` };
+    if (binary === 'lsof') return { exitCode: 0, stdout: `n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${threadId}.lock\n` };
     const request = JSON.parse(options.input);
     assert.equal(request.threadId, threadId);
     return { exitCode: 0, stdout: JSON.stringify({ thread: { id: threadId, cwd: observed.cwd },
@@ -173,4 +227,37 @@ test('native Codex evidence binds writer lock, exact prompt and actual packet re
     mode = value;
     await assert.rejects(observeTask(request), { code: 'SESSION_TASK_UNVERIFIED' });
   }
+});
+
+test('native worker lock must belong to the selected account', async () => {
+  const transport=createCodexTaskTransport({env:{CODEX_HOME:'/selected-account'},command:async()=>({exitCode:0,
+    stdout:'n/another-account/thread-writer-locks/00000000-0000-0000-0000-000000000001.lock\n'})});
+  await assert.rejects(transport.identity(observed),/ownership is missing/);
+});
+
+test('completed native goals retain post-goal reads verified by a later checksum command',async()=>{
+ const threadId='00000000-0000-0000-0000-000000000001';
+ let checksumStatus='completed';
+ const transport=createCodexTaskTransport({command:async(binary)=>binary==='lsof'
+  ? {exitCode:0,stdout:`n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${threadId}.lock\n`}
+  : {exitCode:0,stdout:JSON.stringify({thread:{id:threadId,cwd:observed.cwd},queued:[],
+    goal:{threadId,status:'complete',objective:'finish',createdAt:10},turns:[{id:'turn',status:'completed',startedAt:11,items:[
+     {type:'commandExecution',id:'read',cwd:'/work',status:'completed',exitCode:0,commandActions:[{type:'read',path:packets[0].path}],aggregatedOutput:packets[0].content+'\nother output'},
+     {type:'commandExecution',id:'hash',cwd:'/work',status:checksumStatus,exitCode:0,aggregatedOutput:`${packets[0].digest.slice(7)}  ${packets[0].path}\n`},
+    ]}]})}});
+ const request={observed,input,prompt:'finish',packets};
+ assert.equal((await transport.observeGoal(request)).state,'started');
+ checksumStatus='failed';
+ assert.equal((await transport.observeGoal(request)).state,'accepted');
+});
+
+test('managed custody cannot accept a receipt without verified hook enforcement',()=>{
+ const goalInput={...input,args:{...input.args,goalDigest:taskDigest('snapshot')}};
+ const identity={sessionId:observed.sessionId,incarnationId:observed.incarnationId,cwd:observed.cwd};
+ const result={...identity,task:{...identity,schema:'harness.goal-receipt/1',effectKey:input.key,promptDigest:taskDigest('finish'),goalDigest:goalInput.args.goalDigest,
+  goal:{threadId:'thread',status:'active',objective:'finish'},threadId:'thread',turnId:'turn',activityId:'activity',packets:[]}};
+ const bareInput={...goalInput,args:{cwd:observed.cwd,goalDigest:goalInput.args.goalDigest}};
+ assert.throws(()=>validateTaskReceipt(result,bareInput,{requireEnforcement:true}),/hook enforcement is unverified/);
+ result.task.enforcement={status:'verified',cwd:observed.cwd,key:'guard',hash:'hash'};
+ assert.equal(validateTaskReceipt(result,bareInput,{requireEnforcement:true}),result);
 });

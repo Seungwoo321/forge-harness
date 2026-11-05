@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { createAdapters } from './lib/adapters.mjs';
 import { createLedgerStore } from './lib/ledger.mjs';
 import { createUnitStateStore } from './lib/unit-state.mjs';
-import { finishSessionUnit } from './lib/session-flow.mjs';
+import { finishSessionUnit, finalizeSessionUnit } from './lib/session-flow.mjs';
 import { runUnitCli } from './lib/unit-driver.mjs';
 import { taskDigest } from './lib/session-task.mjs';
 
@@ -139,7 +139,7 @@ test('unit finish CLI discovers the current owner and dispatches the exact cwd',
 
 test('a mismatched current owner prevents session start and leaves the Unit Delivered', async t => {
   const { stateRoot, store, adapters } = await fixture(t, false);
-  let starts = 0;
+  let starts = 0, receipt, closed = false, deliveries = 0;
   const sessionAdapter = {
     async observe() { return { sessionId: 'other-session', cwd: '/work/next' }; },
     async execute() { starts += 1; return { sessionId: 'child-session' }; },
@@ -399,6 +399,80 @@ test('a legacy completed start is reobserved and supplemented without replacing 
   assert.deepEqual(await readFile(record.resultRef.path), originalResult);
 });
 
+test('managed goal remains open until verified successor receives both immutable packets', async t => {
+  const f = await fixture(t, false);
+  const { createContinuityStore } = await import('./lib/continuity-store.mjs');
+  const { createHash } = await import('node:crypto');
+  const source = path.join(f.root, 'goal.md');
+  await writeFile(source, 'complete both units\n');
+  const digest = `sha256:${createHash('sha256').update(await readFile(source)).digest('hex')}`;
+  const goals = createContinuityStore(f.stateRoot);
+  await goals.create({goal:{id:'goal1',objective:'complete both',criteria:['tested'],remaining:['unit-finish','unit-next'],status:'active'},policy:{runtime:'cmux',provider:'codex',account:'/account',model:'model',effort:'high',argv:['codex']},source:{path:source,digest}});
+  await goals.transaction('goal1', current => ({...current,revision:current.revision+1,bootstraps:[{unit:'unit-finish',sessionId:'parent',incarnationId:'parent-1',cwd:'/work/next'}]}));
+  await f.store.update('unit-finish', current => ({...current,continuityRequired:true,continuity:{goalId:'goal1'}}));
+  await createLedgerStore(f.stateRoot).withLock('unit-finish', async ledger => {
+    await ledger.append({event:'intent',unit:'unit-finish',seq:1,effect:'session.start',key:'initial',args:{unit:'unit-finish',role:'implementation',attempt:1}});
+    await ledger.append({event:'result',unit:'unit-finish',seq:1,key:'initial',result:{sessionId:'parent'}});
+  });
+
+  let starts = 0, receipt, closed = false, deliveries = 0;
+  const sessionAdapter = {
+    async observe({cwd}) { return {sessionId:'parent',incarnationId:'parent-1',cwd,runtime:'cmux',closable:true,worker:{incarnationId:'worker-1'}}; },
+    async execute(input) {
+      starts++;
+      const identity = {sessionId:'child',incarnationId:'child-1',cwd:input.args.cwd};
+      return receipt = {...identity,task:{...identity,schema:'harness.goal-receipt/1',effectKey:input.key,promptDigest:taskDigest('prompt'),goalDigest:input.args.goalDigest,goal:{threadId:'thread',status:'active',objective:'prompt'},threadId:'thread',turnId:'turn',activityId:'activity',packets:[{path:input.args.handoffPath,digest:input.args.handoffDigest},{path:input.args.goalPath,digest:input.args.goalDigest},{path:input.args.resultPath,digest:input.args.resultDigest}]}};
+    },
+    async verify(input) { if(input.effect === 'session.start') return {status:'completed',result:receipt}; if(input.effect === 'session.close' && closed) return {status:'completed',result:{sessionId:'parent',incarnationId:'parent-1',closed:true}}; return {status:'unknown'}; },
+  };
+  const originalExecute = sessionAdapter.execute;
+  sessionAdapter.execute = async input => { if(input.effect === 'session.deliver') { deliveries++; throw new Error('duplicate delivery'); } if(input.effect === 'session.close') {closed=true; return {sessionId:'parent',incarnationId:'parent-1',closed:true};} return originalExecute(input); };
+  const input = {stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',resultFields,handoffContent:packet,successor:{approved:true,unit:'unit-next',cwd:'/work/next'},parentSessionId:'parent',parentRuntime:{sessionId:'parent',incarnationId:'parent-1',cwd:'/work/next'},adapters:f.adapters,sessionAdapter};
+  await assert.rejects(finishSessionUnit({...input,successor:null,goalComplete:true}),{code:'GOAL_INCOMPLETE'});
+  const outcome = await finishSessionUnit(input);
+  assert.equal(outcome.finalizePending,true); assert.equal(starts,1);
+  const goal = await goals.read('goal1');
+  assert.deepEqual(goal.goal.remaining,['unit-next']);
+  assert.equal(goal.transfers[0].unit,'unit-finish');
+  assert.equal((await f.store.read('unit-finish')).state,'Delivered');
+  assert.equal((await finishSessionUnit(input)).finalizePending,true);
+  assert.equal(starts,1);
+  const final = await finalizeSessionUnit({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',adapters:{...f.adapters,session:sessionAdapter}});
+  assert.equal(final.state,'Closed'); assert.equal(deliveries,0); assert.equal(closed,true);
+});
+
+test('managed final completion requires covered goal criteria and records completion after unit closure', async t => {
+  const f = await fixture(t, false);
+  const { createContinuityStore } = await import('./lib/continuity-store.mjs');
+  const { createHash } = await import('node:crypto');
+  const source = path.join(f.root, 'goal.md'); await writeFile(source, 'finish the goal\n');
+  const digest = `sha256:${createHash('sha256').update(await readFile(source)).digest('hex')}`;
+  const goals = createContinuityStore(f.stateRoot);
+  await goals.create({goal:{id:'goal2',objective:'finish',criteria:['behavior verified'],remaining:['unit-finish'],status:'active'},policy:{runtime:'cmux',provider:'codex',account:'/account',model:'model',effort:'high',argv:['codex']},source:{path:source,digest}});
+  await f.store.update('unit-finish', current => ({...current,continuityRequired:true,continuity:{goalId:'goal2'},acceptance:[{id:'AC-1',text:'behavior verified'}],evidence:[{gate:'tests',status:'passed',exit:0,covers:['AC-1']}]}));
+  await goals.transaction('goal2', current => ({...current,revision:current.revision+1,bootstraps:[{unit:'unit-finish',sessionId:'parent',incarnationId:'parent-1',cwd:f.root}]}));
+  const parentRuntime = {sessionId:'parent',incarnationId:'parent-1',cwd:f.root};
+  const recipient = {sessionId:'supervisor',incarnationId:'supervisor-1',cwd:f.root,executable:'worker'};
+  let closed = false;
+  const session = {
+    async observe(input) { return input.recipient ? recipient : {...parentRuntime,closable:true,worker:{incarnationId:'worker-1'}}; },
+    async execute(input) {
+      if (input.effect === 'session.close') { closed = true; return {sessionId:'parent',incarnationId:'parent-1',closed:true}; }
+      const identity = {sessionId:'supervisor',incarnationId:'supervisor-1',cwd:f.root};
+      return {...identity,task:{...identity,schema:'harness.task-receipt/1',effectKey:input.key,promptDigest:taskDigest('prompt'),threadId:'thread',requestId:'request',turnId:'turn',activityId:'activity',packets:[{path:input.args.resultPath,digest:input.args.resultDigest}]}};
+    },
+    async verify(input) { return input.effect === 'session.close' && closed ? {status:'completed',result:{sessionId:'parent',incarnationId:'parent-1',closed:true}} : {status:'unknown'}; },
+  };
+  const adapters = {...f.adapters,session};
+  const input = {stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',resultFields,goalComplete:true,parentRuntime,returnTo:recipient,adapters,sessionAdapter:session};
+  await assert.rejects(finishSessionUnit(input),{code:'GOAL_INCOMPLETE'});
+  const outcome = await finishSessionUnit({...input,goalProof:[{criterion:'behavior verified',unit:'unit-finish',acceptance:'AC-1'}]});
+  assert.equal(outcome.finalizePending,true);
+  assert.equal((await goals.read('goal2')).goal.status,'active');
+  assert.equal((await finalizeSessionUnit({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',adapters})).state,'Closed');
+  assert.equal((await goals.read('goal2')).goal.status,'complete');
+});
+
 test('finish rejects acceptance and delivery policy replaced after it began', async t => {
   const f=await fixture(t,false);
   await f.store.update('unit-finish',current=>({...current,state:'Accepted'}));
@@ -410,9 +484,9 @@ test('finish rejects acceptance and delivery policy replaced after it began', as
   const finishing=finishSessionUnit({stateRoot:f.stateRoot,store:wrapped,unit:'unit-finish',resultFields,goalComplete:true,adapters:f.adapters});
   await waiting;
   const before=await f.store.read('unit-finish');
-  const {changeUnitDelivery}=await import('./lib/unit-policy-change.mjs');
+  const {changeUnitPolicy}=await import('./lib/unit-policy-change.mjs');
   const adapters={...f.adapters,provider:{async verifyUserInput(input){return {...input,verified:true};}}};
-  await changeUnitDelivery({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',request:{id:'merge',expectedRevision:before.revision,delivery:'merge',reason:'user selected merge'},userInputRef:'user',adapters});
+  await changeUnitPolicy({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',request:{id:'merge',expectedRevision:before.revision,delivery:'merge',reason:'user selected merge'},userInputRef:'user',adapters});
   await f.store.update('unit-finish',current=>({...current,state:'Accepted',accepted:{head:'head-1',contentFingerprint:'sha256:current',repo:'r',branch:'b',tree:'t',indexTree:'t',headTree:'t',base:'main'}}));
   const rejected=assert.rejects(finishing,{code:'DELIVERY_PLAN_MISMATCH'});
   resolveRelease(); await rejected;
@@ -425,8 +499,8 @@ test('finish rejects policy changed away and back even if acceptance is identica
   let reads=0; const wrapped={...f.store,read:async unit=>{if(++reads===2){resolveWaiting();await release;}return f.store.read(unit);}};
   const original=await f.store.read('unit-finish');
   const finishing=finishSessionUnit({stateRoot:f.stateRoot,store:wrapped,unit:'unit-finish',resultFields,goalComplete:true,adapters:f.adapters}); await waiting;
-  const {changeUnitDelivery}=await import('./lib/unit-policy-change.mjs'); const adapters={...f.adapters,provider:{async verifyUserInput(input){return {...input,verified:true};}}};
-  for(const delivery of ['merge','none']){const current=await f.store.read('unit-finish');await changeUnitDelivery({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',request:{id:`change-${delivery}`,expectedRevision:current.revision,delivery,reason:'authorized'},userInputRef:'user',adapters});}
+  const {changeUnitPolicy}=await import('./lib/unit-policy-change.mjs'); const adapters={...f.adapters,provider:{async verifyUserInput(input){return {...input,verified:true};}}};
+  for(const delivery of ['merge','none']){const current=await f.store.read('unit-finish');await changeUnitPolicy({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',request:{id:`change-${delivery}`,expectedRevision:current.revision,delivery,reason:'authorized'},userInputRef:'user',adapters});}
   await f.store.update('unit-finish',current=>({...current,state:'Accepted',accepted:original.accepted}));
   const rejected=assert.rejects(finishing,{code:'DELIVERY_PLAN_MISMATCH'}); resolveRelease(); await rejected;
   assert.equal((await f.store.read('unit-finish')).state,'Accepted');
@@ -442,6 +516,23 @@ test('approved same-session continuation closes only the unit and preserves rema
   const record=await f.store.read('unit-finish');assert.deepEqual(record.next,{unit:'next-work',sameSession:true});
   const text=await readFile(record.resultRef.path,'utf8');assert.match(text,/다음 작업 단위: next-work\n$/);assert.doesNotMatch(text,/단위 종료 —/);
   assert.deepEqual(await createLedgerStore(f.stateRoot).withLock('unit-finish',ledger=>ledger.read()),[]);
+});
+
+test('managed same-session continuation closes the unit and transfers its goal custody without launching', async t => {
+  const f=await fixture(t,false); await f.store.update('unit-finish',current=>({...current,state:'Accepted',continuity:{goalId:'goal1'}}));
+  const {createContinuityStore}=await import('./lib/continuity-store.mjs');
+  const source=path.join(f.root,'goal.md');await writeFile(source,'goal');
+  const goals=createContinuityStore(f.stateRoot);
+  await goals.create({goal:{id:'goal1',objective:'goal',criteria:['done'],remaining:['unit-finish','unit-next'],status:'active'},
+    policy:{runtime:'cmux',provider:'codex',account:'/account',model:'model',effort:'high',argv:['codex']},source:{path:source,digest:taskDigest('goal')}});
+  const owner={sessionId:'parent',incarnationId:'parent-1',cwd:'/work/next'};
+  await goals.transaction('goal1',current=>({...current,revision:current.revision+1,bootstraps:[{unit:'unit-finish',...owner}]}));
+  let effects=0;
+  const outcome=await finishSessionUnit({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',resultFields,parentRuntime:owner,
+    sameSession:{approved:true,nextUnit:'unit-next'},adapters:f.adapters,sessionAdapter:{async observe(){effects++;},async execute(){effects++;},async verify(){effects++;}}});
+  assert.equal(outcome.state,'Closed');assert.equal(effects,0);
+  const goal=await goals.read('goal1');assert.deepEqual(goal.goal.remaining,['unit-next']);
+  assert.deepEqual(goal.bootstraps.at(-1),{unit:'unit-next',attempt:1,...owner});
 });
 
 test('same-session continuation rejects conflicting transfer and changed retry', async t => {
@@ -492,9 +583,9 @@ test('same-session delivery may change after an authorized policy revision and r
   delete f.adapters.git.inspectUnit;
   const base={stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',resultFields,sameSession:{approved:true,nextUnit:'next-work'},adapters:f.adapters};
   await assert.rejects(finishSessionUnit(base),{code:'ADAPTER_MISSING'});
-  const {changeUnitDelivery}=await import('./lib/unit-policy-change.mjs');const current=await f.store.read('unit-finish');
+  const {changeUnitPolicy}=await import('./lib/unit-policy-change.mjs');const current=await f.store.read('unit-finish');
   const adapters={...f.adapters,provider:{async verifyUserInput(input){return {...input,verified:true};}}};
-  await changeUnitDelivery({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',request:{id:'merge',expectedRevision:current.revision,delivery:'merge',reason:'authorized'},userInputRef:'user',adapters});
+  await changeUnitPolicy({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',request:{id:'merge',expectedRevision:current.revision,delivery:'merge',reason:'authorized'},userInputRef:'user',adapters});
   await f.store.update('unit-finish',r=>({...r,state:'Accepted',accepted:{head:'head-1',contentFingerprint:'sha256:current'}}));
   await assert.rejects(finishSessionUnit(base),{code:'ADAPTER_MISSING'});
   const updated=await f.store.read('unit-finish');assert.equal(updated.sameSessionContinuation.delivery,'merge');assert.equal(updated.sameSessionContinuation.bindings.length,2);

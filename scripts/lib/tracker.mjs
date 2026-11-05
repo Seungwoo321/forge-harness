@@ -138,6 +138,7 @@ export async function commitTerminalClose({ store, unit, git, sessionStart, sess
       && sessionClose.result.sessionId === current.sessionFinalization.owner.sessionId
       && sessionClose.result.incarnationId === current.sessionFinalization.owner.incarnationId) return current;
     if (current.state !== 'Delivered') throw errorWithCode('INVALID_TRANSITION', 'terminal close requires a Delivered unit');
+    if (current.continuityRequired && !current.goalCompletion && !current.next?.handoff) throw errorWithCode('CONTINUITY_REQUIRED', 'goal completion or verified successor is required');
     if (current.sessionFinalization && (!['completed', 'duplicate', 'reconciled'].includes(sessionClose?.status)
       || sessionClose.result?.closed !== true || sessionClose.result.sessionId !== current.sessionFinalization.owner.sessionId
       || sessionClose.result.incarnationId !== current.sessionFinalization.owner.incarnationId)) throw errorWithCode('SESSION_CLOSE_PENDING', 'exact owner closure must be verified');
@@ -154,7 +155,7 @@ export async function commitTerminalClose({ store, unit, git, sessionStart, sess
 
 export async function closeDeliveredUnit({ store, unit, adapter, queue, now, git }) {
   const record = await revalidateTerminalTarget({ store, unit, git });
-  if (record?.next?.handoff || record?.sessionFinalization || record?.state === 'SelfGated') return { ...record, closePending: true };
+  if (record?.next?.handoff || record?.sessionFinalization || record?.continuityRequired || record?.state === 'SelfGated') return { ...record, closePending: true };
   const projected = await projectTerminalUnit({ store, unit, adapter, queue, now, git });
   if (!projected.projected) return { ...projected.record, closePending: true };
   const closed = await commitTerminalClose({ store, unit, git });

@@ -41,7 +41,7 @@ export function createRuntimeAdapters({ cwd, adapters }) {
       contentFingerprint: createHash('sha256').update(await readFile(path.join(cwd, 'main.txt'))).digest('hex'),
     }; } },
     gates: {
-      async describe(id) { return { id, command: ['test', id], format: 'exec',
+      async describe(id) { return { id, command: [process.execPath, '-e', 'console.log(JSON.stringify({ok:true,covers:["AC-1"]}))'], format: 'exec', resultFormat: 'json',
         files: [{ path: 'main.txt', content: await readFile(path.join(cwd, 'main.txt'), 'utf8') }] }; },
       async run(gate) { return { exit: 0, ok: true, covers: ['AC-1'], report: '{}', reportPath: gate.id+'.json' }; },
     },

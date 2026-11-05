@@ -35,3 +35,13 @@ test('compliance gate identifies skill writes, control LLM calls and forbidden c
     ]));
   } finally { await f.cleanup(); }
 });
+
+test('compliance gate reports a conformance requirement ID that is reused for another requirement', async () => {
+  const f = await fixture();
+  try {
+    await writeFile(path.join(f.root, 'docs', 'spec.md'), ['| ID | 요구 | 검증 |', '|---|---|---|', '| H-PO-07 | reviewer selection | T |', '| H-PO-08 | inferred decisions | T |', '| H-PO-07 | active-unit policy change | T |'].join('\n'));
+    const result = await runCompliance(f.root);
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.findings, [{ file: path.join('docs', 'spec.md'), rule: 'duplicate-conformance-id', match: 'H-PO-07 (lines 3 and 5)' }]);
+  } finally { await f.cleanup(); }
+});

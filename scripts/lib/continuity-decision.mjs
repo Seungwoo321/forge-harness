@@ -56,7 +56,8 @@ export function composeGoalPrompt({ goal, policy, handoff }) {
     `Completion criteria: ${goal.criteria.join('; ')}`,
     `Remaining units: ${goal.remaining.join(', ') || '(none)'}`,
     `Execution policy: ${policy.runtime}, ${policy.provider}, ${policy.account}, ${policy.model}, ${policy.effort}`,
-    `Read ${handoff.path} (${handoff.digest}) and follow its referenced context.`,
+    // Claude receipts are verified from Read tool results; a shell cat leaves the start unverified.
+    `${policy.provider === 'claude' ? 'With the Read tool, read' : 'Read'} ${handoff.path} (${handoff.digest}) and follow its referenced context.`,
     'On unit completion or a blocker, use the session handoff and finish skills; do not declare the overall goal complete while work remains.',
   ].join(' ');
 }

@@ -21,7 +21,8 @@ export function buildManagedLaunch({ goal, policy, handoff, goalRef, effectKey, 
   }
   if (cwd !== undefined && !path.isAbsolute(cwd)) throw Object.assign(new TypeError('launch cwd must be absolute'), {code:'CONTINUITY_INVALID'});
   const displayPath = file => cwd ? path.relative(cwd, file) || '.' : file;
-  const prompt = [composeGoalPrompt({ goal, policy, handoff:{...handoff,path:displayPath(handoff.path)} }), `Read ${displayPath(goalRef.path)} (${goalRef.digest}) as the authoritative goal snapshot.`, ...packets.filter(packet=>packet.path!==handoff.path && packet.path!==goalRef.path).map(packet => `Read ${displayPath(packet.path)} (${packet.digest}).`)].join(' ');
+  const read = policy.provider === 'claude' ? 'With the Read tool, read' : 'Read';
+  const prompt = [composeGoalPrompt({ goal, policy, handoff:{...handoff,path:displayPath(handoff.path)} }), `${read} ${displayPath(goalRef.path)} (${goalRef.digest}) as the authoritative goal snapshot.`, ...packets.filter(packet=>packet.path!==handoff.path && packet.path!==goalRef.path).map(packet => `${read} ${displayPath(packet.path)} (${packet.digest}).`)].join(' ');
   if (policy.provider === 'claude' && [...prompt].length > 4000) throw Object.assign(new RangeError('Claude goal exceeds its 4000-character limit'), {code:'CONTINUITY_INVALID'});
   return { argv: [...policy.argv, ...options], env, goalPrompt: prompt };
 }

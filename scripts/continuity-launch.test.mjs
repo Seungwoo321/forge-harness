@@ -11,6 +11,8 @@ test('account and model selection are passed as explicit process data for both p
     assert.deepEqual(result.env,provider === 'codex' ? {CODEX_HOME:'/accounts/work'} : {CLAUDE_CONFIG_DIR:'/accounts/work'});
     assert.ok(result.argv.includes('--model')); assert.ok(result.argv.includes('model'));
     assert.match(result.goalPrompt,/handoff\.md/);
+    // Claude receipts are verified from Read tool results, so its prompt names the tool for every packet.
+    assert.equal((result.goalPrompt.match(/With the Read tool, read /g) ?? []).length, provider === 'claude' ? 2 : 0);
     assert.ok(!result.argv.includes(result.goalPrompt));
   }
 });

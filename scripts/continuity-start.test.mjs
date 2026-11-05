@@ -63,3 +63,22 @@ test('a worker that cannot observe its hooks starts without enforcement; an obse
     else { const outcome = await run.catch(error => ({status:'rejected', error})); assert.notEqual(outcome.status,'completed'); assert.equal((await goals.read('g3')).bootstraps?.length ?? 0, 0); }
   });
 });
+
+test('an uncertain start is re-observed within the call until the receipt verifies, then registered', async t => {
+  const root = await mkdtemp(path.join(tmpdir(),'continuity-start-wait-')); t.after(()=>rm(root,{recursive:true,force:true}));
+  const source = path.join(root,'goal.md'); await writeFile(source,'goal');
+  const handoff = path.join(root,'handoff.md'); const packet = ['목표: goal','수용 기준: criteria','작업관리: unit','결정: policy','변경: none','검증: none','남은 일·위험: work','다음 단위 첫 행동: begin'].join('\n'); await writeFile(handoff,packet);
+  const goals = createContinuityStore(root), store = createUnitStateStore(root);
+  await goals.create({goal:{id:'g1',objective:'goal',criteria:['done'],remaining:['u1'],status:'active'},policy:{runtime:'orca',provider:'codex',account:'/account',model:'model',effort:'high',argv:['codex']},source:{path:source,digest:hash('goal')}});
+  await store.create({schema:'harness.unit/1',unit:'u1',kind:'impl',state:'Scoped',continuity:{goalId:'g1'},policy:{goal:{class:'product-prelaunch'}}});
+  let launches = 0, checks = 0, sleeps = 0;
+  const receiptFor = input => { const identity={sessionId:'child',incarnationId:'v2',cwd:input.args.cwd}; return {...identity,task:{...identity,schema:'harness.goal-receipt/1',enforcement:{status:'verified',cwd:root,key:'guard',hash:'hash'},effectKey:input.key,promptDigest:taskDigest('prompt'),goalDigest:input.args.goalDigest,goal:{threadId:'thread',status:'active',objective:'prompt'},threadId:'thread',turnId:'turn',activityId:'activity',packets:[{path:input.args.handoffPath,digest:input.args.handoffDigest},{path:input.args.goalPath,digest:input.args.goalDigest}]}}; };
+  const session = {async observe(){return {sessionId:'parent',incarnationId:'v1',cwd:root,runtime:'orca'}},
+    async execute(){ launches++; throw Object.assign(new Error('receipt not yet observable'),{taskState:'accepted'}); },
+    async verify(input){ checks++; return checks < 3 ? {status:'unknown'} : {status:'completed',result:receiptFor(input)}; }};
+  const request = {cwd:root,handoffPath:handoff,handoffDigest:hash(packet),parentRuntime:{sessionId:'parent',incarnationId:'v1',cwd:root}};
+  const result = await startGoalSession({stateRoot:root,unit:'u1',request,store,adapters:{session,now:()=>new Date().toISOString(),sleep:async()=>{sleeps++;}}});
+  assert.ok(['completed','reconciled','duplicate'].includes(result.status), JSON.stringify(result));
+  assert.equal(launches,1); assert.ok(sleeps >= 1);
+  assert.equal((await goals.read('g1')).bootstraps[0].sessionId,'child');
+});

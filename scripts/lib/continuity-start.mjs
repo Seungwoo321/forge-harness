@@ -47,11 +47,22 @@ export async function startGoalSession({ stateRoot, unit, request, store, adapte
     // (Claude) records no enforcement and relies on the host-enabled, trusted Stop hook.
     return validateTaskReceipt(result,input,{requireEnforcement:result?.task?.enforcement !== undefined});
   };
-  const result = await executeEffect({unit,effect:'session.start',args,policy,context:{explicitUserInstruction:true,productOwned:true},store:createLedgerStore(stateRoot),adapter:{
+  const start = () => executeEffect({unit,effect:'session.start',args,policy,context:{explicitUserInstruction:true,productOwned:true},store:createLedgerStore(stateRoot),adapter:{
     now:adapters.now,
     async execute(input) { return validate(await adapters.session.execute(input), input); },
-    async verify(input) { const observed = await adapters.session.verify(input); if (observed.status === 'completed') { try { validate(observed.result,input); } catch { return {status:'unknown'}; } } return observed; },
+    async verify(input) { const observed = await adapters.session.verify(input); if (observed.status === 'completed') { try { validate(observed.result,input); } catch (error) { return {status:'unknown',verify:{code:'RECEIPT_INVALID',message:error.message}}; } } return observed; },
   }});
+  // A new worker often has not produced a verifiable receipt yet. Re-observe the same intent for a bounded time so the
+  // owner's call itself records the registration; returning early left owner and reviewer waiting on each other.
+  const waitSeconds = Number.isSafeInteger(request.waitSeconds) && request.waitSeconds >= 0 ? Math.min(request.waitSeconds, 900) : 180;
+  const intervalSeconds = 10;
+  const sleep = adapters.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  let result = await start();
+  // Only a start that has not produced a receipt yet is worth waiting for; a receipt that fails validation is final.
+  for (let waited = 0; result.status === 'uncertain' && result.verification?.code !== 'RECEIPT_INVALID' && waited < waitSeconds; waited += intervalSeconds) {
+    await sleep(intervalSeconds * 1000);
+    result = await start();
+  }
   if (!['completed','duplicate','reconciled'].includes(result.status)) return result;
   await goals.transaction(goal.goal.id, current => {
     const field = review ? 'reviews' : 'bootstraps';

@@ -23,3 +23,7 @@ For non-interactive starts, pass `--non-interactive`. The CLI uses the configure
 Use the Unit Record and effect ledger through the unit CLI. Do not recreate a unit with a different request under the same ID.
 
 If a command leaves the unit `Blocked`, keep this owning session active and do not write a terminal result. Supervise the bounded resolver path, wait for its completed root-cause submission, then run `unit resume` and continue at the returned original stage in this same session.
+
+## Remote failure after acceptance
+
+When a check outside the harness (remote CI, a deployment gate) fails after the unit was accepted and before it is delivered, do not fix it with a commit outside the unit. Run `scripts/unit.mjs unit reopen <unit> --request <file>` with `{"expectedRevision", "reason", "evidence"}` (evidence: the failing run's URL or log reference). The unit returns to Implementing with its acceptance cleared; open the implement stage, fix, and go through gates and independent review again. Widen the scope with `unit scope amend` if the fix touches paths outside it.

@@ -169,6 +169,12 @@ export async function finishSessionUnit({
     returnTo = recipient;
     if (owner.closable !== true || !owner.incarnationId || !owner.worker?.incarnationId) throw Object.assign(new Error('return requires a runtime-authorized closable worker'), { code: 'SESSION_OWNER_MISMATCH' });
   }
+  // A managed worker that completes the goal must hand its result to an existing recipient so the control plane
+  // can close it; finishing without one leaves the worker session running after the goal is complete.
+  if (goalComplete && !returnTo && parentRuntime && typeof sessionAdapter?.observe === 'function') {
+    await observeParent();
+    if (owner?.closable === true) throw Object.assign(new Error('final goal session requires returnTo: the existing session that receives the result (e.g. the orchestrator)'), { code: 'RETURN_RECIPIENT_REQUIRED' });
+  }
   if (successor?.approved) {
     validateHandoffPacket(handoffContent);
     lineValue(successor.unit, 'successor unit');

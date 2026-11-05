@@ -289,7 +289,10 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       try { result = await observeTask({ transport, observed, input, prompt: legacyPrompt, packets }); }
       catch (error) { if (error.taskState !== 'ready') throw error; }
     }
-    try { result ??= await observeTask({ transport, observed, input, prompt, packets, submit: Boolean(submission) && !submission.attempted }); }
+    // The recipient owns the goal already; an interactive delivery is received once it reads the result in full.
+    // Requiring the goal snapshot too left deliveries unverified when owners skipped or partially read it.
+    const required = interactive ? packets.filter(packet => packet.path === input.args.resultPath) : packets;
+    try { result ??= await observeTask({ transport, observed, input, prompt, packets: required.length ? required : packets, submit: Boolean(submission) && !submission.attempted }); }
     catch (error) {
       if (!submission && error.notApplied === true && runtime === 'cmux' && !taskTransport
         && (path.basename(observed.executable) === 'claude' ? claudeComposerMatches : codexComposerMatches)(await invoke('cmux', ['read-screen', '--workspace', observed.workspaceId, '--surface', observed.sessionId], observed.cwd), prompt)) {

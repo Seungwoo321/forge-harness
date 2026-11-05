@@ -45,6 +45,25 @@ test('Codex accepts the goal command menu when a narrow terminal hides the Ready
   assert.equal(entered,1);
 });
 
+test('a long objective that scrolls the Claude composer is still submitted once its visible tail settles', async () => {
+  let draft='', entered=0;
+  const width=30, visible=3;
+  const read=async()=>{
+    if (!draft) return `────────────\n❯ Try "example"\n────────────\n shift+tab`;
+    const rows=[]; for (let i=0;i<draft.length;i+=width) rows.push(draft.slice(i,i+width));
+    const shown=rows.slice(-visible);
+    return `────────────\n❯ ${shown[0]}\n${shown.slice(1).map(r=>`  ${r}`).join('\n')}\n────────────\n shift+tab`;
+  };
+  const objective='Finish the unit with gates, review and handoff, then read the immutable packet references in full.';
+  await submitNativeGoal({provider:'claude',objective,read,write:async text=>{draft+=text;},enter:async()=>{entered+=1;},verify:async()=>{}});
+  assert.equal(draft,`/goal ${objective}`);assert.equal(entered,1);
+  // A clipped view of different text is still rejected.
+  draft=''; let wrong=0;
+  await assert.rejects(submitNativeGoal({provider:'claude',objective,read:async()=>draft ? `────────────\n❯ ${draft==='/goal'?'/goal':'something else entirely'}\n────────────\n shift+tab` : `────────────\n❯ \n────────────\n shift+tab`,
+    write:async text=>{draft+=text;},enter:async()=>{wrong+=1;},verify:async()=>{}}));
+  assert.equal(wrong,0);
+});
+
 test('long objectives avoid a folded paste burst before separate submission',async()=>{
  let draft='',last=0,entered=false;
  const objective='Read the immutable packets. '.repeat(15);

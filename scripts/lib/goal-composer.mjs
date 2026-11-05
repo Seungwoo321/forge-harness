@@ -62,8 +62,21 @@ export async function submitNativeGoal({ provider, objective, read, write, newli
     if (part) await type(part);
   }
   const expected = `/goal ${objective}`;
-  const matchesDraft = screen => typeof screen?.draft === 'string'
-    ? screen.draft === expected : matches(contents(screen, provider), expected);
+  // A long objective scrolls the composer so only its tail is visible; accept a display that matches a suffix
+  // through the end. The exact goal text is still verified from the transcript after submission.
+  const matchesClipped = display => {
+    const first = display.split('\n')[0];
+    if (!first) return false;
+    for (let index = expected.indexOf(first); index > 0; index = expected.indexOf(first, index + 1)) {
+      if (matches(display, expected.slice(index))) return true;
+    }
+    return false;
+  };
+  const matchesDraft = screen => {
+    if (typeof screen?.draft === 'string') return screen.draft === expected;
+    const display = contents(screen, provider);
+    return matches(display, expected) || matchesClipped(display);
+  };
   let settled = 0;
   for (let attempt = 0; attempt < 20; attempt += 1) {
     await new Promise(resolve => setTimeout(resolve, 300));

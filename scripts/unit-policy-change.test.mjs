@@ -38,6 +38,8 @@ test('public policy change preserves history, revalidates acceptance and retries
   const result=await f.run(request); assert.equal(result.code,0,JSON.stringify(result));
   const after=await f.read(); assert.equal(after.state,'SelfGated'); assert.equal(after.policy.delivery,'none');
   assert.equal(after.policyOverrides.delivery,'merge'); assert.equal(after.accepted,null);
+  // Delivery does not change the reviewed content, so the independent review stays bound for re-acceptance.
+  assert.equal(after.verdict,'ship'); assert.equal(after.reviewedHead,'h'); assert.deepEqual(after.reviewDecision,before.reviewDecision);
   assert.deepEqual(after.evidence,before.evidence); assert.deepEqual(after.findings,before.findings); assert.deepEqual(after.failures,before.failures);
   assert.deepEqual(after.policyChanges[0].previousAcceptance,before.accepted); assert.equal(after.policyChanges[0].before,'none');
   assert.equal(after.policyChanges[0].requestDigest,effectArgsDigest({request,userInputRef:'user-request'}));
@@ -52,6 +54,7 @@ test('public review policy change permits mandatory review without changing deli
   const result=await f.run(request);assert.equal(result.code,0,JSON.stringify(result));
   const after=await f.read();assert.equal(after.state,'SelfGated');assert.equal(after.policyOverrides.review.mode,'required');
   assert.equal(after.policy.delivery,'none');assert.deepEqual(after.evidence,before.evidence);assert.equal(after.accepted,null);
+  assert.equal(after.verdict,null);assert.equal(after.reviewedHead,null);assert.equal(after.reviewDecision,null);
   assert.equal((await f.run(request)).change.duplicate,true);
   assert.equal((await f.run({...request,id:'invalid',expectedRevision:after.revision,review:{mode:'required'}})).error,'POLICY_CHANGE_INVALID');
 });

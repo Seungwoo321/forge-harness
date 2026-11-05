@@ -56,8 +56,11 @@ export async function changeUnitPolicy({ stateRoot, store, unit, request, userIn
         receipt = { ...request, unit, requestDigest, userInputRef, before: before[field], after: after[field],
           previousPolicy: before, previousAcceptance: record.accepted ?? null, previousReviewDecision: record.reviewDecision ?? null,
           changedAt, revision: record.revision + 1 };
+        // A delivery change does not alter the reviewed content: keep the independent review bound to its head and
+        // fingerprint so re-acceptance can reuse it. A review policy change invalidates the prior review decision.
+        const reviewState = field === 'delivery' ? {} : { reviewDecision: null, reviewedHead: null, verdict: null };
         const updated = { ...record, policyOverrides: overrides, policyChanges: [...(record.policyChanges ?? []), receipt],
-          accepted: null, reviewDecision: null, reviewedHead: null, verdict: null };
+          accepted: null, ...reviewState };
         return record.state === 'Accepted' ? transitionRecord(updated, 'SelfGated') : updated;
       });
     });

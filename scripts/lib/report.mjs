@@ -35,15 +35,15 @@ function outcomeLine(outcome) {
 
 export function formatUnitResult({ title, objective, acceptance, tracking, decision, changed, verification, remainingRisk, nextFirstAction, outcome }) {
   const output = [
-    `# ${lineValue(title, 'title')}`,
-    `목표: ${lineValue(objective, 'objective')}`,
-    `수용 기준: ${lineValue(acceptance, 'acceptance')}`,
-    `작업관리: ${lineValue(tracking, 'tracking')}`,
-    `결정: ${lineValue(decision, 'decision')}`,
+    `# ${lineValue(title, 'resultFields.title')}`,
+    `목표: ${lineValue(objective, 'resultFields.objective')}`,
+    `수용 기준: ${lineValue(acceptance, 'resultFields.acceptance')}`,
+    `작업관리: ${lineValue(tracking, 'resultFields.tracking')}`,
+    `결정: ${lineValue(decision, 'resultFields.decision')}`,
     `변경: ${lines(changed).join(', ')}`,
-    `검증: ${lineValue(verification, 'verification')}`,
-    `남은 일·위험: ${lineValue(remainingRisk, 'remaining risk')}`,
-    `다음 단위 첫 행동: ${lineValue(nextFirstAction, 'next first action')}`,
+    `검증: ${lineValue(verification, 'resultFields.verification')}`,
+    `남은 일·위험: ${lineValue(remainingRisk, 'resultFields.remainingRisk')}`,
+    `다음 단위 첫 행동: ${lineValue(nextFirstAction, 'resultFields.nextFirstAction')}`,
     outcomeLine(outcome),
   ].join('\n');
   validateUnitResult(output, { allowContinuing: outcome?.kind === 'continue' });

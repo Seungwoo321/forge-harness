@@ -105,11 +105,17 @@ async function revalidateTerminalTarget({ store, unit, git }) {
   });
 }
 
+// Deferred criteria block close unless the unit hands remaining goal work to a recorded next unit,
+// whose handoff carries them forward.
+function blocksOnDeferred(record) {
+  return (record.acceptance ?? []).some(item => item.status === 'deferred') && !record.next?.unit;
+}
+
 export async function projectTerminalUnit({ store, unit, adapter, queue, now, git }) {
   let record = await revalidateTerminalTarget({ store, unit, git });
   if (!record) throw errorWithCode('UNIT_NOT_FOUND', `unit not found: ${unit}`);
   if (record.state !== 'Delivered') throw errorWithCode('INVALID_TRANSITION', 'only Delivered units can close');
-  if ((record.acceptance ?? []).some(item => item.status === 'deferred')) throw errorWithCode('DEFERRED_ACCEPTANCE', 'deferred acceptance criteria prevent close');
+  if (blocksOnDeferred(record)) throw errorWithCode('DEFERRED_ACCEPTANCE', 'deferred acceptance criteria prevent close');
   if ((record.openDecisions ?? []).some(item => !item.answer)) throw errorWithCode('OPEN_DECISIONS', 'open decisions prevent close');
   if (!record.tracker) return { projected: true, record };
   const requested = record.terminalProjection;
@@ -143,7 +149,7 @@ export async function commitTerminalClose({ store, unit, git, sessionStart, sess
       || sessionClose.result?.closed !== true || sessionClose.result.sessionId !== current.sessionFinalization.owner.sessionId
       || sessionClose.result.incarnationId !== current.sessionFinalization.owner.incarnationId)) throw errorWithCode('SESSION_CLOSE_PENDING', 'exact owner closure must be verified');
     if (current.next?.handoff && (!['completed', 'duplicate', 'reconciled'].includes(sessionStart?.status) || !sessionStart.result?.sessionId)) throw errorWithCode('SUCCESSOR_PENDING', 'successor start must be confirmed before close');
-    if ((current.acceptance ?? []).some(item => item.status === 'deferred')) throw errorWithCode('DEFERRED_ACCEPTANCE', 'deferred acceptance criteria prevent close');
+    if (blocksOnDeferred(current)) throw errorWithCode('DEFERRED_ACCEPTANCE', 'deferred acceptance criteria prevent close');
     if (current.tracker && !current.terminalProjection) throw errorWithCode('INVALID_TRANSITION', 'terminal projection intent is missing');
     return transitionRecord({
       ...current,

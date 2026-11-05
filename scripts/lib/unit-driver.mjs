@@ -1371,7 +1371,10 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const goal = await createContinuityStore(effectiveRoot).read(request.goalId);
       const store = createUnitStateStore(effectiveRoot);
       const before = await store.read(unit);
-      if (!goal || goal.goal.status !== 'active' || !goal.goal.remaining.includes(unit) || !before || before.state !== 'Scoped' || (before.stages ?? []).length !== 0)
+      // A transfer successor's custody is already verified by the control plane, so it may bind after it started work.
+      const successor = goal?.transfers?.some(item => item.successor === unit && item.sessionId);
+      if (!goal || goal.goal.status !== 'active' || !goal.goal.remaining.includes(unit) || !before || before.state === 'Closed'
+        || (!successor && (before.state !== 'Scoped' || (before.stages ?? []).length !== 0)))
         throw Object.assign(new Error('unit must be unscoped and listed in an active goal'), {code:'CONTINUITY_INVALID'});
       const source = await readFile(goal.source.path);
       if (`sha256:${createHash('sha256').update(source).digest('hex')}` !== goal.source.digest || JSON.stringify(stable(before.policy?.session)) !== JSON.stringify(stable(goal.policy)))

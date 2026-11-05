@@ -163,3 +163,16 @@ test('return obligation survives a tracker outage and public reconciliation cann
   assert.equal((await f.run('finalize')).code, 0);
   assert.equal((await f.store.read('finished')).state, 'Closed');
 });
+
+test('public finish of a completed goal without a return recipient is refused before any effect', async t => {
+  const f = await setup(t);
+  const body = JSON.parse(await readFile(path.join(f.root, 'request.json'), 'utf8'));
+  delete body.returnTo;
+  const request = path.join(f.root, 'no-recipient.json');
+  await writeFile(request, JSON.stringify(body));
+  const output = await runUnitCli(['unit', 'finish', 'finished', '--request', request], { stateRoot: f.root, adapters: f.adapters });
+  const result = JSON.parse(output.slice(output.lastIndexOf('RESULT ') + 7));
+  assert.equal(result.error, 'RETURN_RECIPIENT_REQUIRED', output);
+  assert.equal((await f.store.read('finished')).state, 'Delivered');
+  assert.deepEqual(f.events.filter(e => !e.startsWith('observe')), []);
+});

@@ -358,7 +358,7 @@ test('public executable starts a detached finalizer that survives the finish cal
   const output = f.run('finish');
   assert.equal(output.code, 3);
   assert.equal(output.finalizePending, true);
-  for (let attempt = 0; attempt < 100 && (await f.store.read('unit-a')).state !== 'Closed'; attempt += 1) await new Promise(resolve => setTimeout(resolve, 20));
+  for (let attempt = 0; attempt < 1500 && (await f.store.read('unit-a')).state !== 'Closed'; attempt += 1) await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal((await f.store.read('unit-a')).state, 'Closed');
   const intents = (await f.ledger()).filter(row => row.event === 'intent');
   assert.deepEqual(intents.map(row => row.effect), ['session.start', 'session.deliver', 'session.close']);

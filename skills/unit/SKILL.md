@@ -18,6 +18,10 @@ For managed continuity, first register the overall goal with `goal-register` and
 
 For non-interactive starts, pass `--non-interactive`. The CLI uses the configured policy or the conservative `task` default with `unconfirmed-default` provenance and does not load `policy-setup`.
 
+## Review before delivery
+
+When acceptance returns exit 20 (the unit is `InReview`), start the independent review first. Create the review unit with a request file `{"kind": "review", "targetUnit": "<unit>", "goalId": "<goal>", "request": {text, userInputRef}}` (`goalId` is required for a goal-managed target; without it the review unit is unbound and `session-start` refuses it), then run `session-start` for the reviewer. Only then create the PR or wait on remote CI, so the review and CI run in parallel.
+
 ## Resume
 
 Use the Unit Record and effect ledger through the unit CLI. Do not recreate a unit with a different request under the same ID.

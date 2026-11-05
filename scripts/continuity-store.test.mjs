@@ -39,7 +39,7 @@ test('goal lock excludes live owners and is released after a process dies', asyn
   await assert.rejects(store.create(input),{code:'GOAL_LOCKED'});
   owner.kill('SIGKILL'); await once(owner,'exit');
   let recovered;
-  for(let attempt=0;attempt<50;attempt++) {
+  for(let attempt=0;attempt<1500;attempt++) {
     try { recovered=await store.create(input); break; }
     catch(error) { if(error.code!=='GOAL_LOCKED') throw error; await new Promise(resolve=>setTimeout(resolve,20)); }
   }

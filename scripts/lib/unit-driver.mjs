@@ -1040,7 +1040,8 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
         ? transitionRecord(transitionRecord(updated, 'SelfGated'), 'InReview') : transitionRecord(updated, 'InReview');
     });
     if (policyChanged) return formatCliResult({ code: 1, summary: 'Policy changed during acceptance; revalidation is required', details: { unit, state: record.state } });
-    return formatCliResult({ code: 20, summary: `Independent ${reviewResolution.by} review is required`, details: { unit, state: record.state, reviewDecision } });
+    return formatCliResult({ code: 20, summary: `Independent ${reviewResolution.by} review is required`, details: { unit, state: record.state, reviewDecision,
+      next: `Open the review now, before PR creation or remote CI: start a review unit (kind: review, targetUnit: ${unit}, goalId when the target is goal-managed), then run session-start for the reviewer.` } });
   }
   if (!evaluation.ok) {
     const code = evaluation.reason === 'gate judgment is pending' ? 3 : 1;
@@ -1301,6 +1302,16 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
           return { ...record, revision: record.revision + 1, goal: { ...record.goal, objective: request.objective, criteria: [...request.criteria] },
             amendments: [...(record.amendments ?? []), { revision: record.revision + 1, previous: { objective: record.goal.objective, criteria: record.goal.criteria }, reason: request.reason, userInputRef }] };
         });
+        // Bound units carry a copy of the goal definition for their stage inputs. Refresh only that copy: head, content
+        // fingerprint, acceptance and review decisions stay as they are, and the completion proof is checked against
+        // the amended criteria when the goal finishes.
+        const unitStore = createUnitStateStore(effectiveRoot);
+        for (const bound of new Set([...goal.goal.remaining, ...(goal.transfers ?? []).map(item => item.unit)])) {
+          const existing = await unitStore.read(bound);
+          if (!existing || existing.continuity?.goalId !== id || existing.state === 'Closed' || !existing.request?.overallGoal) continue;
+          await unitStore.update(bound, record => ({ ...record, request: { ...record.request,
+            overallGoal: { ...record.request.overallGoal, objective: goal.goal.objective, criteria: goal.goal.criteria } } }));
+        }
         return formatCliResult({ code: 0, summary: `Goal ${id} amended`, details: { goal } });
       }
       if (subcommand === 'policy-refresh') {

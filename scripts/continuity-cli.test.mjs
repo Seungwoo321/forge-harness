@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createUnitStateStore } from './lib/unit-state.mjs';
 
 const cli = fileURLToPath(new URL('./unit.mjs', import.meta.url));
 test('public goal registration checks its source and binds an eligible unit', async t => {
@@ -65,10 +66,16 @@ test('an approved goal amendment replaces objective and criteria and keeps the p
   const run = (...args) => spawnSync(process.execPath,[cli,...args,'--state-root',state,'--project-root',root],{cwd:root,encoding:'utf8'});
   const result = child => JSON.parse(child.stdout.slice(child.stdout.lastIndexOf('RESULT ')+7));
   assert.equal(run('goal','create','g1','--request',request).status,0);
+  const accepted = {tree:'t1',head:'h1'};
+  await createUnitStateStore(state).create({schema:'harness.unit/1',unit:'u1',kind:'impl',state:'InReview',head:'h1',contentFingerprint:'f1',accepted,
+    continuity:{goalId:'g1'},request:{text:'work',overallGoal:{id:'g1',objective:'deliver line A',criteria:['A works'],source}},stages:[]});
   const amend = path.join(root,'amend.json'); await writeFile(amend,JSON.stringify({expectedRevision:1,reason:'line B added',objective:'deliver lines A and B',criteria:['A works','B works']}));
   assert.notEqual(run('goal','amend','g1','--request',amend,'--user-input','user-2','--adapters',adapters).status,0);
   const amended = result(run('goal','amend','g1','--request',amend,'--user-input','user-1','--adapters',adapters));
   assert.equal(amended.goal.revision,2); assert.deepEqual(amended.goal.goal.criteria,['A works','B works']);
   assert.deepEqual(amended.goal.amendments[0].previous,{objective:'deliver line A',criteria:['A works']});
   assert.equal(result(run('goal','amend','g1','--request',amend,'--user-input','user-1','--adapters',adapters)).error,'CONTINUITY_STALE');
+  const bound = await createUnitStateStore(state).read('u1');
+  assert.deepEqual(bound.request.overallGoal.criteria,['A works','B works']); assert.equal(bound.request.overallGoal.objective,'deliver lines A and B');
+  assert.deepEqual([bound.accepted,bound.head,bound.contentFingerprint,bound.state],[accepted,'h1','f1','InReview']);
 });

@@ -100,6 +100,10 @@ test('checkpoint adapter snapshots the worktree with a temporary index and honor
     });
     assert.deepEqual(changes.attemptDiff, ['attempt.txt', 'tracked.txt']);
     assert.deepEqual(changes.firstCheckpointDiff, ['attempt.txt', 'tracked.txt']);
+    assert.notEqual(changes.contentTree, changes.tree);
+    assert.equal(git('show', `${changes.contentTree}:ignored-tracked.txt`), 'ignored base');
+    assert.notEqual(spawnSync('git', ['cat-file', '-e', `${changes.contentTree}:.env.secret`], { cwd: dir }).status, 0);
+    assert.deepEqual(changes.excluded, ['.env.secret', 'ignored-tracked.txt']);
     assert.equal(git('status', '--porcelain=v1', '-z', '--untracked-files=all'), beforeInspectStatus);
     assert.equal(git('diff', '--cached', '--raw'), beforeInspectIndex);
     assert.equal(await readFile(join(dir, '.env.secret'), 'utf8'), 'secret-change\n');

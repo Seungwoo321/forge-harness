@@ -6,7 +6,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createAdapters } from './lib/adapters.mjs';
-import { submitCodexComposer } from './lib/codex-composer.mjs';
+import { codexComposerMatches, submitCodexComposer } from './lib/codex-composer.mjs';
 import { createSessionRunner } from './lib/session-runtime.mjs';
 
 const observed = { sessionId: 'terminal', incarnationId: 'incarnation', cwd: '/work/product', pid: 42 };
@@ -171,14 +171,97 @@ test('composer refuses a foreign draft, modal and changed paste without Return',
   }
 });
 
-test('composer preserves pathname whitespace and refuses ambiguous display wrapping', async () => {
-  for (const view of [screen('Read /work/two spaces/packet'), screen('Read /work/two  spaces/\n  packet')]) {
+test('composer preserves pathname whitespace and rejects different or clipped wrapped text', async () => {
+  for (const view of [screen('Read /work/two spaces/packet'), screen('Read /work/two  spaces/\n  pack'), screen(' Read /work/two  spaces/packet'), screen('Read /work/two  spaces/\n   packet')]) {
     let entered = false; let pasted = false;
     await assert.rejects(submitCodexComposer({ prompt: 'Read /work/two  spaces/packet', read: async () => view,
       verify: async () => {}, paste: async () => { pasted = true; }, enter: async () => { entered = true; },
     }), { code: 'SESSION_TASK_UNVERIFIED' });
     assert.equal(entered, false); assert.equal(pasted, false);
   }
+});
+
+function narrowScreen(text, width = 42) {
+  let column = 0; const lines = [''];
+  for (const char of text) {
+    const cells = /[가-힣]/u.test(char) ? 2 : 1;
+    if (column + cells > width) { lines.push(''); column = 0; }
+    lines[lines.length - 1] += char; column += cells;
+  }
+  return `› ${lines.join('\n  ')}\n\n  GPT model high · ~/work/product…\n  ← for agents · ? for shortcuts\n`;
+}
+
+test('narrow status-less composer matches the complete wrapped reference and settles before Return', async () => {
+  const prompt = `Read /work/검증/two  spaces/${'packet'.repeat(16)} (sha256:${'a'.repeat(64)}); follow its referenced handoffs.`;
+  assert.ok(codexComposerMatches(narrowScreen(prompt), prompt));
+  let text = 'Ask Codex to do anything', pending, reads = 0, pastes = 0, enters = 0;
+  const options = { prompt, verify: async () => {},
+    read: async () => { if (pending && ++reads > 1) { text = pending; pending = undefined; } return narrowScreen(text); },
+    paste: async value => { pending = value; pastes++; }, enter: async () => { enters++; } };
+  await submitCodexComposer(options);
+  assert.equal(pastes, 1); assert.equal(enters, 1);
+  await submitCodexComposer(options);
+  assert.equal(pastes, 1); assert.equal(enters, 2);
+  for (const bad of [prompt.slice(1), prompt.slice(0, -1), prompt + ' foreign', prompt.replace('two  spaces', 'two spaces')]) {
+    assert.equal(codexComposerMatches(narrowScreen(bad), prompt), false);
+  }
+});
+
+test('narrow composer rechecks draft and native identity after verification at paste and Return', async () => {
+  for (const boundary of ['paste', 'Return']) for (const change of ['draft', 'identity']) {
+    const prompt = 'Read /work/result (sha256:exact)'; let text = boundary === 'paste' ? 'Ask Codex to do anything' : prompt;
+    let pastes = 0, enters = 0;
+    await assert.rejects(submitCodexComposer({ prompt, read: async () => narrowScreen(text),
+      verify: async () => { if (change === 'identity') throw Error('native worker changed'); text = 'foreign draft'; },
+      paste: async () => { pastes++; }, enter: async () => { enters++; } }));
+    assert.equal(pastes, 0); assert.equal(enters, 0);
+  }
+});
+
+test('footer-like and prompt-like foreign continuation text cannot hide a draft prefix or suffix', async () => {
+  const prompt = 'Read /work/result (sha256:exact)';
+  for (const text of [prompt+'\n\n? for shortcuts\nforeign tail', prompt+'\nmodel · Ready · context\nforeign tail', 'foreign prefix\n› '+prompt]) {
+    const view = narrowScreen('Ask Codex to do anything').replace('Ask Codex to do anything', text.replaceAll('\n','\n  '));
+    let enters = 0, pastes = 0;
+    assert.equal(codexComposerMatches(view,prompt),false);
+    await assert.rejects(submitCodexComposer({prompt,read:async()=>view,verify:async()=>{},paste:async()=>{pastes++;},enter:async()=>{enters++;}}));
+    assert.equal(enters,0); assert.equal(pastes,0);
+  }
+});
+
+test('native delivery accepts a wrapped reference in the same narrow receiver and requires its real packet read', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'narrow-delivery-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const resultPath = path.join(root, 'result.md'), content = 'immutable result\n', digest = taskDigest(content);
+  await writeFile(resultPath, content);
+  const prompt = `Read ${resultPath} (${digest}); follow its referenced handoffs.`;
+  const threadId = '00000000-0000-0000-0000-000000000001';
+  let draft = prompt, delivered = false, readPacket = false, pastes = 0, enters = 0;
+  const command = async (binary, args, options) => {
+    let stdout;
+    if (binary === 'cmux' && args.includes('tree')) stdout = JSON.stringify({ windows: [{ workspaces: [{ id: 'workspace', panes: [{ surfaces: [{ id: 'receiver', type: 'terminal', tty: 'tty2' }] }] }] }] });
+    else if (binary === 'ps') stdout = args.includes('pid=,pgid=,tpgid=,comm=') ? '22 22 22 codex\n' : 'START';
+    else if (binary === 'lsof') stdout = args.includes('-d') ? `p22\nn${root}\n` : `n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${threadId}.lock\n`;
+    else if (binary === 'cmux' && args.includes('terminal.viewport')) stdout = JSON.stringify({surface_id:'receiver',columns:44});
+    else if (binary === 'cmux' && args.includes('read-screen')) stdout = narrowScreen(draft);
+    else if (binary === 'cmux' && args.includes('surface.send_text')) { pastes++; draft = JSON.parse(args.at(-1)).text; stdout = '{}'; }
+    else if (binary === 'cmux' && args.includes('send-key')) { assert.equal(args.at(-1), 'Return'); enters++; delivered = true; stdout = 'OK'; }
+    else if (binary === process.execPath) stdout = JSON.stringify({ thread:{id:threadId,cwd:root}, queued:[],
+      turns: delivered ? [{id:'turn',status:'completed',items:[{type:'userMessage',id:'request',content:[{type:'text',text:prompt}]},
+        {type:'agentMessage',id:'response'}, ...(readPacket ? [{type:'commandExecution',id:'read',status:'completed',exitCode:0,cwd:root,commandActions:[{type:'read',path:resultPath}],aggregatedOutput:content}] : [])]}] : [] });
+    else throw Error(`unexpected command ${binary} ${args}`);
+    return {exitCode:0,stdout};
+  };
+  const runner = createSessionRunner({runtime:'cmux',command,parent:{sessionId:'owner',cwd:root,incarnationId:'owner-generation'},launch:()=>['codex'],pollAttempts:1});
+  const request = {effect:'session.deliver',key:'same-delivery',args:{cwd:root,resultPath,resultDigest:digest,recipient:{sessionId:'receiver',incarnationId:'tty2:22:START',cwd:root,executable:'codex'}}};
+  assert.equal((await runner.verify(request)).status, 'not-applied');
+  await assert.rejects(runner.execute(request), /receipt does not match/);
+  assert.equal(enters, 1); assert.equal(pastes, 0);
+  assert.equal((await runner.verify(request)).status, 'unknown');
+  readPacket = true;
+  assert.equal(validateTaskReceipt((await runner.verify(request)).result, request).task.promptDigest, taskDigest(prompt));
+  assert.equal((await runner.execute(request)).task.effectKey, request.key);
+  assert.equal(enters, 1); assert.equal(pastes, 0);
 });
 
 for (const state of ['modal', 'startup', 'queued', 'accepted', 'unknown']) {

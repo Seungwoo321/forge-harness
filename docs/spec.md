@@ -197,6 +197,8 @@ AC 커버리지는 변경이 있는 모든 kind(`chore`·`impl`·`impl-risk`·`d
 
 커버리지 계산과 acceptance-coverage 제공자는 제품 기준 투영을 사용한다. 제공자의 `record.acceptanceObligations`에는 전체 원문, `record.acceptanceCorrections`에는 정정 이력이 남고 정정 이력은 해당 게이트 fingerprint에 결속된다. 다른 필수 게이트는 유지한다. 관찰은 테스트 성공이나 covers로 바꾸지 않는다. 리뷰 handoff는 전체 기준과 정정 이력을 포함한다. 엔진 소유 의무는 전달 정책과 실제 엔진 전달 수준으로 강제한다. 외부 소유 의무는 원 delivery:none을 유지하고 실제 finish·완료 투영·close/reconcile·finalize 경계에서 신뢰 제공자의 현재 원격 증거를 검증한다. 제품 수용 전에 외부 PR을 요구하지 않는다. 외부 전달 증거는 수용 대상과 실제 repo/branch/base/head/내용에 결속된 별도 영수증이며 테스트나 엔진 실행 원장이 아니다. 동일 트리 직접 자식 외부 commit만 기존 commit 결속 검증으로 SHA를 결속하고 원 검증·리뷰 SHA를 보존한다. 누락·위조·stale 증거는 완료와 세션 종료를 막는다. 목표 완료 사전검사도 제품 증거와 원 정정 영수증으로 기준을 연결하며 관찰·전달을 테스트 성공으로 집계하지 않는다. 실제 목표 완료는 완료 경계 검증을 거친 Closed 단위를 요구한다. 요청·증거 형식과 복구 순서는 [동일 단위 검증 정정](acceptance-recovery.md)에 정의한다.
 
+사용자가 실제 범위를 축소하면 `unit acceptance drop`이 제출된 미수용 SelfGated 단위에서 정확한 한 활성 기준을 제외한다. 사용자 지시 원문·provenance와 정확한 revision·기준/source digest·현재 Git 대상에 결속된 별도 신뢰 검증을 요구한다. 원 id·text를 유지하며 status=dropped로 표시하고 이전 source·기준·리뷰를 acceptanceAmendments에 보존한다. 정책·실패·재시도·단계·증거 이력을 지우지 않으며 최신 증거에 stale 무효화 행을 추가하고 수용/리뷰를 비운다. 모든 게이트 fingerprint와 수용 경합 검증은 범위 변경 epoch에 결속한다. 제외된 기준의 이전 분류 정정은 역사로 유지하고 활성 의무에서 제외한다. 다른 기존 분류 정정은 바뀐 source에 대해 공개 correct로 재검증한다. 목표가 해당 기준을 계속 요구하면 목표 완료는 실패하며 기존 승인된 goal amend로 먼저 맞춘다. 계약과 복구 순서는 [승인된 기준 제외](criteria-changes.md)에 정의한다.
+
 ### 5.2 Work Policy 필드
 
 **저장 루트**: Git 어댑터가 `git rev-parse --path-format=absolute --git-common-dir`의 실제 경로 아래 `work-state/`를 stateRoot로 고정한다. 모든 worktree가 같은 루트를 쓴다. project 정책은 `<stateRoot>/policy.json`, 단위·원장·큐·알림·인계도 그 아래다. projectRoot는 공통 Git 디렉터리의 주 checkout(또는 bare 저장소)의 루트로 어댑터가 제공한다. Git 밖에서는 `--state-root`와 `--project-root`를 필수로 받는다. 실행 cwd는 별도이며 정책 검색·상태 저장 기준이 아니다.
@@ -485,7 +487,8 @@ StageOutput→Unit Record→다음 StageInput.data로만 데이터를 전달한�
 | 제어면 생성 | request, unit, kind, goal, policy, policySources, canon, tracker, isolation, acceptance, scopePaths, evidence, changedPaths, diff, handoff, failures, feedback, assumptions, openDecisions, next |
 | 제어면 매 단계·실패 | state, blockedFrom, stoppedFrom, stages, feedback, failures, changedPaths, diff, accepted, next |
 | 증거면 SelfGated | evidence, acceptance[].status(covered) |
-| 제어면 결정 처리 | acceptance[].status(deferred/dropped), openDecisions[].answer |
+| 제어면 결정 처리 | acceptance[].status(deferred/open), openDecisions[].answer |
+| 제어면 승인된 범위 변경 | acceptance[].status(dropped), acceptanceAmendments |
 
 | 단계 | reads | writes |
 |---|---|---|
@@ -769,6 +772,7 @@ fingerprint 가 달라진 증거는 무효이고 해당 게이트부터 다시 �
 | openDecisions[] | `{id,kind,question,options,blocks,requiredAction,canonRefs,notifiedAt,answer}` |
 | approvals[] | §8.6의 사용자 승인 레코드 |
 | externalDeliveryEvidence[] | 원 소유자 external인 전달 의무의 읽기 전용 원격 검증 영수증. 요청·수용·현재 대상 digest와 원본 참조·digest·전후 SHA 결속을 추가 전용으로 보존한다 |
+| acceptanceAmendments[] | 승인된 제외의 request/userInputRef/requestDigest/beforeSource/before/after/previousReview/revision/changedAt. 원 기준과 증거·실패 이력을 보존한다 |
 | acceptanceCorrections[] | `{request,userInputRef,requestDigest,revision,correctedAt,previousReview}`. 같은 기준의 최신 영수증을 적용하며 전체 이력과 원 acceptance는 보존한다 |
 | next | null 또는 `{unit,handoff}`. handoff는 path·digest 참조 |
 
@@ -933,6 +937,7 @@ CLI 는 사람용 출력의 마지막 줄에 기계용 한 줄 `RESULT {json}` �
 | H-EV-10 | 동일 단위 검증 정정은 정확한 원문·출처·대상·사용자 승인과 독립 제공자 검증에 결속되고 기존 요구·증거·실패·리뷰 의무·재시도 정책을 보존한다. 위조·stale·경합·불확실한 효과는 정본을 바꾸지 않는다 | T |
 | H-EV-11 | 운영 관찰은 수용·전달에서 재검증하며 테스트 covers로 집계하지 않는다. 제품 기준 누락과 필수 게이트 실패는 정정 뒤에도 수용을 막는다 | T |
 | H-EV-12 | 엔진 소유 의무는 엔진 정책·실행 수준으로, 외부 소유 의무는 delivery:none을 유지하며 실제 완료 경계의 수용 대상 결속 원격 증거로 강제한다. 외부 증거 누락·위조·stale이면 finish/finalize/close/완료 투영이 거부되며 제품 수용은 외부 PR 전에 가능하다 | T |
+| H-EV-13 | 실제 사용자 범위 축소는 동일 단위의 정확한 기준·source·대상·승인 지시에 결속된 drop으로만 기록한다. 원문/이력 보존, stale 증거·리뷰 무효화·범위 epoch 경합 방어를 유지하고, 제외 기준이 남은 목표는 완료하지 않는다 | T |
 | **실패 처리** | | |
 | H-FL-01 | 모든 실패는 제품·하네스·환경·사용자 영역·불명 중 하나로 분류된다 | T |
 | H-FL-02 | 표시 서명은 분류 + causeKey, 예산 키는 실패 지점 + 요지다. 재분류에서도 예산을 유지하고 태스크 이름·ID는 제외한다 | T |

@@ -31,12 +31,13 @@ function assertRequest(request, userInputRef) {
 }
 
 export function currentCorrections(record) {
-  return [...new Map((record.acceptanceCorrections ?? []).map(receipt => [receipt.request.acceptanceRef, receipt])).values()];
+  return [...new Map((record.acceptanceCorrections ?? []).map(receipt => [receipt.request.acceptanceRef, receipt])).values()]
+    .filter(receipt => !(record.acceptance ?? []).some(item => item.id === receipt.request.acceptanceRef && item.status === 'dropped'));
 }
 
 export function productAcceptance(record) {
   const corrected = new Set(currentCorrections(record).map(receipt => receipt.request.acceptanceRef));
-  return (record.acceptance ?? []).filter(item => !corrected.has(item.id));
+  return (record.acceptance ?? []).filter(item => item.status !== 'dropped' && !corrected.has(item.id));
 }
 
 export function assertDeliveryObligations(record, delivery) {
@@ -109,12 +110,15 @@ export async function verifyExternalDeliveryBoundary({ store, unit, adapters }) 
 
 // Only this gate tests the product criteria projection. Review and the canonical record keep every original obligation.
 export async function describeAcceptanceGate(adapters, id, unit, record) {
-  if (id !== 'acceptance-coverage' || !record.acceptanceCorrections?.length) return adapters.gates.describe(id, { unit, record });
-  const projected = { ...record, acceptance: productAcceptance(record), acceptanceObligations: record.acceptance };
-  const gate = await adapters.gates.describe(id, { unit, record: projected });
-  return gate && { ...gate, config: { ...gate.config, acceptanceVerification: effectArgsDigest({
-    acceptance: record.acceptance, corrections: record.acceptanceCorrections,
-  }) } };
+  const amended = record.acceptanceAmendments?.length > 0;
+  const project = id === 'acceptance-coverage' && (record.acceptanceCorrections?.length > 0 || amended);
+  const described = project ? { ...record, acceptance: productAcceptance(record), acceptanceObligations: record.acceptance } : record;
+  const gate = await adapters.gates.describe(id, { unit, record: described });
+  if (!gate || !project && !amended) return gate;
+  return { ...gate, config: { ...gate.config,
+    ...(project ? { acceptanceVerification: effectArgsDigest({ acceptance: record.acceptance, corrections: record.acceptanceCorrections ?? [] }) } : {}),
+    ...(amended ? { acceptanceScope: effectArgsDigest({ acceptance: record.acceptance, amendments: record.acceptanceAmendments }) } : {}),
+  } };
 }
 
 async function verifyCorrection(record, receipt, adapters, target) {

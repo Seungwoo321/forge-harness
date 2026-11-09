@@ -29,7 +29,7 @@ export async function createRuntimeAdapters({ cwd, adapters }) {
 | `tracker` | `read`, `project`: 외부 작업관리 읽기·멱등 투영. tracker가 없는 단위는 등록 불필요 |
 | `sessionRunner` | 계약 `harness.session-adapter/1`, 기능 목록, `observe`, `execute`, `verify`: 신원·cwd 관찰, 기동/종료, 실제 효과 검증 |
 | `repository` | PR 생성·머지의 `deliveryContext`, `execute`, `verify` |
-| `provider` | `verifyUserInput`: 사용자 승인 입력의 실제 출처 확인. 검증 방식 정정에는 `verifyAcceptanceCorrection`, 외부 소유 전달에는 `verifyExternalDelivery`도 필수. 원 권한·기록 불일치·관찰/현재 외부 전달 증거를 읽기 전용 검증 |
+| `provider` | `verifyUserInput`: 사용자 승인 입력의 실제 출처 확인. 승인된 기준 제외에는 `verifyAcceptanceChange`, 검증 방식 정정에는 `verifyAcceptanceCorrection`, 외부 소유 전달에는 `verifyExternalDelivery`도 필수. 원 권한·기록 불일치·관찰/현재 외부 전달 증거를 읽기 전용 검증 |
 | `effect` + `effectContext` | 일반 외부 효과의 `execute`, `verify` 및 신뢰 경계 boolean 문맥. 두 제공자는 함께 등록 |
 
 `contentFingerprint`는 검증 경로·바이트·파일 모드와 포함/제외 규칙의 정렬된 해시다. `head`만으로 변경된 작업트리의 검증을 대체하지 않는다. delivery를 사용하는 관찰에는 `repo`, `branch`, `tree`, `indexTree`, `headTree`, `base`를 추가한다. 요청이 관찰 결과나 승인 대상을 덮어쓸 수 없다.
@@ -77,3 +77,5 @@ merge 전달은 시작할 때 원장의 기존 intent 경계를 고정한다. �
 미수신 재시도는 native history/queue에 요청이 없고 정확한 입력이 composer에 남아 있을 때만 정책 상한 안에서 같은 intent로 Enter를 재개한다. 빈 composer나 단순 조회 실패로는 미제출을 추정하지 않는다.
 
 진행 중인 목표의 실행 정책은 등록 시점에 고정된다. 사용자가 승인한 작업 정책 변경(예: 리뷰 역할)은 `goal policy-refresh <id> --request <file> --user-input <ref> --adapters <module>` 로만 목표에 반영한다. 요청은 `expectedRevision`·`reason` 을 담고, 신뢰된 `provider.verifyUserInput` 이 정확한 승인을 확인한다. 이전 실행 정책은 `policyChanges` 에 남고, 이후 시작하는 단위가 새 정책으로 결속된다. 같은 정책이면 바꾸지 않는다.
+
+명시적 범위 축소의 정확한 `verifyAcceptanceChange` 계약은 [승인된 기준 제외](criteria-changes.md)에 정의한다. 분류 정정 검증으로 제품 요구 제외 권한을 대신하지 않는다.

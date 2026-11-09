@@ -33,3 +33,7 @@ If a command leaves the unit `Blocked`, keep this owning session active and do n
 ## Remote failure after acceptance
 
 When a check outside the harness (remote CI, a deployment gate) fails after the unit was accepted and before it is delivered, do not fix it with a commit outside the unit. Run `scripts/unit.mjs unit reopen <unit> --request <file>` with `{"expectedRevision", "reason", "evidence"}` (evidence: the failing run's URL or log reference). The unit returns to Implementing with its acceptance cleared; open the implement stage, fix, and go through gates and independent review again. Widen the scope with `unit scope amend` if the fix touches paths outside it.
+
+## Explicit user scope reduction
+
+When the user explicitly removes a behavior, use `unit acceptance drop <unit> --request <file> --user-input <ref>` on the same submitted, unaccepted SelfGated unit. Follow the packaged `docs/criteria-changes.md` and require the trusted read-only `verifyAcceptanceChange` provider to verify the actual instruction. Keep original text/history, invalidate old gate evidence and review, align any goal through its separately authorized amendment, refresh remaining source-bound corrections, then reaccept and review under the existing policy. Do not simulate exclusion through a decision answer, evidence-kind correction, fake coverage, new unit or manual record edit.

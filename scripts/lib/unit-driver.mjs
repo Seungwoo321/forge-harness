@@ -14,6 +14,7 @@ import { createRecoveryStore, resumeUnitFailure } from './recovery-store.mjs';
 import { finishSessionUnit, finalizeSessionUnit } from './session-flow.mjs';
 import { createDecisionStore, validateDecision } from './decisions.mjs';
 import { acceptanceCoverage, evaluateAcceptance, gateFingerprint, hasInvalidEvidence, runGate } from './evidence.mjs';
+import { correctAcceptance, correctionSource, productAcceptance, describeAcceptanceGate, verifyAcceptanceCorrections, externalDeliveryObligations } from './acceptance-correction.mjs';
 import { attributeChanges, createCheckpoint, scopeGuard } from './checkpoint.mjs';
 import { classifySessionBoundary } from './classify.mjs';
 import { effectArgsDigest, recordApproval, resolveEffectApproval, verifyApprovalInput } from './approvals.mjs';
@@ -199,6 +200,7 @@ async function prepareReviewInput({ record, adapters, stateRoot }) {
   if (record.continuity && !goal) throw Object.assign(new Error('review goal is missing'), {code:'CONTINUITY_REQUIRED'});
   const handoff = {
     request: record.request, acceptance: record.acceptance, canon: record.canon,
+    ...(record.acceptanceCorrections?.length ? { acceptanceCorrections: record.acceptanceCorrections } : {}),
     ...(goal ? { continuity: { goal: goal.goal, source: goal.source, revision: goal.revision } } : {}),
     changedPaths: record.changedPaths, diff,
     implementation: attemptsFor(record, 'implement').filter(attempt => attempt.endedAt).map(attempt => ({
@@ -246,8 +248,8 @@ function acceptanceProgress(record) {
   const deferred = acceptance.filter(item => item.status === 'deferred').length;
   const dropped = acceptance.filter(item => item.status === 'dropped').length;
   const active = acceptance.filter(item => !['deferred', 'dropped'].includes(item.status));
-  const coverage = acceptanceCoverage(acceptance, record.evidence ?? []);
-  const covered = active.filter(item => coverage.covered.includes(item.id)).length;
+  const coverage = acceptanceCoverage(productAcceptance(record), record.evidence ?? []);
+  const covered = productAcceptance(record).filter(item => !['deferred', 'dropped'].includes(item.status) && coverage.covered.includes(item.id)).length;
   return {
     total: acceptance.length,
     active: active.length,
@@ -264,7 +266,10 @@ async function runProgress(stateRoot, unit) {
   if (!record) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
   const progress = acceptanceProgress(record);
   const effectiveDelivery = record.policyOverrides?.delivery ?? record.policy?.delivery ?? 'none';
-  return formatCliResult({ code: 0, summary: `Unit ${unit} acceptance progress`, details: { unit, state: record.state, revision: record.revision, effectiveDelivery, progress, kind: record.kind, canon: record.canon, acceptance: record.acceptance } });
+  return formatCliResult({ code: 0, summary: `Unit ${unit} acceptance progress`, details: { unit, state: record.state, revision: record.revision, effectiveDelivery, progress, kind: record.kind, canon: record.canon, acceptance: record.acceptance,
+    head: record.head, contentFingerprint: record.contentFingerprint,
+    correctionSourceDigest: digest(correctionSource(record)), criterionDigests: (record.acceptance ?? []).map(item => ({ id: item.id, digest: digest(item) })),
+    acceptanceCorrections: record.acceptanceCorrections ?? [], externalDeliveryEvidence: record.externalDeliveryEvidence ?? [] } });
 }
 
 function usageError(message) {
@@ -752,6 +757,7 @@ async function runEffect({ stateRoot, unit, options, adapters, cwd }) {
     if (!current.accepted || hasInvalidEvidence(current.evidence) || !validateAcceptedContent(current.accepted, target).valid) {
       throw Object.assign(new Error('approval target no longer matches acceptance'), { code: 'EFFECT_APPROVAL_REQUIRED' });
     }
+    await verifyAcceptanceCorrections(current, adapters, target);
   };
   const ledgerStore = createLedgerStore(stateRoot);
   const result = await executeEffect({
@@ -902,7 +908,8 @@ async function runEvidenceRerun({ stateRoot, unit, gateId, adapters, cwd }) {
   if (typeof adapters.gates?.describe !== 'function') {
     throw Object.assign(new Error('evidence rerun requires a gate adapter'), { code: 'ADAPTER_MISSING' });
   }
-  const gate = await adapters.gates.describe(gateId, { unit, record });
+  if (record.acceptanceCorrections?.length) await verifyAcceptanceCorrections(record, adapters, await adapters.git?.inspectUnit({ unit, record }));
+  const gate = await describeAcceptanceGate(adapters, gateId, unit, record);
   if (!gate || gate.id !== gateId) throw Object.assign(new Error(`gate adapter did not describe ${gateId}`), { code: 'ADAPTER_INVALID' });
   let applicabilityBytes;
   if (gate.applicability) {
@@ -920,7 +927,7 @@ async function runEvidenceRerun({ stateRoot, unit, gateId, adapters, cwd }) {
     const result = gate.applicability
       ? { exit: 0, ok: true, report: applicabilityBytes.toString('utf8'), reportPath: 'package.json', covers: [] }
       : await runIsolatedGate({gate,stateRoot,unit,adapters,cwd});
-    const checked = await adapters.gates.describe(gateId, { unit, record });
+    const checked = await describeAcceptanceGate(adapters, gateId, unit, record);
     if (!checked || checked.id !== gateId || gateFingerprint(checked) !== fingerprint
       || gate.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(applicabilityBytes)) {
       return { ...result, exit: 1, ok: false, failureClass: 'harness' };
@@ -944,16 +951,18 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
   }
   const profile = selectProfile(record.kind);
   const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
-  const policyDigest = digest({ policy, epoch: record.policyChanges?.at(-1)?.revision ?? 0 });
+  const policyDigest = digest({ policy, epoch: record.policyChanges?.at(-1)?.revision ?? 0, corrections: record.acceptanceCorrections ?? [] });
+  const deliveryMetadataRequired = policy.delivery !== 'none' || externalDeliveryObligations(record).length > 0;
   const policyMatches = current => digest({ policy: resolvePolicy({ unit: current.policyOverrides ?? {}, project: current.policy ?? {} }, { nonInteractive: true }).policy,
-    epoch: current.policyChanges?.at(-1)?.revision ?? 0 }) === policyDigest;
+    epoch: current.policyChanges?.at(-1)?.revision ?? 0, corrections: current.acceptanceCorrections ?? [] }) === policyDigest;
   const target = await adapters.git.inspectUnit({ unit, record });
   if (typeof target?.head !== 'string' || !target.head || typeof target.contentFingerprint !== 'string' || !target.contentFingerprint) {
     throw Object.assign(new Error('Git adapter must return the unit head and content fingerprint'), { code: 'ADAPTER_INVALID' });
   }
   const gateFingerprints = new Map();
+  await verifyAcceptanceCorrections(record, adapters, target);
   for (const gateId of profile.gates) {
-    const gate = await adapters.gates.describe(gateId, { unit, record });
+    const gate = await describeAcceptanceGate(adapters, gateId, unit, record);
     if (!gate || gate.id !== gateId) throw Object.assign(new Error(`gate adapter did not describe ${gateId}`), { code: 'ADAPTER_INVALID' });
     let applicabilityBytes;
     if (gate.applicability) {
@@ -971,7 +980,7 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
       : async () => runIsolatedGate({gate,stateRoot,unit,adapters,cwd});
     gateAdapter.run = async currentGate => {
       const result = await executeGate(currentGate);
-      const checked = await adapters.gates.describe(gateId, { unit, record });
+      const checked = await describeAcceptanceGate(adapters, gateId, unit, record);
       if (!checked || checked.id !== gateId || gateFingerprint(checked) !== fingerprint
         || gate.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(applicabilityBytes)) {
         return { ...result, exit: 1, ok: false, failureClass: 'harness' };
@@ -979,7 +988,7 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
       return result;
     };
     await runGate({ gate, fingerprint, adapter: gateAdapter, enforceSnapshot: true });
-    const checkedGate = await adapters.gates.describe(gateId, { unit, record });
+    const checkedGate = await describeAcceptanceGate(adapters, gateId, unit, record);
     if (!checkedGate || checkedGate.id !== gateId || gateFingerprint(checkedGate) !== fingerprint
       || gate.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(applicabilityBytes)) {
       await store.update(unit, current => {
@@ -1016,7 +1025,7 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
     findings: record.findings ?? [], verdictBy: record.reviewDecision?.by ?? 'session',
   } : null;
   const evaluation = evaluateAcceptance({
-    acceptance: record.acceptance ?? [], evidence: record.evidence ?? [], requiredGates: profile.gates,
+    acceptance: productAcceptance(record), evidence: record.evidence ?? [], requiredGates: profile.gates,
     head: target.head, contentFingerprint: target.contentFingerprint,
     currentHead: checkedTarget?.head, currentContentFingerprint: checkedTarget?.contentFingerprint,
     reviewRequired: reviewResolution.required, review, findings: record.findings ?? [], enforceSnapshot:true,
@@ -1030,8 +1039,9 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
   }
   if (reviewResolution.required && evaluation.reason === 'matching ship review is required') {
     let policyChanged = false;
-    record = await store.update(unit, current => {
+    record = await store.update(unit, async current => {
       if (!policyMatches(current)) { policyChanged = true; return current; }
+      await verifyAcceptanceCorrections(current, adapters, checkedTarget);
       const updated = { ...current, head: target.head, contentFingerprint: target.contentFingerprint,
         ...(current.head !== target.head || current.contentFingerprint !== target.contentFingerprint ? { diff: null, handoff: null } : {}),
         reviewDecision, reviewedHead: null, verdict: null, accepted: null };
@@ -1054,7 +1064,7 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
     if (!policyMatches(current)) { commitFailure = 'Policy changed during acceptance; revalidation is required'; return current; }
     const finalTarget = await adapters.git.inspectUnit({ unit, record: current });
     if (finalTarget?.head !== target.head || finalTarget?.contentFingerprint !== target.contentFingerprint
-      || policy.delivery !== 'none' && ['repo', 'branch', 'tree', 'indexTree', 'headTree', 'base'].some(field => finalTarget?.[field] !== target[field])) {
+      || deliveryMetadataRequired && ['repo', 'branch', 'tree', 'indexTree', 'headTree', 'base'].some(field => finalTarget?.[field] !== target[field])) {
       acceptedTargetChanged = true;
       const updated = {
         ...current, head: finalTarget?.head ?? current.head,
@@ -1064,7 +1074,7 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
       return current.state === 'SelfGated' ? updated : transitionRecord(updated, 'SelfGated');
     }
     for (const id of profile.gates) {
-      const described = await adapters.gates.describe(id, { unit, record: current });
+      const described = await describeAcceptanceGate(adapters, id, unit, current);
       if (!described || described.id !== id || gateFingerprint(described) !== gateFingerprints.get(id)) { commitFailure = `Gate ${id} inputs changed during acceptance`; return current; }
       if (described.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(Buffer.from(described.files.find(file => file.path === 'package.json').content))) { commitFailure = `Gate ${id} project configuration changed during acceptance`; return current; }
       const proof=current.evidence?.filter(item=>item.gate === id).at(-1);
@@ -1078,7 +1088,7 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
       kind: current.kind, riskAssessment: current.riskAssessment, acceptance: current.acceptance ?? [], evidence: current.evidence ?? [],
     });
     const currentEvaluation = evaluateAcceptance({
-      acceptance: current.acceptance ?? [], evidence: current.evidence ?? [], requiredGates: profile.gates,
+      acceptance: productAcceptance(current), evidence: current.evidence ?? [], requiredGates: profile.gates,
       head: target.head, contentFingerprint: target.contentFingerprint,
       currentHead: finalTarget.head, currentContentFingerprint: finalTarget.contentFingerprint,
       reviewRequired: currentReviewResolution.required, findings: current.findings ?? [], enforceSnapshot:true,
@@ -1092,9 +1102,16 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
       commitFailure = currentEvaluation.ok ? 'Acceptance inputs changed during validation' : currentEvaluation.reason;
       return current;
     }
+    if (current.acceptanceCorrections?.length) {
+      await verifyAcceptanceCorrections(current, adapters, finalTarget);
+      const verifiedTarget = await adapters.git.inspectUnit({ unit, record: current });
+      if (digest(verifiedTarget ?? null) !== digest(finalTarget)) {
+        commitFailure = 'Target changed during correction verification'; return current;
+      }
+    }
     acceptedCoverage = currentEvaluation.coverage;
     const accepted = { ...currentEvaluation.accepted, contentFingerprint: target.contentFingerprint, head: target.head,
-      ...(policy.delivery !== 'none' ? acceptedDeliveryMetadata(target) : {}) };
+      ...(deliveryMetadataRequired ? acceptedDeliveryMetadata(target) : {}) };
     const currentReviewDecision = { ...reviewDecision, required: currentReviewResolution.required, by: currentReviewResolution.by,
       triggers: Object.fromEntries(Object.keys(triggers).map(name => [name, currentReviewResolution.triggeredBy.includes(name)])) };
     const updated = { ...current, head: target.head, contentFingerprint: target.contentFingerprint, accepted, reviewDecision: currentReviewDecision };
@@ -1356,8 +1373,15 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const goal = await store.create({goal:request.goal,source:request.source,policy:resolved.policy.session});
       return formatCliResult({ code: 0, summary: `Goal ${id} registered`, details: { goal } });
     }
-    if (noun !== 'unit' || !['start', 'scope', 'finding', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'goal-bind', 'session-stop', 'session-return', 'policy', 'reopen'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
+    if (noun !== 'unit' || !['start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'goal-bind', 'session-stop', 'session-return', 'policy', 'reopen'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
     const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
+    if (subcommand === 'acceptance') {
+      const [action, unit] = rest;
+      if (action !== 'correct' || rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit acceptance correct requires <unit> --request <file> --user-input <ref>');
+      const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'acceptance correction request', 'CLI_USAGE');
+      const correction = await correctAcceptance({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, request, userInputRef: parsed.options['user-input'], adapters });
+      return formatCliResult({ code: 0, summary: `Acceptance verification corrected for ${unit}`, details: { unit, correction } });
+    }
     if (subcommand === 'policy') {
       const [action, unit] = rest;
       if (action !== 'change' || rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit policy change requires <unit> --request <file> --user-input <ref>');
@@ -1524,7 +1548,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const store = createUnitStateStore(effectiveRoot);
       const record = await closeDeliveredUnit({
         store, unit, adapter: adapters.tracker,
-        queue: createProjectionQueue(effectiveRoot, adapters), now: () => adapters.now(), git: adapters.git,
+        queue: createProjectionQueue(effectiveRoot, adapters), now: () => adapters.now(), git: adapters.git, provider: adapters.provider,
       });
       return formatCliResult({
         code: record.state === 'Closed' ? 0 : record.state === 'SelfGated' ? 1 : 3,
@@ -1537,7 +1561,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       if (!unit) usageError('unit reconcile requires <unit>');
       const store = createUnitStateStore(effectiveRoot);
       const outcomes = await reconcileProjectionQueue({
-        queue: createProjectionQueue(effectiveRoot, adapters), store, adapter: adapters.tracker, git: adapters.git,
+        queue: createProjectionQueue(effectiveRoot, adapters), store, adapter: adapters.tracker, git: adapters.git, provider: adapters.provider, now: adapters.now,
       });
       return formatCliResult({ code: outcomes.some(item => item.status === 'queued') ? 3 : 0, summary: `Reconciled ${outcomes.length} tracker projection(s)`, details: { unit, outcomes } });
     }

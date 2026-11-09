@@ -1,4 +1,6 @@
 import { acceptanceCoverage, hasInvalidEvidence } from './evidence.mjs';
+import { currentCorrections, correctionSource, productAcceptance } from './acceptance-correction.mjs';
+import { effectArgsDigest } from './approvals.mjs';
 
 const invalid = message => Object.assign(new Error(message), { code: 'GOAL_INCOMPLETE' });
 
@@ -14,10 +16,16 @@ export async function validateGoalCompletion({ continuity, unit, proof, unitStor
     const record = await unitStore.read(item.unit);
     if (!record || record.continuity?.goalId !== continuity.goal.id || !record.accepted
       || (item.unit === unit && !requireClosed ? !['Accepted', 'Delivering', 'Delivered'].includes(record.state) : record.state !== 'Closed')) throw invalid('goal evidence must come from an accepted goal unit');
+    const coverage = acceptanceCoverage(productAcceptance(record), record.evidence ?? []);
+    const correction = currentCorrections(record).find(receipt => receipt.request.acceptanceRef === item.acceptance);
+    const criterion = record.acceptance?.find(entry => entry.id === item.acceptance);
+    const corrected = correction && criterion && effectArgsDigest(correctionSource(record)) === correction.request.sourceDigest
+      && effectArgsDigest(criterion) === correction.request.criterionDigest
+      && effectArgsDigest({ request: correction.request, userInputRef: correction.userInputRef }) === correction.requestDigest;
+    // Preflight maps retained obligations; only the guarded terminal paths can produce Closed goal evidence.
     if (record.acceptance?.some(entry => entry.status === 'deferred') || hasInvalidEvidence(record.evidence ?? [])
       || !record.acceptance?.some(entry => entry.id === item.acceptance && entry.text === item.criterion && !['deferred','dropped'].includes(entry.status))
-      || !acceptanceCoverage(record.acceptance, record.evidence ?? []).ok
-      || !acceptanceCoverage(record.acceptance, record.evidence ?? []).covered.includes(item.acceptance)) throw invalid('goal acceptance evidence is missing');
+      || !coverage.ok || !coverage.covered.includes(item.acceptance) && !corrected) throw invalid('goal acceptance evidence is missing');
   }
   return true;
 }

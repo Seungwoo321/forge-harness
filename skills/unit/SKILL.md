@@ -26,6 +26,8 @@ When acceptance returns exit 20 (the unit is `InReview`), start the independent 
 
 Use the Unit Record and effect ledger through the unit CLI. Do not recreate a unit with a different request under the same ID.
 
+For a demonstrated mismatch that recorded an external observation or delivery obligation as a product gate criterion, use `unit acceptance correct <unit> --request <file> --user-input <ref>` on the original submitted SelfGated unit. Follow the packaged `docs/acceptance-recovery.md` for the exact request and trusted verifier contract. Preserve every original requirement and failed evidence; never invent passing test IDs. Unsupported user-input references or missing provenance/observation verification block correction. Refresh `unit progress` between corrections, then rerun acceptance and required independent review before delivery. Delivery corrections explicitly preserve the engine or external owner. For external ownership keep delivery:none; the trusted read-only verifyExternalDelivery provider must establish actual accepted-target-bound delivery before finish/finalization. Never enable engine delivery to satisfy an externally owned obligation. Do not patch installed copies or stored records.
+
 If a command leaves the unit `Blocked`, keep this owning session active and do not write a terminal result. Supervise the bounded resolver path, wait for its completed root-cause submission, then run `unit resume` and continue at the returned original stage in this same session.
 
 ## Remote failure after acceptance

@@ -1,4 +1,5 @@
 import { validateAcceptedContent } from './delivery.mjs';
+import { verifyExternalDeliveryBoundary } from './acceptance-correction.mjs';
 import { appendFile, mkdir, open, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { transitionRecord } from './unit-state.mjs';
@@ -94,9 +95,10 @@ export async function projectUnit(record, adapter, queue) {
   }
 }
 
-async function revalidateTerminalTarget({ store, unit, git }) {
+async function revalidateTerminalTarget({ store, unit, git, provider, now }) {
   const record = await store.read(unit);
   if (!record?.accepted || record.state !== 'Delivered') return record;
+  await verifyExternalDeliveryBoundary({ store, unit, adapters: { git, provider, now } });
   if (typeof git?.inspectUnit !== 'function') throw errorWithCode('ADAPTER_MISSING', 'terminal completion requires Git inspection');
   return store.update(unit, async current => {
     if (!current.accepted || current.state !== 'Delivered') return current;
@@ -111,8 +113,8 @@ function blocksOnDeferred(record) {
   return (record.acceptance ?? []).some(item => item.status === 'deferred') && !record.next?.unit;
 }
 
-export async function projectTerminalUnit({ store, unit, adapter, queue, now, git }) {
-  let record = await revalidateTerminalTarget({ store, unit, git });
+export async function projectTerminalUnit({ store, unit, adapter, queue, now, git, provider }) {
+  let record = await revalidateTerminalTarget({ store, unit, git, provider, now });
   if (!record) throw errorWithCode('UNIT_NOT_FOUND', `unit not found: ${unit}`);
   if (record.state !== 'Delivered') throw errorWithCode('INVALID_TRANSITION', 'only Delivered units can close');
   if (blocksOnDeferred(record)) throw errorWithCode('DEFERRED_ACCEPTANCE', 'deferred acceptance criteria prevent close');
@@ -136,8 +138,8 @@ export async function projectTerminalUnit({ store, unit, adapter, queue, now, gi
   return { projected: true, record };
 }
 
-export async function commitTerminalClose({ store, unit, git, sessionStart, sessionClose }) {
-  const record = await revalidateTerminalTarget({ store, unit, git });
+export async function commitTerminalClose({ store, unit, git, provider, now, sessionStart, sessionClose }) {
+  const record = await revalidateTerminalTarget({ store, unit, git, provider, now });
   if (record?.state === 'SelfGated') return record;
   return await store.update(unit, current => {
     if (current.state === 'Closed' && current.sessionFinalization && sessionClose?.result?.closed === true
@@ -159,21 +161,21 @@ export async function commitTerminalClose({ store, unit, git, sessionStart, sess
   });
 }
 
-export async function closeDeliveredUnit({ store, unit, adapter, queue, now, git }) {
-  const record = await revalidateTerminalTarget({ store, unit, git });
+export async function closeDeliveredUnit({ store, unit, adapter, queue, now, git, provider }) {
+  const record = await revalidateTerminalTarget({ store, unit, git, provider, now });
   if (record?.next?.handoff || record?.sessionFinalization || record?.continuityRequired || record?.state === 'SelfGated') return { ...record, closePending: true };
-  const projected = await projectTerminalUnit({ store, unit, adapter, queue, now, git });
+  const projected = await projectTerminalUnit({ store, unit, adapter, queue, now, git, provider });
   if (!projected.projected) return { ...projected.record, closePending: true };
-  const closed = await commitTerminalClose({ store, unit, git });
+  const closed = await commitTerminalClose({ store, unit, git, provider, now });
   return closed.state === 'Closed' ? closed : { ...closed, closePending: true };
 }
 
-export async function reconcileProjectionQueue({ queue, store, adapter, now, git }) {
+export async function reconcileProjectionQueue({ queue, store, adapter, now, git, provider }) {
   const outcomes = [];
   for (const entry of await queue.pending()) {
     try {
       if (entry.terminal) {
-        const target = await revalidateTerminalTarget({ store, unit: entry.unit, git });
+        const target = await revalidateTerminalTarget({ store, unit: entry.unit, git, provider, now });
         if (target?.state !== 'Delivered') throw errorWithCode('INVALID_TRANSITION', 'terminal projection requires current Delivered acceptance');
       }
       if (!adapter || typeof adapter.read !== 'function' || typeof adapter.project !== 'function') {
@@ -188,7 +190,7 @@ export async function reconcileProjectionQueue({ queue, store, adapter, now, git
         const current = await store.read(entry.unit);
         if (current?.state === 'Delivered' && current.terminalProjection?.revision === entry.projection.revision) {
           await store.update(entry.unit, record => ({ ...record, tracker: { ...record.tracker, projected: true, projectionRevision: entry.projection.revision } }));
-          if (!current.next?.handoff && !current.sessionFinalization) await commitTerminalClose({ store, unit: entry.unit, git });
+          if (!current.next?.handoff && !current.sessionFinalization) await commitTerminalClose({ store, unit: entry.unit, git, provider, now });
         }
       }
       outcomes.push({ id: entry.id, status: 'projected' });

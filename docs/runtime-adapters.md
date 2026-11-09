@@ -29,7 +29,7 @@ export async function createRuntimeAdapters({ cwd, adapters }) {
 | `tracker` | `read`, `project`: 외부 작업관리 읽기·멱등 투영. tracker가 없는 단위는 등록 불필요 |
 | `sessionRunner` | 계약 `harness.session-adapter/1`, 기능 목록, `observe`, `execute`, `verify`: 신원·cwd 관찰, 기동/종료, 실제 효과 검증 |
 | `repository` | PR 생성·머지의 `deliveryContext`, `execute`, `verify` |
-| `provider` | `verifyUserInput`: 사용자 승인 입력의 실제 출처 확인 |
+| `provider` | `verifyUserInput`: 사용자 승인 입력의 실제 출처 확인. 검증 방식 정정에는 `verifyAcceptanceCorrection`, 외부 소유 전달에는 `verifyExternalDelivery`도 필수. 원 권한·기록 불일치·관찰/현재 외부 전달 증거를 읽기 전용 검증 |
 | `effect` + `effectContext` | 일반 외부 효과의 `execute`, `verify` 및 신뢰 경계 boolean 문맥. 두 제공자는 함께 등록 |
 
 `contentFingerprint`는 검증 경로·바이트·파일 모드와 포함/제외 규칙의 정렬된 해시다. `head`만으로 변경된 작업트리의 검증을 대체하지 않는다. delivery를 사용하는 관찰에는 `repo`, `branch`, `tree`, `indexTree`, `headTree`, `base`를 추가한다. 요청이 관찰 결과나 승인 대상을 덮어쓸 수 없다.
@@ -71,6 +71,8 @@ merge 전달은 시작할 때 원장의 기존 intent 경계를 고정한다. �
 전달 문맥은 `resourceOwned`, `productOwned`, `inScope`, `operational`, `irreversible`, `containsSecret`, `forbiddenCommand`의 boolean을 제공한다. 사용자 지시는 신뢰된 제공자가 검증하며 요청 파일의 자기 신고로 승격하지 않는다. 등록 실패는 구조화된 RESULT로 나오고 필수 제공자가 없는 연산은 차단된다.
 
 전체 계약: [명세 §7·§8](spec.md#7-스킬-구성과-계약). 런타임 경계: [runtime-adapters.mjs](../scripts/lib/runtime-adapters.mjs). 외부 호출 진입점: [adapters.mjs](../scripts/lib/adapters.mjs).
+
+동일 단위 검증 방식 정정의 정확한 제공자 입력·응답·증거 계약은 [검증 정정](acceptance-recovery.md#제공자-계약)에 정의한다. 사용자 입력 참조의 형식·원 저장소 접근은 호스트 제공자가 소유하며 코어는 특정 세션 제공자의 참조를 변환하거나 다른 출처로 대신 승인하지 않는다. 미지원 참조 형식은 승인 실패다. acceptance-coverage 제공자는 전달된 제품 기준 투영과 실제 제품 증거를 사용한다. 다른 HEAD의 경로 선택이나 미검증 ID 일괄 성공으로 누락을 숨기지 않는다.
 
 미수신 재시도는 native history/queue에 요청이 없고 정확한 입력이 composer에 남아 있을 때만 정책 상한 안에서 같은 intent로 Enter를 재개한다. 빈 composer나 단순 조회 실패로는 미제출을 추정하지 않는다.
 

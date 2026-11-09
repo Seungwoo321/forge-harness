@@ -34,6 +34,8 @@ export async function createRuntimeAdapters({ cwd, adapters }) {
 
 `contentFingerprint`는 검증 경로·바이트·파일 모드와 포함/제외 규칙의 정렬된 해시다. `head`만으로 변경된 작업트리의 검증을 대체하지 않는다. delivery를 사용하는 관찰에는 `repo`, `branch`, `tree`, `indexTree`, `headTree`, `base`를 추가한다. 요청이 관찰 결과나 승인 대상을 덮어쓸 수 없다.
 
+상류 통합 뒤 scope recheck의 귀속 복구는 제공자가 승인 설정에서 읽은 `baseRef`와 `base`를 사용한다. `baseRef`는 heads/remotes 참조로 해석되고 현재 브랜치와 달라야 한다. `base`는 현재 HEAD와 그 참조의 유일한 merge-base이며 최초 체크포인트 HEAD의 후손이다. `repo`, `branch`, `head`, `tree`, `contentFingerprint: git-tree:<tree>`, `changedPaths`는 같은 제출 대상의 실제 Git 관찰이다. 제어면은 현재 단위 diff를 다시 계산하고 제공자 관찰과 일치하는지 검사한다. 사용자 요청으로 base·경로를 덮어쓰거나 파일 이름만으로 상류 제외를 선언하지 않는다. 메타데이터가 없으면 기존 경로 검사만 수행하며, 불완전하거나 stale한 base 관찰은 복구를 허용하지 않는다.
+
 게이트의 `describe`는 id, 실행할 `command` 배열, `config`, 모든 입력 파일의 상대 경로·내용·실행 모드, 도구 버전과 보고서 형식을 담는다. 제어면은 입력을 원본과 대조해 격리된 사본으로 만들고 그 사본에서 명령을 직접 실행한다. 원본 작업 트리는 실행 프로세스에 노출하지 않는다. 실행 전후의 사본과 현재 대상·게이트 입력을 확인하고 실제 stdout을 내용 주소형 보고서로 보존한다. 입력 파일에는 실행에 필요한 프로젝트 소스·설정·의존성을 포함한다. 내부 상대 심볼릭 링크는 `mode: "120000"`과 링크 대상 문자열로 기술하며 외부 탈출은 거부한다. 격리 실행 영수증이 없는 예전 통과 증거는 보존하되 새 수용에서 재사용하지 않는다.
 
 실행 중 생성할 디렉터리는 `outputDirectories`에 상대 경로로 선언한다. 제어면은 입력과 겹치지 않는 디렉터리만 쓰기 가능하게 만들고 이 목록을 fingerprint에 포함한다. pnpm이 `node_modules`를 생성해야 한다면 해당 경로를 선언하고 `package.json`과 `pnpm-lock.yaml`을 입력에 포함한다. 이미 캡처한 입력 파일을 산출 디렉터리 아래에 둘 수 없다.

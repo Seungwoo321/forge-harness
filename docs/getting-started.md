@@ -99,7 +99,7 @@ prelaunch의 공개 scope도 `scopePaths`를 권한 경계로 사용한다. 별�
 node "$PLUGIN_ROOT/scripts/unit.mjs" unit scope recheck greeting --adapters runtime.mjs
 ```
 
-현재 승인 경로에 모두 포함되는 자동 생성 지적만 해소한다. 원문·인덱스·digest·검사 범위는 `scopeRechecks`에 보존되고, 실제 범위 이탈이나 리뷰어 지적은 남는다. 재호출은 변경 없이 빈 resolved 배열을 반환한다.
+현재 승인 경로에 모두 포함되거나 현재 승인 Git base의 상류 전용 변경으로 검증되는 자동 생성 지적만 해소한다. 상류 변경을 통합한 뒤 현재 HEAD의 구현 제출·게이트·리뷰를 마친 같은 단위에서 위 명령을 실행한다. trusted Git 제공자는 `repo`, `branch`, `head`, `tree`, `contentFingerprint: git-tree:<tree>`, `base`, `baseRef`, `changedPaths`를 반환한다. 제어면은 실제 저장소·브랜치·merge-base·체크포인트·단위 diff를 독립 대조하며 단위 전용 커밋이나 단계가 변경한 경로는 상류 전용으로 제외하지 않는다. Git HEAD·브랜치·base 참조와 단위 잠금 아래 현재 관찰을 재확인하고 원 지적과 귀속 근거를 영수증에 남긴다. 메타데이터가 없으면 상류 제외 권한을 얻지 못하며, 잘못되거나 오래된 관찰은 거부한다. 복구는 기존 제출·수용·리뷰 증거를 새 대상으로 바꾸지 않는다. 원문·인덱스·digest·검사 범위는 `scopeRechecks`에 보존되고, 실제 범위 이탈이나 리뷰어 지적은 남는다. 재호출은 변경 없이 빈 resolved 배열을 반환한다.
 
 리뷰어의 과거 지적은 별도 명시적 요청으로 해소한다. 수정 후 완료된 독립 ship 리뷰와 지적별 수정 증거가 필요하며 ship만으로는 해소되지 않는다. `finding-fixes.json`은 다음 형태다:
 

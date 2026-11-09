@@ -13,6 +13,15 @@ test('Korean full drafts preserve slash identity across wide wraps and reject cl
  const boundary='A'.repeat(127)+'/tail';assert.equal(classifyNativeGoalDraft(render(`/goal ${boundary.replace('/','')}`),'codex',boundary),'other');
 });
 
+test('multiline slash loss affects only the initial logical-line burst and keeps full packet text',()=>{
+ const objective='Goal: 승인 패키지/그룹과 실패/생략\n\nRead packet/one and checksum/first\nRead packet/two and checksum/second';
+ const damaged='/goal '+objective.replace('패키지/그룹','패키지그룹').replace('실패/생략','실패생략');
+ const screen=text=>`› ${text.replaceAll('\n','\n  ')}\n model · Ready · context`;
+ assert.equal(classifyNativeGoalDraft(screen(damaged),'codex',objective),'slash-loss');
+ assert.equal(classifyNativeGoalDraft(screen(damaged.replace('packet/one','packetone')),'codex',objective),'other');
+ assert.equal(classifyNativeGoalDraft(screen('/goal '+objective),'codex',objective),'exact');
+});
+
 test('first argument must flush visibly before a Korean objective can reach slash-popup dispatch',async()=>{
  const objective='Goal: 한글 패키지/그룹과 실패/생략, 로그/산출물 전체 원문';
  let draft='',pending='',prefixReads=0,entered=0,bulkBeforeSettle=false;

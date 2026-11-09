@@ -275,13 +275,12 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
           if (typeof submission?.confirm !== 'function') throw invalid('durable native Return fence is unavailable');
           await submission.confirm(request.binding);
         },
-        repair:request.resumeDraft && !submission.repairAttempted && request.preTurn?.defaultLineEditing === true ? async (guard,correction) => {
+        repair:request.resumeDraft && (!submission.repairAttempted || submission.recoverClear) && request.preTurn?.defaultLineEditing === true ? async (guard,correction) => {
           if (typeof submission.repair !== 'function') throw invalid('durable native draft correction fence is unavailable');
-          await guard(); await submission.repair(request.binding,correction);
-          for (const key of ['ctrl+e','ctrl+u']) {
-            await fenceOwner(); await guard();
-            await invoke('cmux',['send-key',...target,key],observed.cwd);
-          }
+          await guard(); await submission.repair(request.binding,{...correction,route:'codex-cancel/1'});
+          await fenceOwner(); await guard();
+          const receipt = await json('cmux',['rpc','surface.send_text',JSON.stringify({workspace_id:observed.workspaceId,surface_id:observed.sessionId,text:'\x03'})],observed.cwd);
+          if (receipt.queued !== false || receipt.workspace_id !== observed.workspaceId || receipt.surface_id !== observed.sessionId) throw invalid('native draft clear input is queued or its target is unverified');
         } : undefined,
         newline: async () => { await fenceOwner(); return runtime === 'cmux' ? invoke('cmux',['send-key',...target,'shift+enter'],observed.cwd) : orcaSend('\x1b[13;2u'); },
         enter: async beforeInput => { await fenceOwner(); await beforeInput?.(); return runtime === 'cmux' ? invoke('cmux',['send-key',...target,'Return'],observed.cwd) : orcaSend('\r'); },

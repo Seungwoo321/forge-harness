@@ -35,8 +35,8 @@ function matches(display, expected) {
 }
 
 function slashLossDraft(objective) {
-  const characters = [...` ${objective}`];
-  return '/goal' + characters.slice(0,128).join('').replaceAll('/','') + characters.slice(128).join('');
+  const [first,...rest] = objective.split('\n'),characters = [...` ${first}`];
+  return '/goal' + characters.slice(0,128).join('').replaceAll('/','') + characters.slice(128).join('') + (rest.length ? '\n'+rest.join('\n') : '');
 }
 
 export function classifyNativeGoalDraft(screen,provider,objective) {
@@ -44,7 +44,7 @@ export function classifyNativeGoalDraft(screen,provider,objective) {
   const display = contents(screen,provider);
   const exact = text => typeof screen?.draft === 'string' ? screen.draft === text : display.startsWith('/goal ') && matches(display,text);
   if (exact(expected)) return 'exact';
-  if (provider === 'codex' && !objective.includes('\n')) {
+  if (provider === 'codex') {
     const damaged = slashLossDraft(objective);
     if (damaged !== expected && exact(damaged)) return 'slash-loss';
   }
@@ -88,7 +88,14 @@ export async function submitNativeGoal({ provider, objective, read, write, newli
         await verify(); const current = await read(); requireReady(current);
         if (classifyNativeGoalDraft(current,provider,objective) !== 'slash-loss') throw taskError('native damaged draft changed before correction');
       },{kind:'first-burst-slash-loss',fromDigest:taskDigest(slashLossDraft(objective)),toDigest:taskDigest(`/goal ${objective}`)});
-      requireEmpty(await read()); await verify();
+      let cleared = false;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const current = await read(); requireReady(current); await verify();
+        if (contents(current,provider) === '' || ['Ask Codex to do anything','Explain this codebase','Summarize recent commits','Implement {feature}','Find and fix a bug in @filename','Write tests for @filename'].includes(contents(current,provider))) { cleared = true; break; }
+        if (classifyNativeGoalDraft(current,provider,objective) !== 'slash-loss') throw taskError('native damaged draft changed while clearing');
+        await new Promise(resolve => setTimeout(resolve,100));
+      }
+      if (!cleared) throw taskError('native goal draft did not clear');
     } else throw taskError('native pending draft is not the exact original or authorized slash-loss variant');
   }
   const type = async text => {

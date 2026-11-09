@@ -128,13 +128,21 @@ export async function executeEffect({
       const previous = rows.findLast(row => row.event === 'submission' && row.seq === input.seq && row.key === input.key);
       const readOnly = rows.some(row => row.event === 'result' && row.seq === input.seq && row.key === input.key);
       const belongs = row => row.seq === input.seq && row.key === input.key;
+      const repairIndex = rows.findLastIndex(row => belongs(row) && row.event === 'draft-repair');
+      const priorRepair = rows[repairIndex];
+      const recoverClear = priorRepair?.correction?.route === undefined && priorRepair?.correction?.kind === 'first-burst-slash-loss'
+        && effectArgsDigest(priorRepair.binding) === effectArgsDigest(previous?.binding)
+        && rows.slice(repairIndex + 1).some(row => belongs(row) && row.event === 'verification' && row.verify?.code === 'SESSION_TASK_UNVERIFIED' && row.verify.message === 'native goal composer contains another draft')
+        && !rows.some(row => belongs(row) && row.event === 'draft-clear-recovery');
       const submission = {attempted:Boolean(previous),binding:previous?.binding,recovery,readOnly,
         pendingDraft:rows.some(row => belongs(row) && row.event === 'verification' && row.verify?.code === 'SESSION_TASK_UNVERIFIED' && row.verify.message === 'native goal composer did not settle'),
         repairAttempted:rows.some(row => belongs(row) && row.event === 'draft-repair'),
+        recoverClear,
         confirmed:rows.some(row => belongs(row) && row.event === 'confirmation'),
         async repair(binding,correction) {
-          if (correction?.kind !== 'first-burst-slash-loss' || !/^sha256:[a-f0-9]{64}$/.test(correction.fromDigest ?? '') || !/^sha256:[a-f0-9]{64}$/.test(correction.toDigest ?? '')) throw errorWithCode('LEDGER_VERIFY_INVALID','native draft correction binding is incomplete');
-          await checkpoint('draft-repair',binding,correction);
+          if (correction?.kind !== 'first-burst-slash-loss' || correction.route !== 'codex-cancel/1' || !/^sha256:[a-f0-9]{64}$/.test(correction.fromDigest ?? '') || !/^sha256:[a-f0-9]{64}$/.test(correction.toDigest ?? '')) throw errorWithCode('LEDGER_VERIFY_INVALID','native draft correction binding is incomplete');
+          if (submission.repairAttempted && (!submission.recoverClear || correction.fromDigest !== priorRepair.correction.fromDigest || correction.toDigest !== priorRepair.correction.toDigest)) throw errorWithCode('EFFECT_UNCERTAIN','legacy native clear recovery is unverified');
+          await checkpoint(submission.repairAttempted ? 'draft-clear-recovery' : 'draft-repair',binding,correction);
         },
         async confirm(binding) { await checkpoint('confirmation',binding); },
         async mark(binding) {
@@ -152,9 +160,11 @@ export async function executeEffect({
         if (submission.readOnly || !submission.attempted || submission.confirmed
           || effectArgsDigest(binding) !== effectArgsDigest(submission.binding)
           || event === 'draft-repair' && (!submission.pendingDraft || submission.repairAttempted)
+          || event === 'draft-clear-recovery' && !submission.recoverClear
           || (await ledger.read()).some(row => belongs(row) && row.event === event)) throw errorWithCode('EFFECT_UNCERTAIN','native draft edit or Return was already attempted or is unverified');
         await ledger.append({event,unit,effect,seq:input.seq,key:input.key,binding:structuredClone(binding),...(correction?{correction:structuredClone(correction)}:{}),attempted_at:adapter.now()});
         if (event === 'draft-repair') submission.repairAttempted = true;
+        else if (event === 'draft-clear-recovery') submission.recoverClear = false;
         else submission.confirmed = true;
       }
       return {...input,submission};

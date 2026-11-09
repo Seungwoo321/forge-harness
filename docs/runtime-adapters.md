@@ -81,3 +81,5 @@ merge 전달은 시작할 때 원장의 기존 intent 경계를 고정한다. �
 명시적 범위 축소의 정확한 `verifyAcceptanceChange` 계약은 [승인된 기준 제외](criteria-changes.md)에 정의한다. 분류 정정 검증으로 제품 요구 제외 권한을 대신하지 않는다.
 
 기존 사용자 소유권 등록은 [기존 소유자 복구](session-custody-recovery.md)의 `verifySessionAdoption` 및 `session.observe({recipient,nativeOwner:true})` 계약을 따른다. 현재 목표 정책과 과거 단위 정책의 세션 설정은 구분하며 실제 수신자의 native 신원은 `recipientEnv`로 확인한다.
+
+관리 session.start의 `input.submission`은 제어면이 제공하는 동일 intent의 영속 제출 경계다. session runner는 이 in-process context를 execute/verify에 보존하고 최초 입력 전에 비동기 mark를 기다린다. [동일 수신자 복구](native-goal-recovery.md)의 부재·재호출·관찰 전용 계약을 따른다.

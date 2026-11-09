@@ -241,7 +241,11 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     if (!observed.executable
       || path.basename(observed.executable) !== path.basename(argv[0])) throw invalid('configured worker executable has not started');
     const transport = transportFor(argv[0], env);
-    const result = goalPrompt ? await observeGoalTask({ transport, observed, input, prompt, packets, submission, submit: async (_request, beforeWrite) => {
+    const result = goalPrompt ? await observeGoalTask({ transport, observed, input, prompt, packets, submission, submit: async (request, beforeWrite) => {
+      const fenceOwner = async () => {
+        const current = await inspect(observed.sessionId,observed.cwd,observed.executable);
+        if (JSON.stringify(current) !== JSON.stringify(observed) || (await transport.identity(current)).threadId !== request.threadId) throw invalid('worker changed before native goal input');
+      };
       const target = ['--workspace', observed.workspaceId, '--surface', observed.sessionId];
       const read = runtime === 'cmux' ? () => invoke('cmux',['read-screen',...target],observed.cwd) : async () => {
         const terminal = (await orca(['terminal','read','--terminal',observed.sessionId,'--screen'],observed.cwd)).terminal;
@@ -252,14 +256,19 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
         const result = await orca(['terminal','send','--terminal',observed.sessionId,'--text',text],observed.cwd);
         if (result.send?.accepted !== true) throw invalid('Orca terminal did not accept input');
       };
-      const write = runtime === 'cmux' ? text => invoke('cmux',['rpc','surface.send_text',JSON.stringify({workspace_id:observed.workspaceId,surface_id:observed.sessionId,text})],observed.cwd)
-        : orcaSend;
-      await submitNativeGoal({provider:path.basename(observed.executable),objective:prompt,read,write,beforeWrite,
-        newline: runtime === 'cmux' ? () => invoke('cmux',['send-key',...target,'shift+enter'],observed.cwd) : () => orcaSend('\x1b[13;2u'),
-        enter: runtime === 'cmux' ? () => invoke('cmux',['send-key',...target,'Return'],observed.cwd) : () => orcaSend('\r'),
+      const write = async (text, beforeInput) => {
+        await fenceOwner();
+        await beforeInput?.();
+        return runtime === 'cmux' ? invoke('cmux',['rpc','surface.send_text',JSON.stringify({workspace_id:observed.workspaceId,surface_id:observed.sessionId,text})],observed.cwd) : orcaSend(text);
+      };
+      await submitNativeGoal({provider:path.basename(observed.executable),objective:prompt,read,write,beforeWrite,recovery:input.submission?.recovery === true,
+        newline: async () => { await fenceOwner(); return runtime === 'cmux' ? invoke('cmux',['send-key',...target,'shift+enter'],observed.cwd) : orcaSend('\x1b[13;2u'); },
+        enter: async beforeInput => { await fenceOwner(); await beforeInput?.(); return runtime === 'cmux' ? invoke('cmux',['send-key',...target,'Return'],observed.cwd) : orcaSend('\r'); },
         verify: async () => {
           if (JSON.stringify(await inspect(observed.sessionId,observed.cwd,observed.executable)) !== JSON.stringify(observed)) throw invalid('worker changed before goal input');
-          if ((await transport.observeGoal({observed,input,prompt,packets})).state !== 'absent') throw invalid('native goal is already present');
+          const current = await transport.observeGoal({observed,input,prompt,packets});
+          if (current.state !== 'absent' || (current.threadId ?? current.fence) !== request.threadId
+            || input.submission?.recovery && current.notApplied !== true) throw invalid('native goal or pending input is already present or unverified');
         },
       });
     } }) : await observeTask({ transport, observed, input, prompt, packets, submit: true });
@@ -389,6 +398,7 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       if (input.effect === 'session.close') return close(input, false);
       if (input.effect !== 'session.start' || !path.isAbsolute(input.args?.cwd ?? '')) throw invalid('unsupported session effect');
       const { argv, env, goalPrompt } = await configuredLaunch(input.args);
+      if (goalPrompt && typeof input.submission?.mark !== 'function') throw invalid('managed launch requires a durable submission fence');
       if (goalPrompt && /[\r\t\0\x1b]/.test(goalPrompt)) throw invalid('native goal contains unsupported input');
       if (!Array.isArray(argv) || !argv.length || argv.some(value => typeof value !== 'string' || !value || value.includes('\0'))) throw invalid('launch must return a nonempty argument vector');
       const assignments = Object.entries(env).map(([key, value]) => `${key}=${quote(value)}`).join(' ');
@@ -399,12 +409,11 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       } else {
         await orca(['terminal', 'create', '--worktree', `path:${input.args.cwd}`, '--title', marker(input.key), '--command', text], input.args.cwd);
       }
-      const submission = {};
-      return poll(() => findStarted(input, submission));
+      return poll(() => findStarted(input, input.submission));
     },
     async verify(input) {
       try {
-        const result = await (input.effect === 'session.close' ? close(input, true) : input.effect === 'session.deliver' ? deliver(input) : findStarted(input));
+        const result = await (input.effect === 'session.close' ? close(input, true) : input.effect === 'session.deliver' ? deliver(input) : findStarted(input,input.submission));
         return { status: input.effect === 'session.close' && !result.closed ? 'not-applied' : 'completed', result };
       }
       catch (error) {

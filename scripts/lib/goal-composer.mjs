@@ -34,13 +34,29 @@ function matches(display, expected) {
   return position === expected.length;
 }
 
-export async function submitNativeGoal({ provider, objective, read, write, newline, enter, verify, beforeWrite = () => {} }) {
+export async function submitNativeGoal({ provider, objective, read, write, newline, enter, verify, beforeWrite = () => {}, recovery = false }) {
   if (!['codex','claude'].includes(provider) || typeof objective !== 'string' || !objective.trim() || /[\r\t\0\x1b]/.test(objective) || (objective.includes('\n') && typeof newline !== 'function')) throw taskError('native goal contains unsupported input');
-  const current = contents(await read(), provider);
-  if (!(provider === 'codex' ? !current || ['Ask Codex to do anything','Explain this codebase','Summarize recent commits','Implement {feature}','Find and fix a bug in @filename','Write tests for @filename'].includes(current) : !current || /^Try "[^\n]*"$/.test(current))) throw taskError('native goal composer contains another draft');
+  const requireEmpty = screen => {
+    const current = contents(screen, provider);
+    if (!(provider === 'codex' ? !current || ['Ask Codex to do anything','Explain this codebase','Summarize recent commits','Implement {feature}','Find and fix a bug in @filename','Write tests for @filename'].includes(current) : !current || /^Try "[^\n]*"$/.test(current))) throw taskError('native goal composer contains another draft');
+    if (recovery) {
+      const rendered = typeof screen === 'object' ? screen.screen : screen;
+      const lines = typeof rendered === 'string' ? rendered.split('\n') : [];
+      const start = lines.findLastIndex(line => provider === 'codex' ? /^\s*›(?: |$)/.test(line) : /^\s*❯(?:[ \u00a0]|$)/u.test(line));
+      const footer = lines.slice(start + 1);
+      const status = footer.find(line => /· (Ready|Working) ·/.test(line));
+      if (start < 0 || (provider === 'codex' ? !status || !/· Ready ·/.test(status)
+        : !footer.some(line => /shift\+tab|for shortcuts/.test(line)) || footer.some(line => /esc to interrupt/i.test(line)))) throw taskError('native goal receiver is not verifiably Ready');
+    }
+  };
+  requireEmpty(await read());
   await verify();
-  beforeWrite();
-  await write('/');
+  await beforeWrite();
+  requireEmpty(await read());
+  await verify();
+  const beforeFirstInput = async () => requireEmpty(await read());
+  await beforeFirstInput();
+  await write('/',beforeFirstInput);
   await write('goal');
   let commandReady = false;
   for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -85,7 +101,7 @@ export async function submitNativeGoal({ provider, objective, read, write, newli
     if (settled === 2) {
       await verify();
       if (!matchesDraft(await read())) throw taskError('native goal composer changed before submission');
-      await enter();
+      await enter(async () => { if (!matchesDraft(await read())) throw taskError('native goal composer changed before submission'); });
       return;
     }
   }

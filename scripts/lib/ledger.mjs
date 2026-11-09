@@ -121,12 +121,30 @@ export async function executeEffect({
   if (effectClass === 'E4' && !approvalRef && context.productOwned !== true) {
     throw errorWithCode('EFFECT_APPROVAL_REQUIRED', 'E4 effect requires an approval reference');
   }
-  const verify = async input => {
-    try { return await adapter.verify(input); }
-    catch { return { status: 'unknown', verify: null }; }
-  };
-
   return await store.withLock(unit, async ledger => {
+    const submissionInput = async (input, recovery) => {
+      if (effect !== 'session.start' || !input.args.goalPath) return input;
+      const rows = await ledger.read();
+      const previous = rows.findLast(row => row.event === 'submission' && row.seq === input.seq && row.key === input.key);
+      const readOnly = rows.some(row => row.event === 'result' && row.seq === input.seq && row.key === input.key);
+      const submission = {attempted:Boolean(previous),binding:previous?.binding,recovery,readOnly,
+        async mark(binding) {
+          if (submission.readOnly || submission.attempted || (await ledger.read()).some(row => row.event === 'submission' && row.seq === input.seq && row.key === input.key))
+            throw errorWithCode('EFFECT_UNCERTAIN','native goal input was already attempted');
+          const packets = ['handoff','result','goal'].filter(name=>input.args[`${name}Path`] !== undefined).map(name=>({path:input.args[`${name}Path`],digest:input.args[`${name}Digest`]}));
+          if (!binding || !['cmux','orca'].includes(binding.runtime) || !Number.isSafeInteger(binding.pid) || binding.pid < 1 || !binding.executable
+            || effectArgsDigest(binding.packets) !== effectArgsDigest(packets) || binding.cwd !== input.args.cwd || binding.goalDigest !== input.args.goalDigest
+            || !binding.threadId || !binding.sessionId || !binding.incarnationId || !binding.promptDigest || !Array.isArray(binding.packets))
+            throw errorWithCode('LEDGER_VERIFY_INVALID','native goal submission binding is incomplete');
+          await ledger.append({event:'submission',unit,effect,seq:input.seq,key:input.key,binding:structuredClone(binding),attempted_at:adapter.now()});
+          submission.attempted = true; submission.binding = structuredClone(binding);
+        }};
+      return {...input,submission};
+    };
+    const verify = async input => {
+      try { return await adapter.verify(await submissionInput(input,true)); }
+      catch (error) { return {status:'unknown',verify:effect === 'session.start' && input.args.goalPath ? {code:error.code ?? 'SESSION_OBSERVATION_INVALID',message:error.message} : null}; }
+    };
     const records = await ledger.read();
     const intents = records.filter(row => row.event === 'intent' && row.key === prepared.key);
     const priorIntent = intents.at(-1);
@@ -204,7 +222,7 @@ export async function executeEffect({
     };
     await ledger.append(intent);
     try {
-      const result = await adapter.execute({ effect, args, key: prepared.key, seq });
+      const result = await adapter.execute(await submissionInput({ effect, args, key: prepared.key, seq },false));
       const doneAt = adapter.now();
       await ledger.append({ event: 'result', unit, seq, key: prepared.key, result, done_at: doneAt, verify: result?.verify ?? null });
       return { status: 'completed', key: prepared.key, result, seq };

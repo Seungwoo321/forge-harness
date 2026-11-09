@@ -86,3 +86,26 @@ test('Orca rendered empty composer may omit its trailing space',async()=>{
   write:async text=>{draft+=text;},verify:async()=>{},enter:async()=>{entered=true;}});
  assert.equal(entered,true);
 });
+
+test('a draft or modal appearing during durable fence persistence prevents the first native input',async()=>{
+ for(const replacement of ['user note','modal']) {
+  let draft='',writes=0;
+  const read=async()=>replacement==='modal'&&draft==='modal'?'Review hooks':`› ${draft}\n model · Ready · context`;
+  await assert.rejects(submitNativeGoal({provider:'codex',objective:'finish',recovery:true,read,verify:async()=>{},
+   beforeWrite:async()=>{await Promise.resolve();draft=replacement;},write:async text=>{writes++;draft+=text;},enter:async()=>{}}));
+  assert.equal(writes,0);
+ }
+});
+
+test('recovery requires rendered Ready and rechecks the composer after native identity probes',async()=>{
+ for(const screen of [{draft:''},'› \n model · Working · context','› old prompt\n model · Ready · context\n› \n model · Working · context']) {
+  let marks=0;
+  await assert.rejects(submitNativeGoal({provider:'codex',objective:'finish',recovery:true,read:async()=>screen,verify:async()=>{},
+   beforeWrite:async()=>{marks++;},write:async()=>{},enter:async()=>{}}),/Ready/);
+  assert.equal(marks,0);
+ }
+ let draft='',writes=0;
+ await assert.rejects(submitNativeGoal({provider:'codex',objective:'finish',recovery:true,read:async()=>`› ${draft}\n model · Ready · context`,verify:async()=>{},
+  write:async(_text,check)=>{draft='foreign draft';await check();writes++;},enter:async()=>{}}),/another draft/);
+ assert.equal(writes,0);
+});

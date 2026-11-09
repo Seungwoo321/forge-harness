@@ -8,7 +8,7 @@ try {
   const { executable, threadId, threadIds, cwd, operation, prompt, clientId } = JSON.parse(source);
   const goalOperation = ['goal', 'goal-observe'].includes(operation);
   const nativeGoal = goalOperation ? readCodexNativeGoal(threadId) : undefined;
-  const result = goalOperation && !nativeGoal && typeof cwd==='string' ? {thread:{id:threadId,cwd},turns:[],queued:[],goal:null} : await withJsonRpcProcess(executable, ['app-server', '--stdio'], async rpc => {
+  const result = operation === 'goal' && !nativeGoal && typeof cwd==='string' ? {thread:{id:threadId,cwd},turns:[],queued:[],goal:null} : await withJsonRpcProcess(executable, ['app-server', '--stdio'], async rpc => {
     if (operation === 'identify') {
       const candidates = [];
       for (const id of threadIds) {
@@ -23,7 +23,6 @@ try {
     if (operation === 'goal') {
       return { thread: { id: thread.id, cwd: thread.cwd }, goal: nativeGoal };
     }
-    if (goalOperation && !nativeGoal) return { thread: {id:thread.id,cwd:thread.cwd}, turns:[],queued:[],goal:null };
     const turns = [];
     let cursor = null;
     do {
@@ -33,7 +32,7 @@ try {
     } while (cursor);
     const queued = [];
     cursor = null;
-    if (!goalOperation) do {
+    do {
       const page = await rpc('thread/queue/list', { threadId, limit: 100, cursor });
       queued.push(...page.data);
       cursor = page.nextCursor;

@@ -963,6 +963,7 @@ CLI 는 사람용 출력의 마지막 줄에 기계용 한 줄 `RESULT {json}` �
 | H-CP-04 | 하네스는 체크포인트 ref 를 삭제하지 않는다 (`checkpoint.retain` 기본 `keep`) | T |
 | H-CP-05 | `.gitignore` 대상과 `checkpoint.exclude` 패턴은 체크포인트 객체에 들어가지 않는다 | T |
 | H-CP-06 | `isolation: shared` 에서 다른 활성 단위의 변경 경로는 이 단위에 귀속되지 않고, 같은 경로를 두 단위가 바꾸면 양쪽에 `shared-path` Finding 이 생긴다 | T |
+| H-CP-07 | 완료된 구현 시도 뒤 더 최신의 공개 reopen이 있으면 기존 stage restart가 정확한 시도·입력·기존 체크포인트·현재 후손 HEAD를 Git 잠금 아래 검증해 다음 시도에 결속한다. 이전 완료·리뷰·실패·orphan 입력을 보존하고 새 수용을 만들지 않는다 | T |
 | H-LG-01 | E2 이상 부작용은 수행 전 intent, 수행 후 result 가 `<stateRoot>/units/<unit>/ledger.ndjson` 에 기록된다. Implementing 스킬은 unit effect로 요청만 하고 제어면이 등급·키·실행·기록을 소유하며, 권한이 거부되면(종료 코드 3) 수행하지 않는다 | T |
 | H-LG-02 | 같은 `key` 의 부작용은 중복 수행되지 않는다 | T |
 | H-LG-03 | result 없는 항목은 재시도 없이 조사 후 확정된다 | T |
@@ -1002,6 +1003,7 @@ CLI 는 사람용 출력의 마지막 줄에 기계용 한 줄 `RESULT {json}` �
 | H-GO-06 | 완료·차단·리뷰 반환은 각각 단일 목적 스킬과 스크립트로 처리한다. 실제 이전에만 수신을 확인하고 수신자 없는 완료·차단은 사용자 보고와 재개 조건을 보존하며 허용된 worker 종료만 정확히 확인한다 | T/L |
 | H-GO-07 | 호스트의 중단·목표 제어·훅 신뢰를 우회하지 않고 미검증 강제 상태를 성공으로 보고하지 않는다 | T/L |
 | H-GO-10 | startup trust 전 기동이 불확실해진 기존 reviewer는 원 intent·수신자를 보존해 검증된 native 부재·빈 Ready에서만 복구한다. Codex 0.167.0의 첫 입력 전 lazy rollout은 별도 unmaterialized 관찰로 원 managed 기동·동일 native 신원·미제출 원장·실제 queue/goal 부재·전체 fresh Ready 화면을 결합하며 일반 조회 실패를 empty로 취급하지 않는다. 최초 입력 전 원장 제출 경계를 동기화하고 crash·동시 재검증·이력 지연 후 중복 입력하지 않는다 | T |
+| H-GO-13 | 기존 미전송 Codex 결과 전달은 같은 intent에서 전체 native 이력·queue 내 해당 참조의 부재와 정확한 수신자/composer를 검증하고 paste 전 submission·Return 전 confirmation을 동기 기록한다. 경계 뒤 신원·패킷·전체 draft를 재검사하며 불확실한 paste·소비된 Return을 반복하지 않는다. 실제 활동·결과 패킷 읽기 없이 전달 완료를 만들지 않는다 | T |
 | H-GO-11 | native goal의 첫 인자가 실제 정착한 뒤 나머지를 입력해 slash 메뉴 손실을 막는다. 원 intent의 사전 Return 실패·동일 native/패킷·전체 Ready draft·실제 goal/queue 부재를 검증한 경우에만 정확한 pending 원문을 재입력 없이 진행하거나, 고정된 첫 burst 슬래시 소실 패턴을 별도 영속 정정 경계로 원문 복구한다. Return은 별도 영속 경계 후 한 번만 수행하고 손상·외래·잘린 draft를 정상으로 간주하지 않는다 | T |
 | H-GO-12 | native draft 정정은 실제 키 모드의 바이트 계약과 pinned 전체-buffer 취소 계약을 검증한 입력을 한 번만 전송하고 다중 논리줄·빈 줄 전체 empty를 관찰한다. 구 named-key 실패는 원 edit marker를 보존한 한 번의 별도 recovery-clear 경계로만 진행하며 새 경로의 queued·unknown·실패를 재전송하지 않는다 | T |
 | H-GO-09 | 제출된 InReview를 포함한 기존 사용자 세션은 같은 단위·이력·정책을 보존한 출처 기반 감사 등록으로 복구하고, 별도 검증 리뷰·동시성·재호출·native 신원 경계를 유지하며 자동 종료하지 않는다 | T/L |

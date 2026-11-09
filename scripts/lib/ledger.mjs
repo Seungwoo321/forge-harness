@@ -123,7 +123,8 @@ export async function executeEffect({
   }
   return await store.withLock(unit, async ledger => {
     const submissionInput = async (input, recovery) => {
-      if (effect !== 'session.start' || !input.args.goalPath) return input;
+      const goalStart = effect === 'session.start' && input.args.goalPath;
+      if (!goalStart && effect !== 'session.deliver') return input;
       const rows = await ledger.read();
       const previous = rows.findLast(row => row.event === 'submission' && row.seq === input.seq && row.key === input.key);
       const readOnly = rows.some(row => row.event === 'result' && row.seq === input.seq && row.key === input.key);
@@ -147,12 +148,15 @@ export async function executeEffect({
         async confirm(binding) { await checkpoint('confirmation',binding); },
         async mark(binding) {
           if (submission.readOnly || submission.attempted || (await ledger.read()).some(row => row.event === 'submission' && row.seq === input.seq && row.key === input.key))
-            throw errorWithCode('EFFECT_UNCERTAIN','native goal input was already attempted');
+            throw errorWithCode('EFFECT_UNCERTAIN',goalStart ? 'native goal input was already attempted' : 'native result input was already attempted');
           const packets = ['handoff','result','goal'].filter(name=>input.args[`${name}Path`] !== undefined).map(name=>({path:input.args[`${name}Path`],digest:input.args[`${name}Digest`]}));
           if (!binding || !['cmux','orca'].includes(binding.runtime) || !Number.isSafeInteger(binding.pid) || binding.pid < 1 || !binding.executable
             || effectArgsDigest(binding.packets) !== effectArgsDigest(packets) || binding.cwd !== input.args.cwd || binding.goalDigest !== input.args.goalDigest
-            || !binding.threadId || !binding.sessionId || !binding.incarnationId || !binding.promptDigest || !Array.isArray(binding.packets))
-            throw errorWithCode('LEDGER_VERIFY_INVALID','native goal submission binding is incomplete');
+            || !binding.threadId || !binding.sessionId || !binding.incarnationId || !binding.promptDigest || !Array.isArray(binding.packets)
+            || !goalStart && (!input.args.recipient || binding.sessionId !== input.args.recipient.sessionId
+              || binding.incarnationId !== input.args.recipient.incarnationId || binding.cwd !== input.args.recipient.cwd
+              || input.args.recipient.worker?.threadId && binding.threadId !== input.args.recipient.worker.threadId))
+            throw errorWithCode('LEDGER_VERIFY_INVALID',goalStart ? 'native goal submission binding is incomplete' : 'native result submission binding is incomplete');
           await ledger.append({event:'submission',unit,effect,seq:input.seq,key:input.key,binding:structuredClone(binding),attempted_at:adapter.now()});
           submission.attempted = true; submission.binding = structuredClone(binding);
         }};
@@ -171,7 +175,7 @@ export async function executeEffect({
     };
     const verify = async input => {
       try { return await adapter.verify(await submissionInput(input,true)); }
-      catch (error) { return {status:'unknown',verify:effect === 'session.start' && input.args.goalPath ? {code:error.code ?? 'SESSION_OBSERVATION_INVALID',message:error.message} : null}; }
+      catch (error) { return {status:'unknown',verify:effect === 'session.deliver' || effect === 'session.start' && input.args.goalPath ? {code:error.code ?? 'SESSION_OBSERVATION_INVALID',message:error.message} : null}; }
     };
     const records = await ledger.read();
     const intents = records.filter(row => row.event === 'intent' && row.key === prepared.key);

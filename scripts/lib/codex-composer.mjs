@@ -13,7 +13,7 @@ function composer(screen) {
 
 export function codexComposerMatches(screen, prompt) { return composerTextMatches(composer(screen), prompt); }
 
-export async function submitCodexComposer({ prompt, read, paste, enter, verify }) {
+export async function submitCodexComposer({ prompt, read, paste, enter, verify, beforePaste = () => {}, beforeEnter = () => {} }) {
   if (/[\r\n\t]/.test(prompt) || prompt.trim() !== prompt || prompt.length > 1600) throw taskError('interactive delivery requires a short single-line packet reference');
   const expected = prompt;
   const before = composer(await read());
@@ -21,6 +21,9 @@ export async function submitCodexComposer({ prompt, read, paste, enter, verify }
     if (!placeholders.has(before)) throw taskError('composer contains another draft');
     await verify();
     if (composer(await read()) !== before) throw taskError('composer changed before paste');
+    await beforePaste();
+    await verify();
+    if (composer(await read()) !== before) throw taskError('composer changed at paste boundary');
     await paste(prompt);
   }
   let stable = 0;
@@ -34,6 +37,9 @@ export async function submitCodexComposer({ prompt, read, paste, enter, verify }
     if (stable === 2) {
       await verify();
       if (!codexComposerMatches(await read(), expected)) throw taskError('composer changed before Return');
+      await beforeEnter();
+      await verify();
+      if (!codexComposerMatches(await read(), expected)) throw taskError('composer changed at Return boundary');
       await enter();
       return;
     }

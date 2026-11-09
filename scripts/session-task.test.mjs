@@ -31,14 +31,15 @@ test('native goal submission is never repeated after an uncertain result', async
   const goalInput={...input,args:{...input.args,goalPath:packets[0].path,goalDigest:packets[0].digest}};
   const evidence={state:'started',threadId:'thread',turnId:'turn',activityId:'activity',packets,
     goal:{threadId:'thread',status:'active',objective:'finish'}};
-  const transport={observeGoal:async()=>state==='started'?evidence:{state}};
-  const submission={}, options={transport,observed,input:goalInput,prompt:'finish',packets,submission,submit:async(_request,mark)=>{mark();sends+=1;}};
+  const transport={observeGoal:async()=>state==='started'?evidence:{state,threadId:'thread',fence:'thread',notApplied:true}};
+  const fence=()=>({async mark(binding){this.attempted=true;this.binding=binding;}});
+  const submission=fence(), options={transport,observed,input:goalInput,prompt:'finish',packets,submission,submit:async(_request,mark)=>{await mark();sends+=1;}};
   await assert.rejects(observeGoalTask(options),/has not started/);
   await assert.rejects(observeGoalTask(options),/has not started/);
   await assert.rejects(observeGoalTask({...options,submission:undefined}),/has not started/);
   assert.equal(sends,1);
   assert.throws(()=>validateTaskReceipt({...observed,task:{...observed,...started,schema:'harness.task-receipt/1',effectKey:goalInput.key}},goalInput),/receipt/);
-  const preflight = {};
+  const preflight = fence();
   await assert.rejects(observeGoalTask({...options,submission:preflight,submit:async()=>{throw Error('not ready');}}),/not ready/);
   assert.equal(preflight.attempted,undefined);
   state='started';
@@ -260,4 +261,25 @@ test('managed custody cannot accept a receipt without verified hook enforcement'
  assert.throws(()=>validateTaskReceipt(result,bareInput,{requireEnforcement:true}),/hook enforcement is unverified/);
  result.task.enforcement={status:'verified',cwd:observed.cwd,key:'guard',hash:'hash'};
  assert.equal(validateTaskReceipt(result,bareInput,{requireEnforcement:true}),result);
+});
+
+test('native thread drift after submission cannot satisfy the original durable binding',async()=>{
+ let submitted=false;const goalInput={...input,args:{...input.args,goalPath:packets[0].path,goalDigest:packets[0].digest}};
+ const submission={recovery:true,async mark(binding){this.attempted=true;this.binding=binding;}};
+ const transport={observeGoal:async()=>submitted?{state:'started',threadId:'replacement',turnId:'turn',activityId:'activity',packets,
+  goal:{threadId:'replacement',status:'active',objective:'finish'}}:{state:'absent',threadId:'original',fence:'original',notApplied:true}};
+ await assert.rejects(observeGoalTask({transport,observed,input:goalInput,prompt:'finish',packets,submission,
+  submit:async(_request,mark)=>{await mark();submitted=true;}}),/owner or packets changed/);
+});
+
+test('only a fresh launch may use missing Claude startup history; positive pending evidence never permits input',async()=>{
+ const goalInput={...input,args:{...input.args,goalPath:packets[0].path,goalDigest:packets[0].digest}};
+ for(const recovery of [false,true])for(const state of ['unknown','accepted','absent']) {
+  let submits=0;
+  const submission={recovery,async mark(binding){this.attempted=true;this.binding=binding;}};
+  const transport={observeGoal:async()=>({state,threadId:'thread',fence:'thread',notApplied:false,freshOnly:true})};
+  await assert.rejects(observeGoalTask({transport,observed,input:goalInput,prompt:'finish',packets,submission,
+   submit:async(_request,mark)=>{await mark();submits++;}}));
+  assert.equal(submits,state==='absent'&&!recovery?1:0);
+ }
 });

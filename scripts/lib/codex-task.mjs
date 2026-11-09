@@ -56,7 +56,10 @@ export function createCodexTaskTransport({ command, executable = 'codex', submit
     },
     async observeGoal(request) {
       const data = await query(request, 'goal-observe');
-      if (!data.goal) return { state: 'absent' };
+      if (!data.goal) {
+        const absent = Array.isArray(data.turns) && data.turns.length === 0 && Array.isArray(data.queued) && data.queued.length === 0;
+        return {state:absent ? 'absent' : 'unknown',threadId:data.threadId,fence:data.threadId,notApplied:absent};
+      }
       if (data.goal.threadId !== data.threadId || data.goal.objective !== request.prompt || !['active','complete'].includes(data.goal.status)) {
         throw taskError('native goal differs from the intended runnable or completed goal');
       }

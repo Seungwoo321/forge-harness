@@ -106,3 +106,18 @@ test('Claude packet reads count after the worker changes its shell directory; th
  await save([status,{...command,cwd:'/elsewhere'},moved,read,result]);
  await assert.rejects(transport.observeGoal({observed,prompt,packets:[packet]}),/missing or ambiguous/);
 });
+
+test('Claude legacy recovery needs positive empty native history; missing, queued or prior command evidence stays unknown',async t=>{
+ const root=await mkdtemp(path.join(tmpdir(),'claude-absence-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const id='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',project=path.join(root,'projects','project');await mkdir(project,{recursive:true});
+ const file=path.join(project,`${id}.jsonl`),observed={pid:123,cwd:'/work'},request={observed,prompt:'finish',packets:[]};
+ const transport=createClaudeTaskTransport({command:async()=>({exitCode:0,stdout:`claude --session-id ${id}`}),env:{CLAUDE_CONFIG_DIR:root}});
+ const missing=await transport.observeGoal(request);assert.equal(missing.notApplied,false);assert.equal(missing.freshOnly,true);
+ const metadata={type:'system',subtype:'init',sessionId:id,cwd:'/work'};
+ await writeFile(file,JSON.stringify(metadata)+'\n');assert.equal((await transport.observeGoal(request)).notApplied,true);
+ for(const row of [{type:'unsupported-event'},{type:'system',subtype:'unknown'},{type:'attachment',attachment:{type:'queued_command'}},{type:'user',message:{content:'<command-name>/goal</command-name>'}},
+  {type:'user',message:{content:'<local-command-stdout>No goal set</local-command-stdout>'}},{type:'assistant',message:{content:'working'}}]) {
+  await writeFile(file,[metadata,{...row,sessionId:id,cwd:'/work'}].map(JSON.stringify).join('\n')+'\n');
+  const result=await transport.observeGoal(request);assert.equal(result.state,'unknown');assert.equal(result.notApplied,false);
+ }
+});

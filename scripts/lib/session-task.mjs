@@ -1,3 +1,4 @@
+import { effectArgsDigest } from './approvals.mjs';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
@@ -43,11 +44,20 @@ export async function observeGoalTask({ transport, observed, input, prompt, pack
   if (!transport || typeof transport.observeGoal !== 'function' || typeof prompt !== 'string' || !prompt.trim()) throw taskError('native goal transport is required');
   const request = {observed,input,prompt,packets};
   let evidence = await transport.observeGoal(request);
+  const threadId = evidence.threadId ?? evidence.fence;
+  const binding = {runtime:observed.runtime,sessionId:observed.sessionId,incarnationId:observed.incarnationId,cwd:observed.cwd,
+    executable:observed.executable,pid:observed.pid,threadId,promptDigest:taskDigest(prompt),goalDigest:input.args.goalDigest,
+    packets:packets.map(({path,digest})=>({path,digest}))};
+  if (submission?.attempted && effectArgsDigest(submission.binding) !== effectArgsDigest(binding)) throw taskError('native submission owner or packets changed');
   if (evidence.state === 'absent' && submission && !submission.attempted) {
+    if (submission.readOnly) throw taskError('completed native start is observation-only');
+    if (!threadId || evidence.notApplied !== true && (submission.recovery || evidence.freshOnly !== true)) throw taskError('native input absence is unverified');
+    if (typeof submission.mark !== 'function') throw taskError('durable native submission fence is unavailable');
     if (typeof submit !== 'function') throw taskError('native goal submission is unavailable');
-    await submit(request, () => { submission.attempted = true; });
+    await submit({...request,threadId}, async () => { await submission.mark(binding); });
     if (!submission.attempted) throw taskError('native goal submission did not record its mutation boundary');
     evidence = await transport.observeGoal(request);
+    if ((evidence.threadId ?? evidence.fence) !== submission.binding.threadId) throw taskError('native submission owner or packets changed');
   }
   if (evidence.state !== 'started') throw Object.assign(taskError('native goal or packet delivery has not started'), {taskState:evidence.state});
   return validateTaskReceipt({...observed,task:{...evidence,schema:'harness.goal-receipt/1',effectKey:input.key,

@@ -38,12 +38,16 @@ export function createClaudeTaskTransport({ command, env, submitInput }) {
       const threadId = await binding(request.observed);
       const rows = await transcript(threadId);
       if (await binding(request.observed) !== threadId) throw taskError('Claude process changed during observation');
-      if (!rows) return {state:'absent'};
+      if (!rows) return {state:'absent',threadId,fence:threadId,notApplied:false,freshOnly:true};
       // Rows follow the shell's working directory, which the worker may change; only the goal command is bound to the start cwd.
       const relevant = rows.filter(row => row.sessionId?.toLowerCase() === threadId && row.isSidechain !== true);
       const statuses = relevant.filter(row => row.type === 'attachment' && row.attachment?.type === 'goal_status');
       const status = statuses.at(-1)?.attachment;
-      if (!status) return {state:'absent'};
+      if (!status) {
+        const absent = rows.length > 0 && rows.every(row => row.sessionId?.toLowerCase() === threadId && row.isSidechain !== true
+          && row.type === 'system' && row.subtype === 'init');
+        return {state:absent ? 'absent' : 'unknown',threadId,fence:threadId,notApplied:absent};
+      }
       if (status.condition !== request.prompt || typeof status.met !== 'boolean') throw taskError('native goal differs from the intended active goal');
       const command = `<command-name>/goal</command-name>\n            <command-message>goal</command-message>\n            <command-args>${request.prompt}</command-args>`;
       const matches = relevant.filter(row => row.type === 'user' && row.isMeta !== true && textOf(row.message) === command && typeof row.uuid === 'string');

@@ -270,7 +270,19 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
         await beforeInput?.();
         return runtime === 'cmux' ? invoke('cmux',['rpc','surface.send_text',JSON.stringify({workspace_id:observed.workspaceId,surface_id:observed.sessionId,text})],observed.cwd) : orcaSend(text);
       };
-      await submitNativeGoal({provider:path.basename(observed.executable),objective:prompt,read,write,beforeWrite,recovery:input.submission?.recovery === true,preTurn:Boolean(request.preTurn),
+      await submitNativeGoal({provider:path.basename(observed.executable),objective:prompt,read,write,beforeWrite,resumeDraft:Boolean(request.resumeDraft),recovery:input.submission?.recovery === true,preTurn:Boolean(request.preTurn),
+        beforeEnter:async () => {
+          if (typeof submission?.confirm !== 'function') throw invalid('durable native Return fence is unavailable');
+          await submission.confirm(request.binding);
+        },
+        repair:request.resumeDraft && !submission.repairAttempted && request.preTurn?.defaultLineEditing === true ? async (guard,correction) => {
+          if (typeof submission.repair !== 'function') throw invalid('durable native draft correction fence is unavailable');
+          await guard(); await submission.repair(request.binding,correction);
+          for (const key of ['ctrl+e','ctrl+u']) {
+            await fenceOwner(); await guard();
+            await invoke('cmux',['send-key',...target,key],observed.cwd);
+          }
+        } : undefined,
         newline: async () => { await fenceOwner(); return runtime === 'cmux' ? invoke('cmux',['send-key',...target,'shift+enter'],observed.cwd) : orcaSend('\x1b[13;2u'); },
         enter: async beforeInput => { await fenceOwner(); await beforeInput?.(); return runtime === 'cmux' ? invoke('cmux',['send-key',...target,'Return'],observed.cwd) : orcaSend('\r'); },
         verify: async () => {

@@ -79,3 +79,5 @@ merge 전달은 시작할 때 원장의 기존 intent 경계를 고정한다. �
 진행 중인 목표의 실행 정책은 등록 시점에 고정된다. 사용자가 승인한 작업 정책 변경(예: 리뷰 역할)은 `goal policy-refresh <id> --request <file> --user-input <ref> --adapters <module>` 로만 목표에 반영한다. 요청은 `expectedRevision`·`reason` 을 담고, 신뢰된 `provider.verifyUserInput` 이 정확한 승인을 확인한다. 이전 실행 정책은 `policyChanges` 에 남고, 이후 시작하는 단위가 새 정책으로 결속된다. 같은 정책이면 바꾸지 않는다.
 
 명시적 범위 축소의 정확한 `verifyAcceptanceChange` 계약은 [승인된 기준 제외](criteria-changes.md)에 정의한다. 분류 정정 검증으로 제품 요구 제외 권한을 대신하지 않는다.
+
+기존 사용자 소유권 등록은 [기존 소유자 복구](session-custody-recovery.md)의 `verifySessionAdoption` 및 `session.observe({recipient,nativeOwner:true})` 계약을 따른다. 현재 목표 정책과 과거 단위 정책의 세션 설정은 구분하며 실제 수신자의 native 신원은 `recipientEnv`로 확인한다.

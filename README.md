@@ -91,6 +91,8 @@ codex plugin add forge-harness@forge-harness
 
 기본 상태 위치는 Git 공통 디렉터리의 `work-state/`다. worktree끼리 공유한다. workspace/global 정책은 별도 루트로 지정한다. 설정 값과 출처는 [첫 실행 안내](docs/getting-started.md), 어댑터 API는 [런타임 연결](docs/runtime-adapters.md), 전체 계약은 [제품 명세](docs/spec.md)에 있다.
 
+기존 사용자 세션에서 이미 제출한 목표 단위의 소유권 복구는 [기존 소유자 등록](docs/session-custody-recovery.md)을 따른다.
+
 전체 목표는 `goal-register`로 등록하고 관리 세션은 `session-start`로 시작한다. 단위 완료, 실제 차단, 독립 리뷰 반환에는 각각 `session-finish`, `session-stop`, `session-return`을 사용한다. 실행 정책은 cmux 또는 Orca, 계정 설정 디렉터리, 실행 명령, 모델과 effort를 명시한다. Stop 훅은 호스트에서 활성화되고 신뢰된 경우에 작동하며, 사용자 중단과 호스트의 반복 제한은 유지한다. 훅 상태를 관찰할 수 있는 작업자(Codex)는 수신 영수증에 검증된 훅이 있어야 시작이 인정되고, 관찰 수단이 없는 작업자(Claude)는 호스트의 훅에 기댄다. 목표의 실행 정책은 등록 시점에 고정된다. 사용자가 승인한 정책 변경은 `goal policy-refresh`로 진행 중인 목표에 반영하며, 목표를 다시 만들지 않는다.
 
 플러그인은 Node·Git 명령을 실행하고 프로젝트 파일, Git 체크포인트 ref, 로컬 작업 기록을 쓸 수 있다. 연결한 어댑터와 호스트 권한이 실제 외부 효과를 결정한다. 런타임 모듈은 신뢰하는 로컬 코드만 사용한다. 모델 호출은 호스트가 맡으며 패키지 자체에는 원격 MCP 서버나 분석 수집 코드가 없다. Claude Code의 시작 훅은 정책 유무 안내를 출력한다.

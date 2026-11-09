@@ -24,6 +24,8 @@ When acceptance returns exit 20 (the unit is `InReview`), start the independent 
 
 ## Resume
 
+For a current goal-bound unit executed in an existing user session without managed custody, use public `unit session-adopt <unit> --request <file> --user-input <ref>` before starting required review. Follow packaged `docs/session-custody-recovery.md` and its trusted source/native verification contracts. Preserve the original InReview/SelfGated unit and its history; never simulate session-start, reset gates or rewrite records.
+
 Use the Unit Record and effect ledger through the unit CLI. Do not recreate a unit with a different request under the same ID.
 
 For a demonstrated mismatch that recorded an external observation or delivery obligation as a product gate criterion, use `unit acceptance correct <unit> --request <file> --user-input <ref>` on the original submitted SelfGated unit. Follow the packaged `docs/acceptance-recovery.md` for the exact request and trusted verifier contract. Preserve every original requirement and failed evidence; never invent passing test IDs. Unsupported user-input references or missing provenance/observation verification block correction. Refresh `unit progress` between corrections, then rerun acceptance and required independent review before delivery. Delivery corrections explicitly preserve the engine or external owner. For external ownership keep delivery:none; the trusted read-only verifyExternalDelivery provider must establish actual accepted-target-bound delivery before finish/finalization. Never enable engine delivery to satisfy an externally owned obligation. Do not patch installed copies or stored records.

@@ -31,7 +31,7 @@ export function createContinuityStore(stateRoot) {
     let temporary;
     try {
       const current = await read(id);
-      const next = change(current);
+      const next = await change(current);
       if (next === current) return current;
       if (next.schema !== 'harness.goal/1' || next.goal?.id !== id || next.revision !== (current?.revision ?? 0) + 1) throw failure('CONTINUITY_INVALID', 'invalid goal transition');
       validateGoal(next.goal); selectExecutionPolicy(next.policy, 'implementation');

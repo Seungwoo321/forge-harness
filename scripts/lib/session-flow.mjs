@@ -1,3 +1,4 @@
+import { goalOwner, assertAdoptedOwner } from './continuity-custody.mjs';
 import { createHash } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
@@ -64,6 +65,8 @@ export async function finishSessionUnit({
   if (!record || !['Accepted', 'Delivering', 'Delivered'].includes(record.state)) throw Object.assign(new Error('session finish requires an Accepted, Delivering, or Delivered Unit Record'), { code: 'INVALID_TRANSITION' });
   if (record.sameSessionContinuation && !sameSession) throw Object.assign(new Error('same-session continuation is already bound'), { code: 'SESSION_CONTINUATION_CONFLICT' });
   const continuity = await prepareGoalFinish({stateRoot,store,record,unit,parentRuntime,successor: sameSession ? {approved:true,unit:sameSession.nextUnit} : successor,goalComplete,goalProof});
+  const custody = goalOwner(continuity,unit);
+  const retainedOwner = custody?.ownership === 'existing' ? custody : null;
   if ((parentRuntime || parentSessionId) && !successor?.approved && !returnTo && !sameSession && !goalComplete) throw Object.assign(new Error('session completion requires an exact result recipient'), { code: 'SESSION_OWNER_MISMATCH' });
   if (!adapters || typeof adapters.now !== 'function') throw new TypeError('session flow adapters are required');
   if (!['execute', 'verify'].every(name => typeof sessionAdapter?.[name] === 'function')) {
@@ -166,21 +169,23 @@ export async function finishSessionUnit({
       || (owner?.targetCwd !== undefined && owner.targetCwd !== targetCwd)) {
       throw Object.assign(new Error('current session owner does not match the requested cwd and parent'), { code: 'SESSION_OWNER_MISMATCH' });
     }
+    assertAdoptedOwner(custody,owner);
     return owner;
   };
+  if (retainedOwner) await observeParent();
   if (returnTo) {
     if (successor?.approved) throw new TypeError('choose an existing return recipient or a new successor');
     await observeParent();
     const recipient = await sessionAdapter.observe({ recipient: returnTo });
     if (recipient.sessionId !== returnTo.sessionId || recipient.incarnationId !== returnTo.incarnationId || recipient.cwd !== returnTo.cwd) throw new Error('return recipient mismatch');
     returnTo = recipient;
-    if (owner.closable !== true || !owner.incarnationId || !owner.worker?.incarnationId) throw Object.assign(new Error('return requires a runtime-authorized closable worker'), { code: 'SESSION_OWNER_MISMATCH' });
+    if ((!retainedOwner && owner.closable !== true) || !owner.incarnationId || !owner.worker?.incarnationId) throw Object.assign(new Error('return requires a runtime-authorized closable worker'), { code: 'SESSION_OWNER_MISMATCH' });
   }
   // A managed worker that completes the goal must hand its result to an existing recipient so the control plane
   // can close it; finishing without one leaves the worker session running after the goal is complete.
   if (goalComplete && !returnTo && parentRuntime && typeof sessionAdapter?.observe === 'function') {
     await observeParent();
-    if (owner?.closable === true) throw Object.assign(new Error('final goal session requires returnTo: the existing session that receives the result (e.g. the orchestrator)'), { code: 'RETURN_RECIPIENT_REQUIRED' });
+    if (!retainedOwner && owner?.closable === true) throw Object.assign(new Error('final goal session requires returnTo: the existing session that receives the result (e.g. the orchestrator)'), { code: 'RETURN_RECIPIENT_REQUIRED' });
   }
   if (successor?.approved) {
     validateHandoffPacket(handoffContent);
@@ -194,7 +199,8 @@ export async function finishSessionUnit({
   }
   if (typeof adapters.git?.inspectUnit !== 'function') throw Object.assign(new Error('delivery requires Git inspection'), { code: 'ADAPTER_MISSING' });
   const expected = effectArgsDigest({ policy, accepted: record.accepted, epoch: record.policyChanges?.at(-1)?.revision ?? 0, continuation: record.sameSessionContinuation ?? null });
-  const delivered = await executeDelivery({ stateRoot, store, unit, requestedDelivery, delivery, adapters, expected });
+  if (retainedOwner) await observeParent();
+  const delivered = await executeDelivery({ stateRoot, store, unit, requestedDelivery, delivery, adapters, expected, beforeEffect:retainedOwner ? observeParent : undefined });
   if (delivered.code !== 0) return delivered;
   record = await store.read(unit);
   const handoff = pendingFiles?.handoff ?? (successor?.approved ? await writeHandoff(stateRoot, unit, handoffContent) : null);
@@ -216,14 +222,14 @@ export async function finishSessionUnit({
     ...(goalSnapshot ? { goalSnapshot } : {}),
     ...(continuity && goalComplete ? { goalCompletion: { goalId: continuity.goal.id, revision: continuity.revision, proof: goalProof } } : {}),
     ...(continuity && sameSession ? { goalContinuation: { goalId:continuity.goal.id, revision:continuity.revision, nextUnit:sameSession.nextUnit, owner:parentRuntime } } : {}),
-    ...(returnTo ? { sessionFinalization: { owner, recipient: returnTo, resultPath, resultDigest, sessionStart: null } } : {}),
+    ...(returnTo ? { sessionFinalization: { owner, ...(retainedOwner ? {retainedOwner} : {}), recipient: returnTo, resultPath, resultDigest, sessionStart: null } } : {}),
   }));
   const prepareFinalization = async (recipient, sessionStart = null) => {
-    if (!owner?.incarnationId || owner.closable !== true || !owner.worker?.incarnationId || owner.sessionId === recipient.sessionId) {
+    if (!owner?.incarnationId || (!retainedOwner && owner.closable !== true) || !owner.worker?.incarnationId || owner.sessionId === recipient.sessionId) {
       return { code: 3, state: 'Delivered', resultPath, resultDigest, handoff, sessionId: recipient.sessionId, summary: 'A runtime-authorized closable worker owner is required' };
     }
     await store.update(unit, current => current.sessionFinalization ? current : ({ ...current, sessionFinalization: {
-      owner, recipient, resultPath, resultDigest, ...(handoff ? { handoffPath: handoff.path, handoffDigest: handoff.digest } : {}), sessionStart,
+      owner, ...(retainedOwner ? {retainedOwner} : {}), recipient, resultPath, resultDigest, ...(handoff ? { handoffPath: handoff.path, handoffDigest: handoff.digest } : {}), sessionStart,
     } }));
     return { code: 3, state: 'Delivered', resultPath, resultDigest, handoff, sessionId: recipient.sessionId, finalizePending: true,
       summary: 'Recipient task verified; result delivery and exact owner closure are pending' };
@@ -233,6 +239,7 @@ export async function finishSessionUnit({
   });
   if (!projected.projected) return { code: 3, state: 'Delivered', resultPath, resultDigest, handoff, delivery: authorized, successor: null, ...(returnTo ? { finalizePending: true } : {}), summary: 'Final tracker projection is queued; successor session has not started' };
   if (!successor?.approved && !returnTo) {
+    if (retainedOwner) await observeParent();
     const closed = await commitTerminalClose({ store, unit, git: adapters.git, provider: adapters.provider, now: adapters.now });
     if (closed.state === 'Closed' && continuity && goalComplete) await commitGoalCompletion({ continuityStore: createContinuityStore(stateRoot), unitStore: store, goalId: continuity.goal.id, unit });
     if (closed.state === 'Closed' && continuity && sameSession) await commitGoalContinuation({ continuityStore:createContinuityStore(stateRoot),unitStore:store,goalId:continuity.goal.id,unit });
@@ -305,6 +312,11 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters }) 
   const recipient = plan.recipient;
   const deliveryArgs = { ...plan, cwd: recipient.cwd, session: recipient.sessionId, incarnation: recipient.incarnationId };
   const pending = summary => ({ code: 3, state: record.state, summary, finalizePending: true });
+  const observeCustody = async () => {
+    if (plan.retainedOwner) assertAdoptedOwner(plan.retainedOwner,await adapters.session.observe({cwd:plan.owner.cwd,targetCwd:plan.owner.cwd}));
+    if (plan.recipientCustody) assertAdoptedOwner(plan.recipientCustody,await adapters.session.observe({recipient,nativeOwner:true}));
+  };
+  await observeCustody();
   let delivered;
   if (plan.sessionStart && record.continuity) {
     const rows = await ledger.withLock(unit, entries => entries.read());
@@ -321,8 +333,9 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters }) 
   } else {
     delivered = await executeEffect({ unit, effect: 'session.deliver', args: deliveryArgs, policy,
     context: { explicitUserInstruction: true, productOwned: true }, store: ledger,
-    adapter: { now: adapters.now, async execute(input) { return validateTaskReceipt(await adapters.session.execute(input), input); },
+    adapter: { now: adapters.now, async execute(input) { await observeCustody(); return validateTaskReceipt(await adapters.session.execute(input), input); },
       async verify(input) {
+        await observeCustody();
         const value = await adapters.session.verify(input);
         if (value?.status === 'not-applied' && value.verify?.nativeRequestAbsent === true && value.verify.exactPendingComposer === true
           && value.result?.sessionId === recipient.sessionId && value.result.incarnationId === recipient.incarnationId
@@ -342,6 +355,13 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters }) 
     const current = await adapters.git.inspectUnit({ unit, record });
     if (current.head !== record.accepted.head || current.contentFingerprint !== record.accepted.contentFingerprint) return pending('Accepted content changed before session close');
   }
+  await observeCustody();
+  if (plan.retainedOwner) {
+    await store.update(unit,current => ({...current,sessionFinalization:{...current.sessionFinalization,deliveryReceipt:delivered,ownerRetained:true}}));
+    const current = record.state === 'Closed' || record.state === 'Stopped' ? record : await commitTerminalClose({store,unit,git:adapters.git,provider:adapters.provider,now:adapters.now,sessionStart:plan.sessionStart,sessionRetention:plan.retainedOwner});
+    if (current.state === 'Closed' && current.goalCompletion) await commitGoalCompletion({continuityStore:createContinuityStore(stateRoot),unitStore:store,goalId:current.goalCompletion.goalId,unit});
+    return {code:current.state === 'Closed' || current.state === 'Stopped' ? 0 : 3,state:current.state,resultPath:plan.resultPath,summary:current.state === 'Closed' || current.state === 'Stopped' ? 'Result accepted; existing user session retained' : 'Accepted target changed before terminal completion'};
+  }
   const closeArgs = { owner: plan.owner, recipient, session: plan.owner.sessionId, incarnation: plan.owner.incarnationId,
     resultDigest: plan.resultDigest, deliveryKey: delivered.key };
   const validateClose = result => {
@@ -350,8 +370,9 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters }) 
   };
   const closeEffect = { unit, effect: 'session.close', args: closeArgs, policy,
     context: { explicitUserInstruction: true, productOwned: true }, store: ledger,
-    adapter: { now: adapters.now, async execute(input) { return validateClose(await adapters.session.execute(input)); },
+    adapter: { now: adapters.now, async execute(input) { await observeCustody(); return validateClose(await adapters.session.execute(input)); },
       async verify(input) {
+        await observeCustody();
         const result = await adapters.session.verify(input);
         if (result?.status === 'not-applied' && result.result?.sessionId === plan.owner.sessionId
           && result.result.incarnationId === plan.owner.incarnationId && input.verificationCount + 1 < policy.retry.maxPerSignature) {

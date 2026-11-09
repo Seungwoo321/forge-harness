@@ -27,7 +27,7 @@ export function validateDeliveryContext(context) {
   return { ...Object.fromEntries(fields.map(field => [field, context[field]])), explicitUserInstruction: context.explicitUserInstruction === true };
 }
 
-export async function executeDelivery({ stateRoot, store, unit, requestedDelivery, delivery = {}, adapters, expected }) {
+export async function executeDelivery({ stateRoot, store, unit, requestedDelivery, delivery = {}, adapters, expected, beforeEffect }) {
   const ledgerStore = createLedgerStore(stateRoot);
   let record = await store.read(unit);
   const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
@@ -168,6 +168,7 @@ export async function executeDelivery({ stateRoot, store, unit, requestedDeliver
             || cause?.lastAction === 'resolver-completed' && cause.activeResolver === false);
       },
       adapter: { now: () => adapters.now(), execute: async input => {
+        await beforeEffect?.();
         const changed = await stale();
         if (changed) return { status: 'not-applied', failure: { class: 'product', reason: 'accepted target changed before execution' },
           verify: { adapter: 'git', operation: 'unit.inspect', args: { unit }, observed: changed } };
@@ -178,6 +179,7 @@ export async function executeDelivery({ stateRoot, store, unit, requestedDeliver
         }
         return validateResult(await provider.execute(input));
       }, verify: async input => {
+        await beforeEffect?.();
         const verified = await provider.verify(input);
         if (!verified?.verify || typeof verified.verify.adapter !== 'string' || typeof verified.verify.operation !== 'string'
           || !verified.verify.args || typeof verified.verify.args !== 'object' || Array.isArray(verified.verify.args)) return { status: 'unknown' };

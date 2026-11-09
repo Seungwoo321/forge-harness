@@ -88,3 +88,19 @@ test('a harness-created workspace left with only its placeholder is closed; othe
   assert.equal((await race.runner.execute(race.input)).closed, true);
   assert.equal(race.workspaceClosed(), 0);
 });
+
+test('native recipient observation resolves the recipient account separately from the reviewer account',async()=>{
+  const threadId='11111111-1111-4111-8111-111111111111';
+  const command=async(binary,args)=>{
+    let stdout;
+    if(binary==='cmux') stdout=JSON.stringify({windows:[{id:'window',workspaces:[{id:'work',panes:[{surfaces:[{id:'recipient',type:'terminal',tty:'tty2'}]}]}]}]});
+    else if(binary==='ps') stdout=args.includes('pid=,pgid=,tpgid=,comm=') ? '22 22 22 codex\n' : 'START';
+    else if(binary==='lsof') stdout=args.includes('cwd') ? 'n/work/product\n' : `n/owner-account/thread-writer-locks/${threadId}.lock\n`;
+    else throw Error(`unexpected ${binary}`);
+    return {exitCode:0,stdout};
+  };
+  const runner=createSessionRunner({runtime:'cmux',command,parent:{sessionId:'reviewer',incarnationId:'review-v1',cwd:'/work/product',
+    workerEnv:{CODEX_HOME:'/reviewer-account'},recipientEnv:{CODEX_HOME:'/owner-account'}},launch:()=>['codex'],pollAttempts:1});
+  const recipient={sessionId:'recipient',incarnationId:'tty2:22:START',cwd:'/work/product',executable:'codex'};
+  assert.equal((await runner.observe({recipient,nativeOwner:true})).worker.threadId,threadId);
+});

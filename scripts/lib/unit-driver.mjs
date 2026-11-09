@@ -29,6 +29,7 @@ import { createContinuityStore } from './continuity-store.mjs';
 import { blockGoal, resumeGoal, appendGoalWork } from './continuity-transitions.mjs';
 import { commitGoalCompletion } from './continuity-completion.mjs';
 import { commitGoalContinuation } from './continuity-finish.mjs';
+import { adoptGoalSession } from './continuity-custody.mjs';
 import { startGoalSession } from './continuity-start.mjs';
 import { prepareSessionReturn } from './continuity-return.mjs';
 import { stopGoalSession } from './continuity-stop.mjs';
@@ -540,13 +541,17 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
     throw error;
   }
   const reviewedRecord = reviewTarget ?? current;
+  let registeredReview;
   if (stage === 'review' && current.kind === 'review' && reviewedRecord.continuity?.goalId) {
     const goal = await createContinuityStore(stateRoot).read(reviewedRecord.continuity.goalId);
     const custody = goal?.reviews?.findLast(item => item.unit === unit && item.targetUnit === reviewedRecord.unit);
     if (!custody || current.continuity?.goalId !== reviewedRecord.continuity.goalId || typeof adapters.session?.observe !== 'function')
       throw Object.assign(new Error('independent review session is not registered'), {code:'SESSION_OWNER_MISMATCH'});
+    registeredReview = custody;
     const owner = await adapters.session.observe({cwd:custody.cwd,targetCwd:custody.cwd});
-    if (owner.sessionId !== custody.sessionId || owner.incarnationId !== custody.incarnationId || owner.cwd !== custody.cwd)
+    if (owner.sessionId !== custody.sessionId || owner.incarnationId !== custody.incarnationId || owner.cwd !== custody.cwd
+      || custody.nativeThreadId && owner.worker?.threadId !== custody.nativeThreadId
+      || custody.targetDigest && effectArgsDigest(reviewedRecord) !== custody.targetDigest)
       throw Object.assign(new Error('review submission must come from the independent review owner'), {code:'SESSION_OWNER_MISMATCH'});
   }
   if (stage === 'review') {
@@ -645,8 +650,15 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
   const to = targetState(current, stage, output);
   let targetUpdated = null;
   if (reviewTarget && output.status === 'done') {
-    targetUpdated = await store.update(reviewTarget.unit, target => {
+    targetUpdated = await store.update(reviewTarget.unit, async target => {
       target = reviewSnapshot(target);
+      if (registeredReview?.targetDigest) {
+        if (effectArgsDigest(target) !== registeredReview.targetDigest) throw Object.assign(new Error('registered review target changed'),{code:'STAGE_STALE'});
+        const observed = await adapters.session.observe({cwd:registeredReview.cwd,targetCwd:registeredReview.cwd});
+        if (observed.sessionId !== registeredReview.sessionId || observed.incarnationId !== registeredReview.incarnationId
+          || observed.cwd !== registeredReview.cwd || observed.worker?.threadId !== registeredReview.nativeThreadId)
+          throw Object.assign(new Error('review native owner changed before verdict'),{code:'SESSION_OWNER_MISMATCH'});
+      }
       if (target.state !== 'InReview' || target.head !== input.head || target.contentFingerprint !== input.contentFingerprint) {
         const error = new Error('review target changed before the verdict could be recorded');
         error.code = 'STAGE_STALE';
@@ -1384,7 +1396,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const goal = await store.create({goal:request.goal,source:request.source,policy:resolved.policy.session});
       return formatCliResult({ code: 0, summary: `Goal ${id} registered`, details: { goal } });
     }
-    if (noun !== 'unit' || !['start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'goal-bind', 'session-stop', 'session-return', 'policy', 'reopen'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct|drop <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
+    if (noun !== 'unit' || !['start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'session-adopt', 'goal-bind', 'session-stop', 'session-return', 'policy', 'reopen'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct|drop <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
     const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
     if (subcommand === 'acceptance') {
       const [action, unit] = rest;
@@ -1496,6 +1508,13 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const request = await readJsonFile(path.resolve(cwd,parsed.options.request), 'session stop request', 'CLI_USAGE');
       const {code,summary,...details} = await stopGoalSession({stateRoot:effectiveRoot,unit,request,store:createUnitStateStore(effectiveRoot),adapters});
       return formatCliResult({code,summary,details:{...details,stateRoot:effectiveRoot}});
+    }
+    if (subcommand === 'session-adopt') {
+      const [unit] = rest;
+      if (!unit || rest.length !== 1 || !parsed.options.request || !parsed.options['user-input']) usageError('unit session-adopt requires <unit> --request <file> --user-input <ref>');
+      const request = await readJsonFile(path.resolve(cwd,parsed.options.request), 'session adoption request', 'CLI_USAGE');
+      const receipt = await adoptGoalSession({stateRoot:effectiveRoot,unit,request,userInputRef:parsed.options['user-input'],store:createUnitStateStore(effectiveRoot),adapters,cwd});
+      return formatCliResult({code:0,summary:'Existing owner custody verified',details:{unit,receipt}});
     }
     if (subcommand === 'session-start') {
       const [unit] = rest;

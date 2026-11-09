@@ -177,8 +177,8 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       });
     } } : {}),
   }) : null);
-  async function workerIdentity(worker) {
-    const transport = transportFor(worker.executable, parent.workerEnv);
+  async function workerIdentity(worker, env = parent.workerEnv) {
+    const transport = transportFor(worker.executable, env);
     if (typeof transport?.identity !== 'function') throw invalid('worker identity provider is unavailable');
     const identity = await transport.identity(worker);
     if (typeof identity?.threadId !== 'string' || !identity.threadId) throw invalid('native worker identity is unavailable');
@@ -362,12 +362,12 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
   return Object.freeze({
     contractVersion: 'harness.session-adapter/1',
     capabilities: ['fix-forward', 'failure-classification-five-way', 'retry-limit', 'ops-e0-only', 'policy-review'],
-    async observe({ cwd, targetCwd = cwd, recipient }) {
+    async observe({ cwd, targetCwd = cwd, recipient, nativeOwner = false }) {
       if (recipient) {
         if (recipient.sessionId === parent.sessionId || !recipient.executable || !recipient.incarnationId) throw invalid('invalid return recipient');
         const observed = await inspect(recipient.sessionId, recipient.cwd, recipient.executable);
         if (observed.incarnationId !== recipient.incarnationId) throw invalid('return recipient changed');
-        return observed;
+        return nativeOwner ? {...observed,worker:await workerIdentity(observed,parent.recipientEnv)} : observed;
       }
       if (cwd !== parent.cwd || !path.isAbsolute(targetCwd)) throw invalid('parent or successor cwd is invalid');
       if (runtime === 'cmux') {

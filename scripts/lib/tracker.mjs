@@ -1,3 +1,4 @@
+import { effectArgsDigest } from './approvals.mjs';
 import { validateAcceptedContent } from './delivery.mjs';
 import { verifyExternalDeliveryBoundary } from './acceptance-correction.mjs';
 import { appendFile, mkdir, open, readFile, rm } from 'node:fs/promises';
@@ -138,7 +139,7 @@ export async function projectTerminalUnit({ store, unit, adapter, queue, now, gi
   return { projected: true, record };
 }
 
-export async function commitTerminalClose({ store, unit, git, provider, now, sessionStart, sessionClose }) {
+export async function commitTerminalClose({ store, unit, git, provider, now, sessionStart, sessionClose, sessionRetention }) {
   const record = await revalidateTerminalTarget({ store, unit, git, provider, now });
   if (record?.state === 'SelfGated') return record;
   return await store.update(unit, current => {
@@ -146,8 +147,14 @@ export async function commitTerminalClose({ store, unit, git, provider, now, ses
       && sessionClose.result.sessionId === current.sessionFinalization.owner.sessionId
       && sessionClose.result.incarnationId === current.sessionFinalization.owner.incarnationId) return current;
     if (current.state !== 'Delivered') throw errorWithCode('INVALID_TRANSITION', 'terminal close requires a Delivered unit');
-    if (current.continuityRequired && !current.goalCompletion && !current.next?.handoff) throw errorWithCode('CONTINUITY_REQUIRED', 'goal completion or verified successor is required');
-    if (current.sessionFinalization && (!['completed', 'duplicate', 'reconciled'].includes(sessionClose?.status)
+    const continuation = current.next?.sameSession === true && current.goalContinuation?.goalId === current.continuity?.goalId
+      && current.next.unit === current.goalContinuation?.nextUnit && current.next.unit === current.sameSessionContinuation?.nextUnit;
+    if (current.continuityRequired && !current.goalCompletion && !current.next?.handoff && !continuation) throw errorWithCode('CONTINUITY_REQUIRED', 'goal completion or verified successor is required');
+    const retained = sessionRetention?.ownership === 'existing'
+      && effectArgsDigest(sessionRetention) === effectArgsDigest(current.sessionFinalization?.retainedOwner ?? null)
+      && current.sessionFinalization?.ownerRetained === true
+      && ['completed','duplicate','reconciled'].includes(current.sessionFinalization?.deliveryReceipt?.status);
+    if (current.sessionFinalization && !retained && (!['completed', 'duplicate', 'reconciled'].includes(sessionClose?.status)
       || sessionClose.result?.closed !== true || sessionClose.result.sessionId !== current.sessionFinalization.owner.sessionId
       || sessionClose.result.incarnationId !== current.sessionFinalization.owner.incarnationId)) throw errorWithCode('SESSION_CLOSE_PENDING', 'exact owner closure must be verified');
     if (current.next?.handoff && (!['completed', 'duplicate', 'reconciled'].includes(sessionStart?.status) || !sessionStart.result?.sessionId)) throw errorWithCode('SUCCESSOR_PENDING', 'successor start must be confirmed before close');

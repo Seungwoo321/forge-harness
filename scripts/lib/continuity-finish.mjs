@@ -1,3 +1,4 @@
+import { goalOwner } from './continuity-custody.mjs';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createContinuityStore } from './continuity-store.mjs';
@@ -15,8 +16,7 @@ export async function prepareGoalFinish({stateRoot,store,record,unit,parentRunti
     const source = await readFile(continuity.source.path);
     if (`sha256:${createHash('sha256').update(source).digest('hex')}` !== continuity.source.digest)
       throw Object.assign(new Error('overall goal source changed'), { code: 'CONTINUITY_STALE' });
-    const custody = continuity.bootstraps?.findLast(item => item.unit === unit)
-      ?? continuity.transfers?.find(item => item.successor === unit);
+    const custody = goalOwner(continuity, unit);
     if (!custody || !parentRuntime || custody.sessionId !== parentRuntime.sessionId
       || custody.incarnationId !== parentRuntime.incarnationId || custody.cwd !== parentRuntime.cwd)
       throw Object.assign(new Error('managed session ownership is not verified'), { code: 'SESSION_OWNER_MISMATCH' });
@@ -68,15 +68,18 @@ export async function commitGoalContinuation({continuityStore,unitStore,goalId,u
     const previous = current?.transfers?.find(item => item.unit === unit);
     if (previous?.sameSession === true && previous.successor === intent.nextUnit
       && previous.sessionId === intent.owner.sessionId && previous.incarnationId === intent.owner.incarnationId && previous.cwd === intent.owner.cwd) return current;
-    const owner = current?.bootstraps?.findLast(item => item.unit === unit) ?? current?.transfers?.find(item => item.successor === unit);
+    const owner = goalOwner(current, unit);
     if (!current || current.revision !== intent.revision || current.goal.status !== 'active'
       || current.goal.remaining[0] !== unit || current.goal.remaining[1] !== intent.nextUnit || previous
       || owner?.sessionId !== intent.owner.sessionId || owner?.incarnationId !== intent.owner.incarnationId || owner?.cwd !== intent.owner.cwd) {
       throw Object.assign(new Error('goal continuation or session owner changed'), {code:'CONTINUITY_STALE'});
     }
-    const identity = {sessionId:owner.sessionId,incarnationId:owner.incarnationId,cwd:owner.cwd};
+    const identity = {sessionId:owner.sessionId,incarnationId:owner.incarnationId,cwd:owner.cwd,
+      ...(owner.ownership === 'existing' ? {ownership:'existing',owner:owner.owner} : {})};
     return {...current,revision:current.revision+1,goal:{...current.goal,remaining:current.goal.remaining.slice(1)},
-      bootstraps:[...(current.bootstraps ?? []),{unit:intent.nextUnit,attempt:1,...identity}],
+      ...(owner.ownership === 'existing'
+        ? {adoptions:[...(current.adoptions ?? []),{unit:intent.nextUnit,inheritedFrom:unit,goalRevision:current.revision+1,...identity}]}
+        : {bootstraps:[...(current.bootstraps ?? []),{unit:intent.nextUnit,attempt:1,...identity}]}),
       transfers:[...(current.transfers ?? []),{unit,successor:intent.nextUnit,sameSession:true,...identity}]};
   });
 }

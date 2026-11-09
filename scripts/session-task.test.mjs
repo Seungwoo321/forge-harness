@@ -8,6 +8,7 @@ import path from 'node:path';
 import { createAdapters } from './lib/adapters.mjs';
 import { codexComposerMatches, submitCodexComposer } from './lib/codex-composer.mjs';
 import { createSessionRunner } from './lib/session-runtime.mjs';
+import { createLedgerStore, executeEffect } from './lib/ledger.mjs';
 
 const observed = { sessionId: 'terminal', incarnationId: 'incarnation', cwd: '/work/product', pid: 42 };
 const packets = [{ path: '/work/packet', digest: taskDigest('packet\n'), content: 'packet\n' }];
@@ -94,6 +95,15 @@ test('native goal observation is bound to the same worker thread and directory',
   assert.equal((await transport.goal(observed)).objective, 'complete work');
   cwd = '/other';
   await assert.rejects(transport.goal(observed), /thread changed/);
+});
+
+test('conditional delivery rejects a different ready native fence observed during the last identity check', async () => {
+  const threadId = '00000000-0000-0000-0000-000000000001'; let sends = 0;
+  const transport = createCodexTaskTransport({command:async()=>({exitCode:0,stdout:`n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${threadId}.lock\n`}),
+    submitInput:async(_request,verify)=>{await verify();sends++;}});
+  transport.observe = async()=>({state:'ready',fence:'replacement-thread'});
+  await assert.rejects(transport.submit({observed,input:{...input,effect:'session.deliver'},fence:threadId}),/fence changed/);
+  assert.equal(sends,0);
 });
 
 test('goal activity must follow native goal creation and needs no ordinary user message', async () => {
@@ -253,12 +263,16 @@ test('native delivery accepts a wrapped reference in the same narrow receiver an
     return {exitCode:0,stdout};
   };
   const runner = createSessionRunner({runtime:'cmux',command,parent:{sessionId:'owner',cwd:root,incarnationId:'owner-generation'},launch:()=>['codex'],pollAttempts:1});
-  const request = {effect:'session.deliver',key:'same-delivery',args:{cwd:root,resultPath,resultDigest:digest,recipient:{sessionId:'receiver',incarnationId:'tty2:22:START',cwd:root,executable:'codex'}}};
+  const request = {effect:'session.deliver',key:'same-delivery',args:{cwd:root,session:'receiver',incarnation:'tty2:22:START',resultPath,resultDigest:digest,recipient:{sessionId:'receiver',incarnationId:'tty2:22:START',cwd:root,executable:'codex'}}};
   assert.equal((await runner.verify(request)).status, 'not-applied');
-  await assert.rejects(runner.execute(request), /receipt does not match/);
+  const store = createLedgerStore(path.join(root,'state'));
+  const run = () => executeEffect({unit:'delivery',effect:request.effect,args:request.args,policy:{goal:{class:'task'},authority:{allow:[],deny:[]},delivery:'none'},
+    context:{explicitUserInstruction:true,productOwned:true},store,adapter:{...runner,now:()=> 'time'}});
+  assert.equal((await run()).status,'uncertain');
   assert.equal(enters, 1); assert.equal(pastes, 0);
   assert.equal((await runner.verify(request)).status, 'unknown');
   readPacket = true;
+  assert.equal((await run()).status,'reconciled');
   assert.equal(validateTaskReceipt((await runner.verify(request)).result, request).task.promptDigest, taskDigest(prompt));
   assert.equal((await runner.execute(request)).task.effectKey, request.key);
   assert.equal(enters, 1); assert.equal(pastes, 0);

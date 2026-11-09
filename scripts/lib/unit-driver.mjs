@@ -360,14 +360,17 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
       const entry = (current.stages ?? []).find(item => item.name === stage);
       const open = entry?.attempts?.find(item => !item.endedAt);
       const active = open ?? entry?.attempts?.at(-1);
-      if (!active || !open && (active.result !== 'superseded' || !active.restart)
+      const reopening = current.reopenings?.at(-1);
+      const reopened = !open && active?.endedAt && active.result === 'done' && reopening?.revision > active.inputRevision
+        && (!active.restart || active.restart.reopeningRevision === reopening.revision);
+      if (!active || !open && !reopened && (active.result !== 'superseded' || !active.restart)
         || active.n !== request.attempt || active.inputDigest !== request.inputDigest || active.checkpointHead !== request.checkpointHead)
         throw Object.assign(new Error('stage does not match the requested attempt'), { code: 'STAGE_STALE' });
       const inspected = await adapters.checkpoint.inspectChanges({ unit, stage, attempt: active.n, checkpoint: active.checkpoint,
         firstCheckpoint: firstCheckpoint(current) ?? active.checkpoint, exclude: current.policy?.checkpoint?.exclude ?? [] });
       if (inspected.head !== request.newHead || inspected.head === active.checkpointHead) throw Object.assign(new Error('stage checkpoint is not stale at the requested head'), { code: 'STAGE_STALE' });
-      if (!open && inspected.head === active.restart.newHead) { retired = active.n; duplicate = true; throw alreadyRecorded; }
-      const ancestry = await adapters.command('git', ['merge-base', '--is-ancestor', open ? active.checkpointHead : active.restart.newHead, inspected.head], { cwd });
+      if (!open && inspected.head === active.restart?.newHead) { retired = active.n; duplicate = true; throw alreadyRecorded; }
+      const ancestry = await adapters.command('git', ['merge-base', '--is-ancestor', active.restart?.newHead ?? active.checkpointHead, inspected.head], { cwd });
       const head = await adapters.command('git', ['rev-parse', 'HEAD'], { cwd });
       if (ancestry.exitCode !== 0 || head.exitCode !== 0 || head.stdout.trim() !== inspected.head)
         throw Object.assign(new Error('current head does not safely extend the checkpoint head'), { code: 'STAGE_STALE' });
@@ -377,10 +380,11 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
         const file = path.join(stateRoot, 'units', unit, 'stages', `${stage}.${pendingAttempt}.input.json`);
         let pending;
         try { pending = JSON.parse(await readFile(file, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-        if (pending) {
+        if (pending !== undefined) {
+          if (!pending || typeof pending !== 'object' || Array.isArray(pending)) throw Object.assign(new Error('pending stage input is not an object'), { code: 'STAGE_STALE' });
           const { inputDigest, ...input } = pending;
           if (pending.unit !== unit || pending.stage !== stage || pending.attempt !== pendingAttempt
-            || pending.head !== active.restart.newHead || digest(input) !== inputDigest)
+            || pending.head !== (active.restart?.newHead ?? current.head) || digest(input) !== inputDigest)
             throw Object.assign(new Error('pending stage input does not match the previous restart'), { code: 'STAGE_STALE' });
           skipPendingAttempt = pendingAttempt;
         }
@@ -388,8 +392,8 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
       retired = active.n;
       refreshed = !open;
       return { ...current, stages: current.stages.map(item => item !== entry ? item : { ...item,
-        attempts: item.attempts.map(attempt => attempt.n !== active.n ? attempt : { ...attempt, ...(open ? {endedAt: adapters.now(), result: 'superseded'} : {restartHistory:[...(attempt.restartHistory ?? []),attempt.restart]}),
-          restart: { checkpointHead: active.checkpointHead, newHead: inspected.head, tree: inspected.tree, ...(skipPendingAttempt ? {skipPendingAttempt} : {}) } }) }) };
+        attempts: item.attempts.map(attempt => attempt.n !== active.n ? attempt : { ...attempt, ...(open ? {endedAt: adapters.now(), result: 'superseded'} : active.restart ? {restartHistory:[...(attempt.restartHistory ?? []),attempt.restart]} : {}),
+          restart: { checkpointHead: active.checkpointHead, newHead: inspected.head, tree: inspected.tree, ...(reopened ? {reopeningRevision:reopening.revision} : {}), ...(skipPendingAttempt ? {skipPendingAttempt} : {}) } }) }) };
     })); } catch (error) { if (error !== alreadyRecorded) throw error; }
     return { code: 0, summary: `Prepared ${stage} restart for ${unit}; open the next attempt`, details: { unit, stage, attempt: retired, newHead: request.newHead, ...(refreshed ? {refreshed:true} : {}), ...(duplicate ? {duplicate:true} : {}) } };
   }
@@ -470,10 +474,10 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
       const file = path.join(stateRoot, 'units', unit, 'stages', `${stage}.${attempt}.input.json`);
       let pending;
       try { pending = JSON.parse(await readFile(file, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-      if (pending && digest(pending) !== digest(created.input)) {
+      if (pending !== undefined && digest(pending) !== digest(created.input)) {
         throw Object.assign(new Error('pending stage input changed before checkpoint recovery'), { code: 'STAGE_STALE' });
       }
-      if (!pending) await atomicWrite(file, created.input);
+      if (pending === undefined) await atomicWrite(file, created.input);
       const checkpoint = await createCheckpoint({
         unit, stage, attempt, head: target.head, inputDigest: inputCore.inputDigest, legacy,
         exclude: target.policy?.checkpoint?.exclude ?? [], adapter: adapters.checkpoint,

@@ -118,6 +118,7 @@ export function createCodexTaskTransport({ command, executable = 'codex', submit
         if ((await binding(request.observed)).threadId !== request.fence) throw taskError('worker readiness fence changed');
         const current = await this.observe(request);
         if (current.state !== 'ready') throw taskError('request is already queued or accepted');
+        if (current.fence !== request.fence) throw taskError('worker readiness fence changed');
       });
       await query(request, 'queue');
     },

@@ -3,11 +3,12 @@ import path from 'node:path';
 import os from 'node:os';
 import { createCodexTaskTransport } from './codex-task.mjs';
 import { createClaudeTaskTransport } from './claude-task.mjs';
-import { observeTask, observeGoalTask, taskPackets } from './session-task.mjs';
+import { observeTask, observeGoalTask, taskPackets, taskDigest } from './session-task.mjs';
 import { submitNativeGoal } from './goal-composer.mjs';
 import { codexComposerMatches, submitCodexComposer } from './codex-composer.mjs';
 import { claudeComposerMatches, submitClaudeComposer } from './claude-composer.mjs';
 import { loadManagedLaunch } from './continuity-launch-io.mjs';
+import { effectArgsDigest } from './approvals.mjs';
 import { createOrcaRuntimeRpc } from './orca-runtime-rpc.mjs';
 
 function invalid(message) {
@@ -167,12 +168,14 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       if (viewport.surface_id !== observed.sessionId || !Number.isSafeInteger(viewport.columns)
         || viewport.columns < 3) throw invalid('packet reference composer viewport is unavailable');
       await submitCodexComposer({ prompt,
+        beforePaste:request.beforePaste, beforeEnter:request.beforeEnter,
         read: () => invoke('cmux', ['read-screen', ...target], observed.cwd),
         paste: text => invoke('cmux', ['rpc', 'surface.send_text', JSON.stringify({ workspace_id: observed.workspaceId, surface_id: observed.sessionId, text })], observed.cwd),
         enter: () => invoke('cmux', ['send-key', ...target, 'Return'], observed.cwd),
         verify: async () => {
           if (JSON.stringify(await inspect(observed.sessionId, observed.cwd, observed.executable)) !== JSON.stringify(observed)) throw invalid('worker changed before input');
           await verifyNative();
+          await taskPackets(request.input.args);
         },
       });
     } } : {}),
@@ -309,7 +312,21 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       ? `Read ${input.args.resultPath} (${input.args.resultDigest}); follow its referenced handoffs.`
       : legacyPrompt;
     const workerTransport = transportFor(observed.executable, parent.recipientEnv);
+    const durable = interactive && path.basename(observed.executable) === 'codex' ? input.submission : undefined;
+    const binding = threadId => ({runtime:observed.runtime,sessionId:observed.sessionId,incarnationId:observed.incarnationId,cwd:observed.cwd,
+      executable:observed.executable,pid:observed.pid,threadId,promptDigest:taskDigest(prompt),goalDigest:input.args.goalDigest,
+      packets:packets.map(({path,digest})=>({path,digest}))});
     const transport = workerTransport && { ...workerTransport, async submit(request) {
+      if (interactive && path.basename(observed.executable) === 'codex') {
+        if (typeof durable?.mark !== 'function' || typeof durable.confirm !== 'function' || durable.readOnly || durable.confirmed) throw invalid('durable result submission boundary is unavailable or consumed');
+        const current = binding(request.fence);
+        if (recipient.worker?.threadId && current.threadId !== recipient.worker.threadId
+          || durable.attempted && effectArgsDigest(current) !== effectArgsDigest(durable.binding)) throw invalid('result submission owner or packets changed');
+        return workerTransport.submit({...request,
+          beforePaste:async()=>{await durable.mark(current);},
+          beforeEnter:async()=>{if (!durable.attempted) await durable.mark(current); await durable.confirm(current);},
+        });
+      }
       if (!submission || submission.attempted) throw invalid('result submission is uncertain; observation only');
       submission.attempted = true;
       return workerTransport.submit(request);
@@ -322,14 +339,17 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     // The recipient owns the goal already; an interactive delivery is received once it reads the result in full.
     // Requiring the goal snapshot too left deliveries unverified when owners skipped or partially read it.
     const required = interactive ? packets.filter(packet => packet.path === input.args.resultPath) : packets;
-    try { result ??= await observeTask({ transport, observed, input, prompt, packets: required.length ? required : packets, submit: Boolean(submission) && !submission.attempted }); }
+    try { result ??= await observeTask({ transport, observed, input, prompt, packets: required.length ? required : packets, submit: durable ? !durable.readOnly && !durable.confirmed : Boolean(submission) && !submission.attempted }); }
     catch (error) {
-      if (!submission && error.notApplied === true && runtime === 'cmux' && !taskTransport
+      if (!durable && !submission && error.notApplied === true && runtime === 'cmux' && !taskTransport
         && (path.basename(observed.executable) === 'claude' ? claudeComposerMatches : codexComposerMatches)(await invoke('cmux', ['read-screen', '--workspace', observed.workspaceId, '--surface', observed.sessionId], observed.cwd), prompt)) {
         error.pendingComposer = true;
       }
       throw error;
     }
+    if (recipient.worker?.threadId && result.task.threadId !== recipient.worker.threadId
+      || durable?.attempted && (effectArgsDigest(binding(result.task.threadId)) !== effectArgsDigest(durable.binding)
+        || result.task.promptDigest !== durable.binding.promptDigest)) throw invalid('result submission owner or packets changed');
     if (JSON.stringify(await inspect(recipient.sessionId, recipient.cwd, recipient.executable)) !== JSON.stringify(observed)) throw invalid('recipient changed during delivery');
     return result;
   }

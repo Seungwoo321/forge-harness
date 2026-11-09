@@ -2,6 +2,28 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { submitNativeGoal } from './lib/goal-composer.mjs';
 
+test('first-input proof rejects clipped, prior-input, pending and startup views before recording submission',async()=>{
+ const fresh=' >_ OpenAI Codex (v0.167.0)\n';
+ const ready='› Ask Codex to do anything\n model · Ready · context\n ? for shortcuts';
+ for(const screen of [ready, fresh+'› prior user input\n'+ready,...['Messages to be submitted after next tool call','Messages to be submitted at end of turn','Queued follow-up inputs','edit last queued message','Waiting for startup','Preparing images','pending approval','Review plugin hooks'].map(line=>fresh+line+'\n'+ready),fresh+'› foreign draft\n model · Ready · context']) {
+  let marks=0,writes=0;
+  await assert.rejects(submitNativeGoal({provider:'codex',objective:'finish',preTurn:true,read:async()=>screen,verify:async()=>{},beforeWrite:async()=>{marks++;},write:async()=>{writes++;},enter:async()=>{}}));
+  assert.equal(marks,0);assert.equal(writes,0);
+ }
+});
+
+test('fresh queue/goal proof is rechecked after owner probes at first input and Return',async()=>{
+ for(const boundary of ['first','enter']) {
+  let draft='',blocked=false,entered=0,writes=0;
+  const read=async()=>` >_ OpenAI Codex (v0.167.0)\n› ${draft||'Ask Codex to do anything'}\n model · Ready · context`;
+  await assert.rejects(submitNativeGoal({provider:'codex',objective:'finish',preTurn:true,read,
+   verify:async()=>{if(blocked)throw Error('native queue changed');},
+   write:async(text,beforeInput)=>{if(boundary==='first'&&beforeInput)blocked=true;await beforeInput?.();writes++;draft+=text;},
+   enter:async beforeInput=>{blocked=true;await beforeInput();entered++;}}),/native queue changed/);
+  assert.equal(entered,0);if(boundary==='first')assert.equal(writes,0);
+ }
+});
+
 test('native goal is typed as a command and separately submitted after the composer settles', async () => {
   for (const provider of ['codex','claude']) {
     let draft = '', entered = 0;

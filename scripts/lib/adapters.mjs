@@ -31,7 +31,7 @@ export async function withJsonRpcProcess(binary, args, action, { cwd, timeoutMs 
       const entry = pending.get(message.id);
       if (!entry) continue;
       pending.delete(message.id);
-      if (message.error) entry.reject(new Error(message.error.message)); else entry.resolve(message.result);
+      if (message.error) entry.reject(Object.assign(new Error(message.error.message), {rpcCode:message.error.code})); else entry.resolve(message.result);
     }
   });
   const rpc = (method, params) => new Promise((resolve, reject) => {
@@ -40,9 +40,9 @@ export async function withJsonRpcProcess(binary, args, action, { cwd, timeoutMs 
     child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
   });
   try {
-    await rpc('initialize', { clientInfo: { name: 'session_transport', version: '1' }, capabilities: { experimentalApi: true } });
+    const initialization = await rpc('initialize', { clientInfo: { name: 'session_transport', version: '1' }, capabilities: { experimentalApi: true } });
     child.stdin.write(`${JSON.stringify({ method: 'initialized' })}\n`);
-    return await action(rpc);
+    return await action(rpc, initialization);
   } finally { clearTimeout(timer); child.kill(); }
 }
 

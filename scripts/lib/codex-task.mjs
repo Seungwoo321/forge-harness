@@ -35,27 +35,37 @@ export function createCodexTaskTransport({ command, executable = 'codex', submit
       if (identified.exitCode !== 0 || identified.signal) throw taskError('worker primary thread is missing or ambiguous');
       const { threadId } = JSON.parse(identified.stdout);
       if (!ids.includes(threadId)) throw taskError('primary thread is not owned by the worker');
-      return threadId;
+      return {threadId,sqliteRoot:storageRoot(result.stdout)};
     }
-    return ids[0];
+    return {threadId:ids[0],sqliteRoot:storageRoot(result.stdout)};
+  }
+  function storageRoot(stdout) {
+    const roots = [...new Set(stdout.split('\n').filter(line => line.startsWith('n/') && path.basename(line.slice(1)) === 'queue_1.sqlite').map(line => path.dirname(line.slice(1))))];
+    return roots.length === 1 ? roots[0] : undefined;
   }
   async function query(request, operation = 'read') {
-    const threadId = await binding(request.observed);
+    const {threadId,sqliteRoot} = await binding(request.observed);
     const result = await command(process.execPath, [queryScript], { cwd: request.observed.cwd, env,
-      input: JSON.stringify({ executable, threadId, cwd:request.observed.cwd, operation, prompt: request.prompt, clientId: request.input.key }) });
+      input: JSON.stringify({ executable, threadId, sqliteRoot, account, cwd:request.observed.cwd, operation, prompt: request.prompt, clientId: request.input.key }) });
     if (result.exitCode !== 0 || result.signal) throw taskError('native worker history is unavailable');
     const data = JSON.parse(result.stdout);
-    if (data.thread?.id !== threadId || data.thread.cwd !== request.observed.cwd || await binding(request.observed) !== threadId) throw taskError('worker thread changed during observation');
+    const current = await binding(request.observed);
+    const unmaterialized = data.observation === 'unmaterialized' && data.proof?.platform === 'codex/0.167.0'
+      && data.proof.threadId === threadId && data.proof.account === account && data.proof.sqliteRoot === sqliteRoot
+      && sqliteRoot && current.sqliteRoot === sqliteRoot && data.proof.queueCount === 0 && data.goal === null;
+    if (current.threadId !== threadId || (data.observation === 'unmaterialized' ? !unmaterialized
+      : data.thread?.id !== threadId || data.thread.cwd !== request.observed.cwd)) throw taskError('worker thread changed during observation');
     return { ...data, threadId };
   }
   return {
-    async identity(observed) { return { threadId: await binding(observed) }; },
+    async identity(observed) { return { threadId: (await binding(observed)).threadId }; },
     async goal(observed) {
       const data = await query({ observed, input: {} }, 'goal');
       return data.goal;
     },
     async observeGoal(request) {
       const data = await query(request, 'goal-observe');
+      if (data.observation === 'unmaterialized') return {state:'unmaterialized',threadId:data.threadId,proof:data.proof};
       if (!data.goal) {
         const absent = Array.isArray(data.turns) && data.turns.length === 0 && Array.isArray(data.queued) && data.queued.length === 0;
         return {state:absent ? 'absent' : 'unknown',threadId:data.threadId,fence:data.threadId,notApplied:absent};
@@ -103,9 +113,9 @@ export function createCodexTaskTransport({ command, executable = 'codex', submit
       return request.input.effect === 'session.deliver' ? { state: 'ready', fence: data.threadId, notApplied: true } : { state: 'startup' };
     },
     async submit(request) {
-      if (request.input.effect !== 'session.deliver' || await binding(request.observed) !== request.fence) throw taskError('worker readiness fence changed');
+      if (request.input.effect !== 'session.deliver' || (await binding(request.observed)).threadId !== request.fence) throw taskError('worker readiness fence changed');
       if (submitInput) return submitInput(request, async () => {
-        if (await binding(request.observed) !== request.fence) throw taskError('worker readiness fence changed');
+        if ((await binding(request.observed)).threadId !== request.fence) throw taskError('worker readiness fence changed');
         const current = await this.observe(request);
         if (current.state !== 'ready') throw taskError('request is already queued or accepted');
       });

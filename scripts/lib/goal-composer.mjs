@@ -34,12 +34,21 @@ function matches(display, expected) {
   return position === expected.length;
 }
 
-export async function submitNativeGoal({ provider, objective, read, write, newline, enter, verify, beforeWrite = () => {}, recovery = false }) {
+export async function submitNativeGoal({ provider, objective, read, write, newline, enter, verify, beforeWrite = () => {}, recovery = false, preTurn = false }) {
   if (!['codex','claude'].includes(provider) || typeof objective !== 'string' || !objective.trim() || /[\r\t\0\x1b]/.test(objective) || (objective.includes('\n') && typeof newline !== 'function')) throw taskError('native goal contains unsupported input');
   const requireEmpty = screen => {
     const current = contents(screen, provider);
     if (!(provider === 'codex' ? !current || ['Ask Codex to do anything','Explain this codebase','Summarize recent commits','Implement {feature}','Find and fix a bug in @filename','Write tests for @filename'].includes(current) : !current || /^Try "[^\n]*"$/.test(current))) throw taskError('native goal composer contains another draft');
-    if (recovery) {
+    if (preTurn) {
+      const rendered = typeof screen === 'object' ? screen.screen : screen;
+      const lines = typeof rendered === 'string' ? rendered.split('\n') : [];
+      // The complete fresh view excludes optimistically rendered input and queue/startup
+      // previews; Ready alone does not describe those fields in Codex 0.167.0.
+      if (provider !== 'codex' || lines.filter(line => /^\s*>_ OpenAI Codex \(v0\.167\.0\)\s*$/.test(line)).length !== 1
+        || lines.filter(line => /^\s*›(?: |$)/.test(line)).length !== 1
+        || lines.some(line => /Messages to be submitted|Queued follow-up inputs|edit last queued message|Waiting for startup|Preparing images|pending approval|approve this|request_user_input|Review plugin hooks/i.test(line))) throw taskError('fresh native receiver view is unverified');
+    }
+    if (recovery || preTurn) {
       const rendered = typeof screen === 'object' ? screen.screen : screen;
       const lines = typeof rendered === 'string' ? rendered.split('\n') : [];
       const start = lines.findLastIndex(line => provider === 'codex' ? /^\s*›(?: |$)/.test(line) : /^\s*❯(?:[ \u00a0]|$)/u.test(line));
@@ -54,7 +63,7 @@ export async function submitNativeGoal({ provider, objective, read, write, newli
   await beforeWrite();
   requireEmpty(await read());
   await verify();
-  const beforeFirstInput = async () => requireEmpty(await read());
+  const beforeFirstInput = async () => { if (preTurn) await verify(); requireEmpty(await read()); };
   await beforeFirstInput();
   await write('/',beforeFirstInput);
   await write('goal');
@@ -101,7 +110,7 @@ export async function submitNativeGoal({ provider, objective, read, write, newli
     if (settled === 2) {
       await verify();
       if (!matchesDraft(await read())) throw taskError('native goal composer changed before submission');
-      await enter(async () => { if (!matchesDraft(await read())) throw taskError('native goal composer changed before submission'); });
+      await enter(async () => { if (preTurn) await verify(); if (!matchesDraft(await read())) throw taskError('native goal composer changed before submission'); });
       return;
     }
   }

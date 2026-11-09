@@ -129,3 +129,7 @@ trusted `provider.verifyUserInput`은 `{unit,userInputRef,effect:'finding.resolv
 구버전에서 `REVIEW_TARGET_INVALID`로 멈춘 InReview 단위는 새 패키지와 같은 런타임 어댑터로 기존 리뷰 단위의 `unit stage open <review-unit> review`를 다시 실행한다. 제어면은 저장된 reviewDecision을 현재 내용과 대조하고 실제 diff·구현 인계를 생성한다. 단위나 증거 파일을 직접 수정하지 않는다. 내용이 바뀌면 열기·제출을 거부하므로 대상 단위에서 `unit accept <unit>`로 다시 검증하고 현재 대상을 리뷰한다. 같은 입력의 게이트 증거는 재사용한다.
 
 정본 문서가 없는 단위도 재시도 상한·권한·외부 접근 등 운영 결정을 기록할 수 있다. `canon: []`인 경우 존재하지 않는 정본 참조를 만들지 않고 해당 결정의 `canonRefs`를 빈 배열로 둔다. `canon-conflict` 결정에는 실제 정본 참조가 필요하며, 명시한 참조는 항상 해당 단위의 정본에 속해야 한다.
+
+## 사용자가 제외한 기준
+
+[승인된 기준 제외](criteria-changes.md)의 `unit acceptance drop`을 사용한다. decision resolve는 보류 기준을 다시 열 뿐이며 scope amend·goal amend·acceptance correct가 단위 요구 제외를 대신하지 않는다. 기존 원문·이력과 원 단위를 보존하고 새 게이트·정책에 따른 리뷰를 완료한다.

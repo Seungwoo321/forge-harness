@@ -15,6 +15,7 @@ import { finishSessionUnit, finalizeSessionUnit } from './session-flow.mjs';
 import { createDecisionStore, validateDecision } from './decisions.mjs';
 import { acceptanceCoverage, evaluateAcceptance, gateFingerprint, hasInvalidEvidence, runGate } from './evidence.mjs';
 import { correctAcceptance, correctionSource, productAcceptance, describeAcceptanceGate, verifyAcceptanceCorrections, externalDeliveryObligations } from './acceptance-correction.mjs';
+import { dropAcceptance } from './acceptance-drop.mjs';
 import { attributeChanges, createCheckpoint, scopeGuard } from './checkpoint.mjs';
 import { classifySessionBoundary } from './classify.mjs';
 import { effectArgsDigest, recordApproval, resolveEffectApproval, verifyApprovalInput } from './approvals.mjs';
@@ -165,6 +166,13 @@ function reviewSnapshot(record) {
   return record;
 }
 
+function assertReviewScope(record, input) {
+  const scope = (acceptance, handoff) => ({ acceptance, corrections: handoff?.acceptanceCorrections ?? [], amendments: handoff?.acceptanceAmendments ?? [] });
+  if (digest(scope(input.data.acceptance, input.data.handoff)) !== digest(scope(record.acceptance, record))) {
+    throw Object.assign(new Error('review scope changed after its StageInput was opened'), { code: 'STAGE_STALE' });
+  }
+}
+
 async function prepareReviewInput({ record, adapters, stateRoot }) {
   const baseline = firstCheckpoint(record);
   if (typeof adapters.git?.inspectUnit !== 'function') {
@@ -201,6 +209,7 @@ async function prepareReviewInput({ record, adapters, stateRoot }) {
   const handoff = {
     request: record.request, acceptance: record.acceptance, canon: record.canon,
     ...(record.acceptanceCorrections?.length ? { acceptanceCorrections: record.acceptanceCorrections } : {}),
+    ...(record.acceptanceAmendments?.length ? { acceptanceAmendments: record.acceptanceAmendments } : {}),
     ...(goal ? { continuity: { goal: goal.goal, source: goal.source, revision: goal.revision } } : {}),
     changedPaths: record.changedPaths, diff,
     implementation: attemptsFor(record, 'implement').filter(attempt => attempt.endedAt).map(attempt => ({
@@ -269,7 +278,7 @@ async function runProgress(stateRoot, unit) {
   return formatCliResult({ code: 0, summary: `Unit ${unit} acceptance progress`, details: { unit, state: record.state, revision: record.revision, effectiveDelivery, progress, kind: record.kind, canon: record.canon, acceptance: record.acceptance,
     head: record.head, contentFingerprint: record.contentFingerprint,
     correctionSourceDigest: digest(correctionSource(record)), criterionDigests: (record.acceptance ?? []).map(item => ({ id: item.id, digest: digest(item) })),
-    acceptanceCorrections: record.acceptanceCorrections ?? [], externalDeliveryEvidence: record.externalDeliveryEvidence ?? [] } });
+    acceptanceCorrections: record.acceptanceCorrections ?? [], acceptanceAmendments: record.acceptanceAmendments ?? [], externalDeliveryEvidence: record.externalDeliveryEvidence ?? [] } });
 }
 
 function usageError(message) {
@@ -547,6 +556,7 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
       error.code = 'STAGE_STALE';
       throw error;
     }
+    assertReviewScope(reviewedRecord, input);
     if (output.reviewedHead !== reviewedRecord.head) {
       const error = new Error('reviewedHead must match the current review target head');
       error.code = 'STAGE_CONTRACT_INVALID';
@@ -642,6 +652,7 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
         error.code = 'STAGE_STALE';
         throw error;
       }
+      assertReviewScope(target, input);
       if (target.reviewDecision?.submissionId === output.submissionId) return target;
       const reviewDecision = {
         ...(target.reviewDecision ?? { required: true }),
@@ -951,10 +962,10 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
   }
   const profile = selectProfile(record.kind);
   const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
-  const policyDigest = digest({ policy, epoch: record.policyChanges?.at(-1)?.revision ?? 0, corrections: record.acceptanceCorrections ?? [] });
+  const policyDigest = digest({ policy, epoch: record.policyChanges?.at(-1)?.revision ?? 0, corrections: record.acceptanceCorrections ?? [], amendments: record.acceptanceAmendments ?? [] });
   const deliveryMetadataRequired = policy.delivery !== 'none' || externalDeliveryObligations(record).length > 0;
   const policyMatches = current => digest({ policy: resolvePolicy({ unit: current.policyOverrides ?? {}, project: current.policy ?? {} }, { nonInteractive: true }).policy,
-    epoch: current.policyChanges?.at(-1)?.revision ?? 0, corrections: current.acceptanceCorrections ?? [] }) === policyDigest;
+    epoch: current.policyChanges?.at(-1)?.revision ?? 0, corrections: current.acceptanceCorrections ?? [], amendments: current.acceptanceAmendments ?? [] }) === policyDigest;
   const target = await adapters.git.inspectUnit({ unit, record });
   if (typeof target?.head !== 'string' || !target.head || typeof target.contentFingerprint !== 'string' || !target.contentFingerprint) {
     throw Object.assign(new Error('Git adapter must return the unit head and content fingerprint'), { code: 'ADAPTER_INVALID' });
@@ -1373,14 +1384,15 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const goal = await store.create({goal:request.goal,source:request.source,policy:resolved.policy.session});
       return formatCliResult({ code: 0, summary: `Goal ${id} registered`, details: { goal } });
     }
-    if (noun !== 'unit' || !['start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'goal-bind', 'session-stop', 'session-return', 'policy', 'reopen'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
+    if (noun !== 'unit' || !['start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'goal-bind', 'session-stop', 'session-return', 'policy', 'reopen'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct|drop <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
     const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
     if (subcommand === 'acceptance') {
       const [action, unit] = rest;
-      if (action !== 'correct' || rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit acceptance correct requires <unit> --request <file> --user-input <ref>');
+      if (!['correct', 'drop'].includes(action) || rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit acceptance correct|drop requires <unit> --request <file> --user-input <ref>');
       const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'acceptance correction request', 'CLI_USAGE');
-      const correction = await correctAcceptance({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, request, userInputRef: parsed.options['user-input'], adapters });
-      return formatCliResult({ code: 0, summary: `Acceptance verification corrected for ${unit}`, details: { unit, correction } });
+      const correction = await (action === 'drop' ? dropAcceptance : correctAcceptance)({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, request, userInputRef: parsed.options['user-input'], adapters });
+      return formatCliResult({ code: 0, summary: action === 'drop' ? `Approved criterion excluded for ${unit}` : `Acceptance verification corrected for ${unit}`,
+        details: { unit, [action === 'drop' ? 'amendment' : 'correction']: correction } });
     }
     if (subcommand === 'policy') {
       const [action, unit] = rest;

@@ -71,7 +71,7 @@ function withNotification(record, event) {
   let updated = {
     ...record,
     openDecisions: record.openDecisions.map(item => item.id === decision.id ? { ...item, notifiedAt: event.notifiedAt } : item),
-    acceptance: record.acceptance.map(item => blocks.has(item.id) ? { ...item, status: 'deferred' } : item),
+    acceptance: record.acceptance.map(item => blocks.has(item.id) && item.status !== 'dropped' ? { ...item, status: 'deferred' } : item),
   };
   const hasAvailableWork = updated.acceptance.some(item => !['deferred', 'dropped'].includes(item.status));
   const blockingDecision = updated.openDecisions.some(item => item.answer == null

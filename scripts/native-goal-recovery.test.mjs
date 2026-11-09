@@ -14,11 +14,11 @@ import { runUnitCli } from './lib/unit-driver.mjs';
 
 const parse = output => JSON.parse(output.slice(output.lastIndexOf('RESULT ')+7));
 const packet = ['목표: goal','수용 기준: done','작업관리: change','결정: review','변경: source','검증: checks','남은 일·위험: review','다음 단위 첫 행동: inspect'].join('\n');
-async function fixture(t) {
+async function fixture(t,preTurn=false,initialInput=false) {
   const cwd=await realpath(await mkdtemp(path.join(tmpdir(),'native-recovery-')));t.after(()=>rm(cwd,{recursive:true,force:true}));
   const stateRoot=path.join(cwd,'state'),store=createUnitStateStore(stateRoot),goals=createContinuityStore(stateRoot);
   const source=path.join(cwd,'goal.md');await writeFile(source,'goal');
-  await goals.create({goal:{id:'g',objective:'goal',criteria:['done'],remaining:['change'],status:'active'},policy:{runtime:'cmux',provider:'codex',account:'/test-account',model:'model',effort:'high',argv:['codex']},source:{path:source,digest:taskDigest('goal')}});
+  await goals.create({goal:{id:'g',objective:'goal',criteria:['done'],remaining:['change'],status:'active'},policy:{runtime:'cmux',provider:'codex',account:'/test-account',model:'model',effort:'high',argv:initialInput?['codex','initial prompt']:['codex']},source:{path:source,digest:taskDigest('goal')}});
   const owner={runtime:'cmux',sessionId:'owner',incarnationId:'tty1:11:START',cwd,worker:{executable:'codex',pid:11,incarnationId:'tty1:11:START',threadId:'owner-thread'}};
   await goals.transaction('g',g=>({...g,revision:g.revision+1,adoptions:[{unit:'change',ownership:'existing',...owner,owner}]}));
   await store.create({schema:'harness.unit/1',unit:'change',kind:'chore',state:'InReview',continuity:{goalId:'g'},head:'head',contentFingerprint:'content',policy:{goal:{class:'task'},review:{mode:'required',by:'session',triggers:[]}}});
@@ -36,7 +36,7 @@ else if(binary==='lsof')out='n'+process.cwd()+'\\n';
 else if(binary==='cmux'&&args.includes('identify'))out=JSON.stringify({caller:{surface_id:'owner'}});
 else if(binary==='cmux'&&args.includes('new-workspace')){s.exists=true;s.launches++;s.title=args[args.indexOf('--name')+1];save();out='OK workspace:child'}
 else if(binary==='cmux'&&args.includes('tree'))out=JSON.stringify({windows:[{id:'window',workspaces:[{id:'parent',title:'parent',panes:[{surfaces:[{id:'owner',type:'terminal',tty:'tty1'}]}]},...(s.exists?[{id:'child',title:s.title,panes:[{surfaces:[{id:'child',type:'terminal',tty:'tty2'}]}]}]:[])]}]});
-else if(binary==='cmux'&&args.includes('read-screen'))out=s.trust?'› '+(s.draft||'Ask Codex to do anything')+'\\n model · Ready · context\\n ? for shortcuts':'Review plugin hooks and trust';
+else if(binary==='cmux'&&args.includes('read-screen')){if(${preTurn}&&!args.includes('--scrollback'))throw Error('fresh view requires full capture');out=s.trust?(${preTurn}?' >_ OpenAI Codex (v0.167.0)\\n':'')+(s.preview||'')+'› '+(s.draft||'Ask Codex to do anything')+'\\n model · Ready · context\\n ? for shortcuts':'Review plugin hooks and trust';}
 else if(binary==='cmux'&&(args.includes('rpc')||args.includes('send-key'))){
  const rows=readFileSync(${JSON.stringify(path.join(stateRoot,'units/review/ledger.ndjson'))},'utf8').trim().split('\\n').map(JSON.parse);
  if(!rows.some(row=>row.event==='submission'&&row.seq===1))throw Error('input preceded durable submission fence');
@@ -52,7 +52,7 @@ process.stdout.write(out);
     const command=(binary,args,options)=>core.command(process.execPath,[stub,binary,...args],options);
     const transport={identity:async observed=>({threadId:observed.pid===11?'owner-thread':(await read()).thread}),
       async observeGoal(request){const s=await read();if(s.native==='wrong')throw Error('different native goal');
-        if(s.native==='absent')return {state:'absent',threadId:s.thread,fence:s.thread,notApplied:s.absence};
+        if(s.native==='absent')return preTurn?{state:'unmaterialized',threadId:s.thread,proof:{platform:'codex/0.167.0',threadId:s.thread,sqliteRoot:'/test-account',queueCount:0}}:{state:'absent',threadId:s.thread,fence:s.thread,notApplied:s.absence};
         return {state:s.native,threadId:s.thread,goal:{threadId:s.thread,status:'active',objective:request.prompt},
           enforcement:{status:'verified',cwd,key:'hook',hash:'hash'},turnId:'turn',activityId:'read-packets',packets:request.packets};}};
     const sessionRunner=createSessionRunner({runtime:'cmux',command,parent:{...owner,workerExecutable:'codex'},launch:()=>['codex'],taskTransport:transport,pollAttempts:1});
@@ -72,6 +72,30 @@ test('public trust timeout recovers the same reviewer and seq1 on Ready, with on
   assert.equal((await f.run()).code,0);const native=await f.read(),rows=await f.ledger();
   assert.equal(native.launches,1);assert.equal(native.returns,1);assert.equal(rows.filter(r=>r.event==='intent').length,1);assert.equal(rows.filter(r=>r.event==='submission').length,1);
   assert.equal((await f.goals.read('g')).reviews.length,1);assert.deepEqual(await f.store.read('change'),before);
+});
+
+test('public first-input recovery keeps the original intent and worker across trust timeout and lazy rollout',async t=>{
+ const f=await fixture(t,true),before=await f.store.read('change');assert.equal((await f.run()).code,3);
+ await f.edit({trust:true});const result=await f.run();assert.equal(result.code,0,JSON.stringify(result));assert.equal(result.result.seq,1);
+ assert.equal((await f.run()).code,0);const native=await f.read(),rows=await f.ledger();
+ assert.equal(native.launches,1);assert.equal(native.returns,1);assert.equal(rows.filter(r=>r.event==='intent').length,1);assert.equal(rows.filter(r=>r.event==='submission').length,1);
+ assert.deepEqual(await f.store.read('change'),before);
+});
+
+test('unmaterialized recovery remains observation-only after a crash at the durable input boundary',async t=>{
+ const f=await fixture(t,true);assert.equal((await f.run()).code,3);await f.edit({trust:true,mode:'crash-before-write'});
+ assert.equal((await f.run()).code,3);assert.equal((await f.run()).code,3);
+ assert.deepEqual((await f.read()).writes,[]);assert.equal((await f.read()).launches,1);assert.equal((await f.ledger()).filter(r=>r.event==='submission').length,1);
+});
+
+test('unmaterialized Ready with pending input never records a boundary or writes',async t=>{
+ const f=await fixture(t,true);assert.equal((await f.run()).code,3);await f.edit({trust:true,preview:'Queued follow-up inputs\\n'});
+ assert.equal((await f.run()).code,3);assert.deepEqual((await f.read()).writes,[]);assert.equal((await f.ledger()).filter(r=>r.event==='submission').length,0);
+});
+
+test('an initial launch prompt cannot use the fresh unmaterialized recovery path',async t=>{
+ const f=await fixture(t,true,true);assert.equal((await f.run()).code,3);await f.edit({trust:true});
+ assert.equal((await f.run()).code,3);assert.deepEqual((await f.read()).writes,[]);assert.equal((await f.ledger()).filter(r=>r.event==='submission').length,0);
 });
 
 test('a crash immediately after the durable input boundary never retypes or presses Enter on repeated reconciliation',async t=>{

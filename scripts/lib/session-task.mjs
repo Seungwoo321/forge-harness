@@ -49,12 +49,15 @@ export async function observeGoalTask({ transport, observed, input, prompt, pack
     executable:observed.executable,pid:observed.pid,threadId,promptDigest:taskDigest(prompt),goalDigest:input.args.goalDigest,
     packets:packets.map(({path,digest})=>({path,digest}))};
   if (submission?.attempted && effectArgsDigest(submission.binding) !== effectArgsDigest(binding)) throw taskError('native submission owner or packets changed');
-  if (evidence.state === 'absent' && submission && !submission.attempted) {
+  if (['absent','unmaterialized'].includes(evidence.state) && submission && !submission.attempted) {
     if (submission.readOnly) throw taskError('completed native start is observation-only');
-    if (!threadId || evidence.notApplied !== true && (submission.recovery || evidence.freshOnly !== true)) throw taskError('native input absence is unverified');
+    const preTurn = evidence.state === 'unmaterialized';
+    if (!threadId || (preTurn ? evidence.proof?.platform !== 'codex/0.167.0' || evidence.proof.threadId !== threadId
+      || !evidence.proof.sqliteRoot || evidence.proof.queueCount !== 0
+      : evidence.notApplied !== true && (submission.recovery || evidence.freshOnly !== true))) throw taskError('native input absence is unverified');
     if (typeof submission.mark !== 'function') throw taskError('durable native submission fence is unavailable');
     if (typeof submit !== 'function') throw taskError('native goal submission is unavailable');
-    await submit({...request,threadId}, async () => { await submission.mark(binding); });
+    await submit({...request,threadId,...(preTurn ? {preTurn:evidence.proof} : {})}, async () => { await submission.mark(binding); });
     if (!submission.attempted) throw taskError('native goal submission did not record its mutation boundary');
     evidence = await transport.observeGoal(request);
     if ((evidence.threadId ?? evidence.fence) !== submission.binding.threadId) throw taskError('native submission owner or packets changed');

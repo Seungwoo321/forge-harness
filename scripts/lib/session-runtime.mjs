@@ -242,12 +242,21 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       || path.basename(observed.executable) !== path.basename(argv[0])) throw invalid('configured worker executable has not started');
     const transport = transportFor(argv[0], env);
     const result = goalPrompt ? await observeGoalTask({ transport, observed, input, prompt, packets, submission, submit: async (request, beforeWrite) => {
+      if (request.preTurn) {
+        if (runtime !== 'cmux' || path.basename(argv[0]) !== 'codex') throw invalid('full fresh native receiver observation is unavailable');
+        for (let index = 1; index < argv.length; index += 1) {
+          if (['--dangerously-bypass-approvals-and-sandbox','--no-alt-screen'].includes(argv[index])) continue;
+          if (argv[index] === '--model' && argv[index + 1]) { index += 1; continue; }
+          if (argv[index] === '-c' && /^model_reasoning_effort=/.test(argv[index + 1] ?? '')) { index += 1; continue; }
+          throw invalid('fresh native launch without initial input is unverified');
+        }
+      }
       const fenceOwner = async () => {
         const current = await inspect(observed.sessionId,observed.cwd,observed.executable);
         if (JSON.stringify(current) !== JSON.stringify(observed) || (await transport.identity(current)).threadId !== request.threadId) throw invalid('worker changed before native goal input');
       };
       const target = ['--workspace', observed.workspaceId, '--surface', observed.sessionId];
-      const read = runtime === 'cmux' ? () => invoke('cmux',['read-screen',...target],observed.cwd) : async () => {
+      const read = runtime === 'cmux' ? () => invoke('cmux',['read-screen',...target,...(request.preTurn ? ['--scrollback'] : [])],observed.cwd) : async () => {
         const terminal = (await orca(['terminal','read','--terminal',observed.sessionId,'--screen'],observed.cwd)).terminal;
         if (terminal?.source !== 'screen' || terminal.handle !== observed.sessionId) throw invalid('Orca rendered screen is unavailable');
         return {screen:Array.isArray(terminal.tail) ? terminal.tail.join('\n') : terminal.tail, draft:terminal.draft};
@@ -261,14 +270,15 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
         await beforeInput?.();
         return runtime === 'cmux' ? invoke('cmux',['rpc','surface.send_text',JSON.stringify({workspace_id:observed.workspaceId,surface_id:observed.sessionId,text})],observed.cwd) : orcaSend(text);
       };
-      await submitNativeGoal({provider:path.basename(observed.executable),objective:prompt,read,write,beforeWrite,recovery:input.submission?.recovery === true,
+      await submitNativeGoal({provider:path.basename(observed.executable),objective:prompt,read,write,beforeWrite,recovery:input.submission?.recovery === true,preTurn:Boolean(request.preTurn),
         newline: async () => { await fenceOwner(); return runtime === 'cmux' ? invoke('cmux',['send-key',...target,'shift+enter'],observed.cwd) : orcaSend('\x1b[13;2u'); },
         enter: async beforeInput => { await fenceOwner(); await beforeInput?.(); return runtime === 'cmux' ? invoke('cmux',['send-key',...target,'Return'],observed.cwd) : orcaSend('\r'); },
         verify: async () => {
           if (JSON.stringify(await inspect(observed.sessionId,observed.cwd,observed.executable)) !== JSON.stringify(observed)) throw invalid('worker changed before goal input');
           const current = await transport.observeGoal({observed,input,prompt,packets});
-          if (current.state !== 'absent' || (current.threadId ?? current.fence) !== request.threadId
-            || input.submission?.recovery && current.notApplied !== true) throw invalid('native goal or pending input is already present or unverified');
+          const available = request.preTurn ? current.state === 'unmaterialized' && JSON.stringify(current.proof) === JSON.stringify(request.preTurn)
+            : current.state === 'absent' && (!input.submission?.recovery || current.notApplied === true);
+          if (!available || (current.threadId ?? current.fence) !== request.threadId) throw invalid('native goal or pending input is already present or unverified');
         },
       });
     } }) : await observeTask({ transport, observed, input, prompt, packets, submit: true });

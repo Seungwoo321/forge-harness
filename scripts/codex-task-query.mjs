@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 import { withJsonRpcProcess } from './lib/adapters.mjs';
 import { readCodexNativeGoal } from './lib/codex-native-goal.mjs';
+import { observeUnmaterializedThread } from './lib/codex-preturn.mjs';
 
 let source = '';
 for await (const chunk of process.stdin) source += chunk;
 try {
-  const { executable, threadId, threadIds, cwd, operation, prompt, clientId } = JSON.parse(source);
+  const { executable, threadId, threadIds, cwd, operation, prompt, clientId, sqliteRoot, account } = JSON.parse(source);
   const goalOperation = ['goal', 'goal-observe'].includes(operation);
-  const nativeGoal = goalOperation ? readCodexNativeGoal(threadId) : undefined;
-  const result = operation === 'goal' && !nativeGoal && typeof cwd==='string' ? {thread:{id:threadId,cwd},turns:[],queued:[],goal:null} : await withJsonRpcProcess(executable, ['app-server', '--stdio'], async rpc => {
+  const nativeGoal = goalOperation ? readCodexNativeGoal(threadId, sqliteRoot ?? account) : undefined;
+  const result = operation === 'goal' && !nativeGoal && typeof cwd==='string' ? {thread:{id:threadId,cwd},turns:[],queued:[],goal:null} : await withJsonRpcProcess(executable, ['app-server', '--stdio'], async (rpc, initialization) => {
     if (operation === 'identify') {
       const candidates = [];
       for (const id of threadIds) {
@@ -19,7 +20,12 @@ try {
       if (candidates.length !== 1) throw new Error('worker primary thread is missing or ambiguous');
       return { threadId: candidates[0] };
     }
-    const { thread } = await rpc('thread/read', { threadId, includeTurns: false });
+    let thread;
+    try { ({thread} = await rpc('thread/read', {threadId, includeTurns:false})); }
+    catch (readError) {
+      if (operation !== 'goal-observe' || nativeGoal) throw readError;
+      return observeUnmaterializedThread({rpc,initialization,threadId,account,sqliteRoot,readError});
+    }
     if (operation === 'goal') {
       return { thread: { id: thread.id, cwd: thread.cwd }, goal: nativeGoal };
     }

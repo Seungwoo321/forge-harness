@@ -37,15 +37,16 @@ async function inspectAttribution({ record, adapters, cwd, observed, baseRef }) 
   await git(['merge-base', '--is-ancestor', observed.base, head]);
   const changes = await adapters.checkpoint.inspectChanges({ checkpoint: first.checkpointCommit,
     firstCheckpoint: observed.base, head, exclude: record.policy?.checkpoint?.exclude ?? [] });
-  if (changes.head !== head || changes.tree !== observed.tree) throw stale('current scope content differs from submitted evidence');
-  const changedPaths = attemptChangedPaths(changes.firstCheckpointDiff);
+  if (changes.head !== head || changes.contentTree !== observed.tree) throw stale('current scope content differs from submitted evidence');
+  const changedPaths = attemptChangedPaths((await git(['diff', '--name-only', '-z', observed.base, changes.contentTree])).split('\0').filter(Boolean));
   if (effectArgsDigest(changedPaths) !== effectArgsDigest(attemptChangedPaths(observed.changedPaths))) throw stale('provider unit diff differs from Git');
   const currentPaths = (await git(['diff', '--no-renames', '--name-only', '-z', observed.base, observed.tree])).split('\0').filter(Boolean);
   const upstreamPaths = attemptChangedPaths((await git(['diff', '--no-renames', '--name-only', '-z', first.checkpointCommit, observed.base])).split('\0').filter(Boolean));
   if (await git(['rev-list', '--min-parents=3', `${observed.base}..${head}`])) throw stale('octopus merge attribution is unsupported');
   const committedPaths = (await git(['log', '--format=', '--name-only', '-z', '--no-renames', '--diff-merges=remerge', `${observed.base}..${head}`])).split('\0').filter(Boolean);
   const unitPaths = attemptChangedPaths([...currentPaths, ...committedPaths, ...attempts.flatMap(attempt => attempt.changedPaths ?? [])]);
-  return { head, contentFingerprint: observed.contentFingerprint, repo: root, branch, base: observed.base, baseRef,
+  return { head, contentFingerprint: observed.contentFingerprint, contentTree: changes.contentTree,
+    checkpointTree: changes.tree, excludedPaths: changes.excluded, repo: root, branch, base: observed.base, baseRef,
     checkpoint: first.checkpointCommit, changedPaths, upstreamPaths, unitPaths };
 }
 

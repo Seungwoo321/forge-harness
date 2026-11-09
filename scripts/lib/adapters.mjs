@@ -132,7 +132,7 @@ export function createAdapters({ spawn = nodeSpawn, clock = () => new Date(), id
     return result.stdout;
   }
 
-  async function snapshotTree(exclude = []) {
+  async function snapshotTree(exclude = [], inspectContent = false) {
     const cwd = repositoryRoot;
     const temp = await mkdtemp(path.join(os.tmpdir(), 'forge-checkpoint-'));
     const index = path.join(temp, 'index');
@@ -153,14 +153,19 @@ export function createAdapters({ spawn = nodeSpawn, clock = () => new Date(), id
         const fields = result.stdout.split('\0').filter(Boolean);
         ignored = fields.filter((_, index) => index % 4 === 3);
       }
-      const excludedPaths = new Set(ignored);
-      for (const file of files) if (exclude.some(pattern => matchesGlob(file, pattern))) excludedPaths.add(file);
+      const policyExcluded = files.filter(file => exclude.some(pattern => matchesGlob(file, pattern)));
+      const excludedPaths = new Set([...ignored, ...policyExcluded]);
       const excluded = [...excludedPaths].sort();
-      const included = files.filter(file => !excluded.includes(file));
+      const included = files.filter(file => !(inspectContent ? policyExcluded : excluded).includes(file));
       if (included.length) await git(['add', '-A', '--', ...included], { cwd, env });
+      let contentTree;
+      if (inspectContent) {
+        for (const file of policyExcluded) await git(['rm', '--cached', '--ignore-unmatch', '--', file], { cwd, env });
+        contentTree = (await git(['write-tree'], { cwd, env })).trim();
+      }
       for (const file of excluded) await git(['rm', '--cached', '--ignore-unmatch', '--', file], { cwd, env });
       const tree = (await git(['write-tree'], { cwd, env })).trim();
-      return { cwd, temp, env, head, tree, excluded };
+      return { cwd, temp, env, head, tree, excluded, ...(inspectContent ? { contentTree } : {}) };
     } catch (error) {
       await rm(temp, { recursive: true, force: true });
       throw error;
@@ -226,7 +231,7 @@ export function createAdapters({ spawn = nodeSpawn, clock = () => new Date(), id
       }
     },
     async inspectChanges({ checkpoint: attempt, firstCheckpoint, exclude = [], head: expectedHead, paths }) {
-      const current = await snapshotTree(exclude);
+      const current = await snapshotTree(exclude, true);
       try {
         if (expectedHead && current.head !== expectedHead) {
           const error = new Error('repository head changed since the stage checkpoint');
@@ -237,7 +242,8 @@ export function createAdapters({ spawn = nodeSpawn, clock = () => new Date(), id
           .split('\0').filter(Boolean);
         const patch = paths === undefined ? {} : { patch: paths.length
           ? await git(['--literal-pathspecs', 'diff', '--binary', '--no-ext-diff', '--no-textconv', firstCheckpoint, current.tree, '--', ...paths], { cwd: current.cwd }) : '' };
-        return { head: current.head, tree: current.tree, firstCheckpointDiff: await diff(firstCheckpoint), attemptDiff: await diff(attempt), ...patch };
+        return { head: current.head, tree: current.tree, contentTree: current.contentTree, excluded: current.excluded,
+          firstCheckpointDiff: await diff(firstCheckpoint), attemptDiff: await diff(attempt), ...patch };
       } finally {
         await rm(current.temp, { recursive: true, force: true });
       }

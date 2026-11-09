@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -10,21 +10,45 @@ import { createUnitStateStore } from './lib/unit-state.mjs';
 import { runUnitCli } from './lib/unit-driver.mjs';
 import { effectArgsDigest } from './lib/approvals.mjs';
 
-async function fixture(t, { overlap = false, outside = false } = {}) {
+async function fixture(t, { overlap = false, outside = false, projection = false } = {}) {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstream-scope-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const git = (...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid');
   for (const file of ['source', 'upstream', 'shared']) await writeFile(path.join(cwd, file), 'baseline\n');
+  const ignoredTracked = ['local-notes.txt', 'nested/context.txt'], policyExcluded = ['policy-excluded.txt'];
+  if (projection) {
+    await mkdir(path.join(cwd, 'nested'));
+    for (const file of [...ignoredTracked, ...policyExcluded]) await writeFile(path.join(cwd, file), 'tracked context\n');
+  }
   git('add', '.'); git('commit', '-qm', 'baseline');
+  const ignoreFile = path.join(cwd, '.git/info/exclude');
+  if (projection) {
+    await writeFile(ignoreFile, [...ignoredTracked, 'ignored-new.txt'].join('\n') + '\n');
+    await writeFile(path.join(cwd, 'ignored-new.txt'), 'untracked ignored\n');
+  }
   const originalHead = git('rev-parse', 'HEAD'), branch = git('branch', '--show-current');
   const stateRoot = path.join(cwd, '.git/work-state'), store = createUnitStateStore(stateRoot);
   const core = createAdapters({ repositoryRoot: cwd });
   const observe = async () => {
     const head = git('rev-parse', 'HEAD'), base = git('merge-base', head, 'refs/heads/upstream-base');
-    const snapshot = await core.checkpoint.inspectChanges({ checkpoint: base, firstCheckpoint: base, head });
-    return { head, contentFingerprint: `git-tree:${snapshot.tree}`, tree: snapshot.tree,
-      repo: cwd, branch, base, baseRef: 'refs/heads/upstream-base', changedPaths: snapshot.firstCheckpointDiff };
+    const temp = await mkdtemp(path.join(os.tmpdir(), 'scope-provider-'));
+    const env = { GIT_INDEX_FILE: path.join(temp, 'index'), GIT_OPTIONAL_LOCKS: '0' };
+    const run = async args => {
+      const result = await core.command('git', args, { cwd, env });
+      assert.equal(result.exitCode, 0, result.stderr); return result.stdout;
+    };
+    try {
+      await run(['read-tree', head]);
+      const files = (await run(['ls-files', '--cached', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean);
+      const kept = files.filter(file => !projection || !policyExcluded.includes(file));
+      if (kept.length) await run(['add', '-A', '--', ...kept]);
+      if (projection) await run(['rm', '--cached', '--ignore-unmatch', '--', ...policyExcluded]);
+      const tree = (await run(['write-tree'])).trim();
+      const changedPaths = (await run(['diff', '--name-only', '-z', base, tree])).split('\0').filter(Boolean);
+      return { head, contentFingerprint: `git-tree:${tree}`, tree,
+        repo: cwd, branch, base, baseRef: 'refs/heads/upstream-base', changedPaths };
+    } finally { await rm(temp, { recursive: true, force: true }); }
   };
   git('branch', 'upstream-base');
   const adapters = { ...core, git: { inspectUnit: observe }, gates: { describe: async id => ({ id,
@@ -41,7 +65,8 @@ async function fixture(t, { overlap = false, outside = false } = {}) {
   const start = async (unit, kind = 'impl') => {
     const result = await request(['unit', 'start', unit, '--non-interactive'], { kind,
       ...(kind === 'review' ? { targetUnit: 'demo' } : {}), request: { text: 'Correct source', userInputRef: 'approved-input' },
-      policyOverrides: { goal: { class: 'task' }, delivery: 'none', review: { mode: 'required', by: 'session', triggers: [] } } });
+      policyOverrides: { goal: { class: 'task' }, delivery: 'none', review: { mode: 'required', by: 'session', triggers: [] },
+        ...(projection ? { checkpoint: { exclude: policyExcluded } } : {}) } });
     assert.equal(result.code, 0, JSON.stringify(result));
   };
   const open = async (unit, stage) => { const r = await call(['unit', 'stage', 'open', unit, stage]); assert.equal(r.code, 0, JSON.stringify(r)); return JSON.parse(await readFile(r.input, 'utf8')); };
@@ -93,7 +118,8 @@ async function fixture(t, { overlap = false, outside = false } = {}) {
   assert.ok(before.findings.some(f => f.kind === 'scope-guard' && f.paths.includes('upstream')));
   assert.deepEqual((await call(['unit', 'scope', 'recheck', 'demo'], { git: undefined })).recheck.resolved, []);
   runner = runUnitCli;
-  return { cwd, git, core, adapters, call, store, before, base, currentHead, originalHead, observe };
+  return { cwd, git, core, adapters, call, store, before, base, currentHead, originalHead, observe,
+    ignoreFile, ignoredTracked, policyExcluded };
 }
 
 test('public same-unit recheck resolves upstream-only historical findings and preserves current review and gate evidence', async t => {
@@ -121,6 +147,46 @@ test('actual unit drift and upstream/unit overlap remain unresolved, including o
     assert.deepEqual(await f.store.read('demo'), f.before);
     assert.equal((await f.call(['unit', 'accept', 'demo'])).code, 1);
   });
+});
+
+test('full-content evidence and ignored tracked checkpoint projection remain independently bound', async t => {
+  const f = await fixture(t, { projection: true }), index = await readFile(path.join(f.cwd, '.git/index'));
+  const result = await f.call(['unit', 'scope', 'recheck', 'demo']);
+  assert.equal(result.code, 0, JSON.stringify(result)); assert.ok(result.recheck.resolved.length);
+  const attribution = result.recheck.attribution;
+  assert.equal(`git-tree:${attribution.contentTree}`, f.before.contentFingerprint);
+  assert.notEqual(attribution.contentTree, attribution.checkpointTree);
+  assert.notEqual(attribution.contentTree, f.git('rev-parse', 'HEAD^{tree}'));
+  assert.deepEqual(attribution.excludedPaths, [...f.ignoredTracked, ...f.policyExcluded].sort());
+  assert.deepEqual(attribution.changedPaths, [...f.policyExcluded, 'source'].sort());
+  const after = await f.store.read('demo');
+  for (const key of ['stages', 'scopePaths', 'evidence', 'failures', 'reviewDecision', 'verdict', 'head', 'contentFingerprint']) assert.deepEqual(after[key], f.before[key], key);
+  assert.deepEqual(await readFile(path.join(f.cwd, '.git/index')), index);
+  assert.equal((await f.call(['unit', 'accept', 'demo'])).code, 0);
+});
+
+test('ignored tracked content drift cannot hide behind an unchanged checkpoint projection or forged old full observation', async t => {
+  const f = await fixture(t, { projection: true }), observed = await f.observe();
+  const snapshot = () => f.core.checkpoint.inspectChanges({ checkpoint: f.base, firstCheckpoint: f.base,
+    head: f.currentHead, exclude: f.policyExcluded });
+  const before = await snapshot();
+  await writeFile(path.join(f.cwd, f.ignoredTracked[0]), 'changed full evidence\n');
+  const changed = await snapshot();
+  assert.equal(changed.tree, before.tree); assert.notEqual(changed.contentTree, before.contentTree);
+  for (const git of [f.adapters.git, { inspectUnit: async () => observed }]) {
+    const result = await f.call(['unit', 'scope', 'recheck', 'demo'], { git });
+    assert.equal(result.error, 'STAGE_STALE'); assert.deepEqual(await f.store.read('demo'), f.before);
+  }
+});
+
+test('changing ignore projection during recheck rejects despite unchanged full evidence', async t => {
+  const f = await fixture(t, { projection: true });
+  let observations = 0;
+  const result = await f.call(['unit', 'scope', 'recheck', 'demo'], { git: { inspectUnit: async () => {
+    if (++observations === 2) await writeFile(f.ignoreFile, `${f.ignoredTracked[0]}\nignored-new.txt\n`);
+    return f.observe();
+  } } });
+  assert.equal(result.error, 'STAGE_STALE'); assert.deepEqual(await f.store.read('demo'), f.before);
 });
 
 test('forged base, non-ancestor, root, branch, diff and stale evidence are rejected atomically', async t => {

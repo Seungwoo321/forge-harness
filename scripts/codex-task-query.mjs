@@ -24,7 +24,7 @@ try {
     try { ({thread} = await rpc('thread/read', {threadId, includeTurns:false})); }
     catch (readError) {
       if (operation !== 'goal-observe' || nativeGoal) throw readError;
-      return observeUnmaterializedThread({rpc,initialization,threadId,account,sqliteRoot,readError});
+      return observeUnmaterializedThread({rpc,initialization,threadId,account,sqliteRoot,cwd,readError});
     }
     if (operation === 'goal') {
       return { thread: { id: thread.id, cwd: thread.cwd }, goal: nativeGoal };

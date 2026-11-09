@@ -127,7 +127,16 @@ export async function executeEffect({
       const rows = await ledger.read();
       const previous = rows.findLast(row => row.event === 'submission' && row.seq === input.seq && row.key === input.key);
       const readOnly = rows.some(row => row.event === 'result' && row.seq === input.seq && row.key === input.key);
+      const belongs = row => row.seq === input.seq && row.key === input.key;
       const submission = {attempted:Boolean(previous),binding:previous?.binding,recovery,readOnly,
+        pendingDraft:rows.some(row => belongs(row) && row.event === 'verification' && row.verify?.code === 'SESSION_TASK_UNVERIFIED' && row.verify.message === 'native goal composer did not settle'),
+        repairAttempted:rows.some(row => belongs(row) && row.event === 'draft-repair'),
+        confirmed:rows.some(row => belongs(row) && row.event === 'confirmation'),
+        async repair(binding,correction) {
+          if (correction?.kind !== 'first-burst-slash-loss' || !/^sha256:[a-f0-9]{64}$/.test(correction.fromDigest ?? '') || !/^sha256:[a-f0-9]{64}$/.test(correction.toDigest ?? '')) throw errorWithCode('LEDGER_VERIFY_INVALID','native draft correction binding is incomplete');
+          await checkpoint('draft-repair',binding,correction);
+        },
+        async confirm(binding) { await checkpoint('confirmation',binding); },
         async mark(binding) {
           if (submission.readOnly || submission.attempted || (await ledger.read()).some(row => row.event === 'submission' && row.seq === input.seq && row.key === input.key))
             throw errorWithCode('EFFECT_UNCERTAIN','native goal input was already attempted');
@@ -139,6 +148,15 @@ export async function executeEffect({
           await ledger.append({event:'submission',unit,effect,seq:input.seq,key:input.key,binding:structuredClone(binding),attempted_at:adapter.now()});
           submission.attempted = true; submission.binding = structuredClone(binding);
         }};
+      async function checkpoint(event,binding,correction) {
+        if (submission.readOnly || !submission.attempted || submission.confirmed
+          || effectArgsDigest(binding) !== effectArgsDigest(submission.binding)
+          || event === 'draft-repair' && (!submission.pendingDraft || submission.repairAttempted)
+          || (await ledger.read()).some(row => belongs(row) && row.event === event)) throw errorWithCode('EFFECT_UNCERTAIN','native draft edit or Return was already attempted or is unverified');
+        await ledger.append({event,unit,effect,seq:input.seq,key:input.key,binding:structuredClone(binding),...(correction?{correction:structuredClone(correction)}:{}),attempted_at:adapter.now()});
+        if (event === 'draft-repair') submission.repairAttempted = true;
+        else submission.confirmed = true;
+      }
       return {...input,submission};
     };
     const verify = async input => {

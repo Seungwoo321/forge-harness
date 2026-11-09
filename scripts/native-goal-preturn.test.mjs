@@ -26,6 +26,7 @@ appendFileSync(${JSON.stringify(trace)},JSON.stringify(r)+'\\n');let result,erro
 if(r.method==='initialize')result={codexHome:state.account||${JSON.stringify(account)},userAgent:'session_transport/'+(state.version||'0.167.0')+' (test)'};
 else if(r.method==='thread/read'||r.method==='thread/turns/list')error={code:state.code||-32600,message:state.message||'thread not loaded: '+r.params.threadId};
 else if(r.method==='thread/queue/list'){if(state.queueSuccess)result={data:[],nextCursor:null};else error={code:-32603,message:'failed to read thread: invalid thread-store request: no rollout found for thread id '+r.params.threadId};}
+else if(r.method==='config/read'){if(state.configQueue){const db=new(require('node:sqlite').DatabaseSync)(${JSON.stringify(path.join(sqliteRoot,'queue_1.sqlite'))});db.prepare('INSERT INTO queued_items VALUES(?,?,?,?,?,?)').run('race',${JSON.stringify(threadId)},'{}',10,1,1);db.close();}result={config:state.absentTui?{}:{tui:{keymap:state.keymap||{},vim_mode_default:state.vim||false}}};}
 else throw Error('unexpected RPC '+r.method);
 process.stdout.write(JSON.stringify({id:r.id,...(error?{error}:{result})})+'\\n');});
 `,{mode:0o755});
@@ -35,8 +36,14 @@ process.stdout.write(JSON.stringify({id:r.id,...(error?{error}:{result})})+'\\n'
   reads++;return Promise.resolve({exitCode:0,stdout:`n${account}/thread-writer-locks/${changed&&reads%2===0?'22222222-2222-4222-8222-222222222222':threadId}.lock\nn${ownedRoot}/queue_1.sqlite\n`});
  }});
  const request={observed:{pid:42,cwd:root},input:{effect:'session.start',key:'original'},prompt:'finish',packets:[]};
- const proof=await transport.observeGoal(request);assert.equal(proof.state,'unmaterialized');assert.equal(proof.proof.sqliteRoot,sqliteRoot);
+ const proof=await transport.observeGoal(request);assert.equal(proof.state,'unmaterialized');assert.equal(proof.proof.sqliteRoot,sqliteRoot);assert.equal(proof.proof.defaultLineEditing,true);
  assert.equal(proof.notApplied,undefined);assert.equal(proof.turns,undefined);assert.equal(proof.queued,undefined);
+ for(const state of [{keymap:{editor:{kill_line_start:['ctrl+x']}}},{vim:true},{keymap:{editor:[]}}]) {
+  await edit(state);assert.equal((await transport.observeGoal(request)).proof.defaultLineEditing,false);
+ }
+ await edit({keymap:{global:{submit:null},editor:{move_line_end:null,kill_line_start:null}}});assert.equal((await transport.observeGoal(request)).proof.defaultLineEditing,true);await edit({});
+ await edit({absentTui:true});assert.equal((await transport.observeGoal(request)).proof.defaultLineEditing,true);
+ await edit({configQueue:true});await assert.rejects(transport.observeGoal(request),/history is unavailable/);queue.exec("DELETE FROM queued_items WHERE id='race'");await edit({});
  queue.prepare('INSERT INTO queued_items VALUES(?,?,?,?,?,?)').run('other','22222222-2222-4222-8222-222222222222','{}',0,1,1);
  assert.equal((await transport.observeGoal(request)).state,'unmaterialized');
  queue.prepare('INSERT INTO queued_items VALUES(?,?,?,?,?,?)').run('own',threadId,'{}',0,1,1);
@@ -48,5 +55,5 @@ process.stdout.write(JSON.stringify({id:r.id,...(error?{error}:{result})})+'\\n'
  changed=true;reads=0;await assert.rejects(transport.observeGoal(request),/worker thread changed/);changed=false;
  queue.exec('ALTER TABLE queued_items RENAME TO unsupported');await assert.rejects(transport.observeGoal(request),/history is unavailable/);
  const calls=(await readFile(trace,'utf8')).trim().split('\n').map(JSON.parse);
- assert.ok(calls.every(c=>['initialize','thread/read','thread/turns/list','thread/queue/list'].includes(c.method)));
+ assert.ok(calls.every(c=>['initialize','thread/read','thread/turns/list','thread/queue/list','config/read'].includes(c.method)));
 });

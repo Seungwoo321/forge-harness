@@ -85,3 +85,5 @@ merge 전달은 시작할 때 원장의 기존 intent 경계를 고정한다. �
 관리 session.start의 `input.submission`은 제어면이 제공하는 동일 intent의 영속 제출 경계다. session runner는 이 in-process context를 execute/verify에 보존하고 최초 입력 전에 비동기 mark를 기다린다. [동일 수신자 복구](native-goal-recovery.md)의 부재·재호출·관찰 전용 계약을 따른다.
 
 Codex 0.167.0의 첫 입력 전 rollout은 아직 파일이 아닐 수 있다. 이 경우 별도 observer의 정확한 미로드 오류, 실제 worker가 연 queue SQLite root의 읽기 전용 queue/goal 검증, 원 managed 기동·동일 native 신원·미제출 intent, 전체 fresh Ready 화면을 결합한 `unmaterialized` 상태만 최초 입력 후보가 된다. 일반 조회 실패는 empty가 아니며 실제 목표·패킷·착수·훅 검증을 대체하지 않는다.
+
+사전 Return composer 실패가 기록된 동일 submission은 전체 정확한 pending draft만 재입력 없이 재개한다. 알려진 첫 burst 슬래시 소실은 기본 편집 키 정책까지 검증한 별도 `draft-repair` 경계로만 정정한다. 최초 인자가 실제 화면에 정착한 뒤 나머지를 입력하며, `confirmation` 경계를 동기화한 뒤 Return을 한 번만 보낸다. 불확실한 정정·Return은 반복하지 않는다.

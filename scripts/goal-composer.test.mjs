@@ -1,6 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { submitNativeGoal } from './lib/goal-composer.mjs';
+import { submitNativeGoal, classifyNativeGoalDraft } from './lib/goal-composer.mjs';
+
+test('Korean full drafts preserve slash identity across wide wraps and reject clipped or foreign text',()=>{
+ const objective='Goal: 승인 범위 검증; 패키지/그룹 중단; 실패/생략과 로그/산출물 보존. Read packet/path (sha256:abcdef).';
+ const chars=[...` ${objective}`],damaged='/goal'+chars.slice(0,128).join('').replaceAll('/','')+chars.slice(128).join('');
+ const render=text=>{let column=0,lines=[''];for(const char of text){const width=/[가-힣]/u.test(char)?2:1;if(column+width>32){lines.push('');column=0;}lines[lines.length-1]+=char;column+=width;}return `› ${lines.join('\n  ')}\n model · Ready · context`;};
+ assert.equal(classifyNativeGoalDraft(render(`/goal ${objective}`),'codex',objective),'exact');
+ assert.equal(classifyNativeGoalDraft(render(damaged),'codex',objective),'slash-loss');
+ assert.equal(classifyNativeGoalDraft(render(damaged+' foreign'),'codex',objective),'other');
+ assert.equal(classifyNativeGoalDraft(render(`/goal ${objective}`.slice(10)),'codex',objective),'other');
+ const boundary='A'.repeat(127)+'/tail';assert.equal(classifyNativeGoalDraft(render(`/goal ${boundary.replace('/','')}`),'codex',boundary),'other');
+});
+
+test('first argument must flush visibly before a Korean objective can reach slash-popup dispatch',async()=>{
+ const objective='Goal: 한글 패키지/그룹과 실패/생략, 로그/산출물 전체 원문';
+ let draft='',pending='',prefixReads=0,entered=0,bulkBeforeSettle=false;
+ const read=async()=>{if(pending&&++prefixReads>=3){draft+=pending;pending='';}return `› ${draft||'Ask Codex to do anything'}\n model · Ready · context`;};
+ await submitNativeGoal({provider:'codex',objective,read,verify:async()=>{},
+  write:async text=>{if(draft==='/goal'&&!pending){pending=text;return;}if(pending){bulkBeforeSettle=true;pending+=text.replaceAll('/','');return;}draft+=text;},
+  enter:async()=>{entered++;}});
+ assert.equal(bulkBeforeSettle,false);assert.equal(draft,`/goal ${objective}`);assert.equal(entered,1);assert.ok(prefixReads>=3);
+});
 
 test('first-input proof rejects clipped, prior-input, pending and startup views before recording submission',async()=>{
  const fresh=' >_ OpenAI Codex (v0.167.0)\n';
@@ -32,7 +53,7 @@ test('native goal is typed as a command and separately submitted after the compo
       ? `› ${draft || 'Ask Codex to do anything'}\n\n model · Ready · context\n ? for shortcuts`
       : `────────────\n❯ ${draft || 'Try "example"'}\n────────────\n shift+tab`;
     await submitNativeGoal({provider,objective:'finish the work',read:async()=>screen(),write:async text=>{writes.push(text);draft+=text;},enter:async()=>{entered+=1;},verify:async()=>{}});
-    assert.deepEqual(writes,['/','goal',' finish the work']);
+    assert.deepEqual(writes,provider==='codex'?['/','goal',' f','inish the work']:['/','goal',' finish the work']);
     assert.equal(entered,1);
   }
 });

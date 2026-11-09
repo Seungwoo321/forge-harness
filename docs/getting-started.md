@@ -89,6 +89,8 @@ node "$PLUGIN_ROOT/scripts/unit.mjs" unit accept greeting --adapters runtime.mjs
 
 ## 기존 지적의 명시적 해소
 
+운영 관찰·전달 의무의 기록 불일치는 경로나 정책 변경과 구분한다. [동일 단위 검증 정정](acceptance-recovery.md)의 `unit acceptance correct`와 제공자 계약을 사용하며, 원 기준을 삭제하거나 테스트 ID를 추가해 성공으로 가장하지 않는다.
+
 prelaunch의 공개 scope도 `scopePaths`를 권한 경계로 사용한다. 별도로 기록된 `productPaths`가 있을 때만 그 경계를 사용하며, 명시적인 빈 배열은 모든 경로를 거부한다. 경로를 추가하지 않고 기존 자동 생성 범위 지적을 다시 검사한다:
 
 ```sh

@@ -5,6 +5,7 @@ import { transitionRecord } from './unit-state.mjs';
 import { createRecoveryStore } from './recovery-store.mjs';
 import { effectArgsDigest, resolveEffectApproval } from './approvals.mjs';
 import { hasInvalidEvidence } from './evidence.mjs';
+import { assertDeliveryObligations, externalDeliveryObligations, verifyAcceptanceCorrections, verifyExternalDeliveryBoundary } from './acceptance-correction.mjs';
 
 const deliveryEffects = new Set(['git.commit', 'git.push', 'git.integrate', 'pr.create', 'pr.merge']);
 const metadata = ['repo', 'branch', 'tree', 'indexTree', 'headTree', 'base'];
@@ -31,6 +32,12 @@ export async function executeDelivery({ stateRoot, store, unit, requestedDeliver
   let record = await store.read(unit);
   const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
   authorizeDelivery(policy, requestedDelivery);
+  assertDeliveryObligations(record, requestedDelivery);
+  if (externalDeliveryObligations(record).length) {
+    const deliveryEpoch = record.policyChanges?.at(-1)?.revision ?? 0;
+    record = await verifyExternalDeliveryBoundary({ store, unit, adapters });
+    if ((record.policyChanges?.at(-1)?.revision ?? 0) !== deliveryEpoch) throw failure('DELIVERY_PLAN_MISMATCH', 'policy changed during external verification');
+  }
   expected ??= effectArgsDigest({ policy, accepted: record.accepted, epoch: record.policyChanges?.at(-1)?.revision ?? 0, continuation: record.sameSessionContinuation ?? null });
   const checkBinding = current => {
     const effective = resolvePolicy({ unit: current.policyOverrides ?? {}, project: current.policy ?? {} }, { nonInteractive: true }).policy;
@@ -44,6 +51,7 @@ export async function executeDelivery({ stateRoot, store, unit, requestedDeliver
     throw failure('DELIVERY_PLAN_MISMATCH', 'resumed delivery must retain its original level');
   }
   const inspect = current => adapters.git.inspectUnit({ unit, record: current });
+  if (record.acceptanceCorrections?.length) await verifyAcceptanceCorrections(record, adapters, await inspect(record));
   const validAcceptance = current => current.accepted && !hasInvalidEvidence(current.evidence);
   const invalidate = async (target, reason) => {
     record = await store.update(unit, current => {
@@ -63,11 +71,13 @@ export async function executeDelivery({ stateRoot, store, unit, requestedDeliver
     record = await store.update(unit, async current => {
       checkBinding(current);
       const target = await inspect(current);
+      await verifyAcceptanceCorrections(current, adapters, target);
       if (!validAcceptance(current) || !validateAcceptedContent(current.accepted, target).valid) return transitionRecord({ ...current, accepted: null, reviewDecision: null }, 'SelfGated');
       return current.state === 'Accepted' ? transitionRecord(current, 'Delivering') : current;
     });
     if (record.state === 'SelfGated') return { code: 1, state: record.state, summary: 'Accepted target changed and requires revalidation' };
     if (record.state === 'Delivering') record = await store.update(unit, async current => {
+      if (current.acceptanceCorrections?.length) await verifyAcceptanceCorrections(current, adapters, await inspect(current));
       if (!validAcceptance(current) || !validateAcceptedContent(current.accepted, await inspect(current)).valid) return transitionRecord({ ...current, accepted: null, reviewDecision: null }, 'SelfGated');
       return transitionRecord({ ...current, deliveryResult: { level: 'none', head: current.accepted.head, mergeHead: null, effectRefs: [] } }, 'Delivered');
     });
@@ -101,6 +111,7 @@ export async function executeDelivery({ stateRoot, store, unit, requestedDeliver
   const stale = async () => {
     record = await store.read(unit);
     const target = await inspect(record);
+    await verifyAcceptanceCorrections(record, adapters, target);
     if (!validAcceptance(record) || !validateAcceptedContent(record.accepted, target).valid
       || ['repo', 'branch', 'tree', 'base'].some(field => target[field] !== record.accepted[field])) return target;
     return null;
@@ -335,6 +346,8 @@ export async function executeDelivery({ stateRoot, store, unit, requestedDeliver
     }
   }
   record = await ledgerStore.withLock(unit, async ledger => store.update(unit, async current => {
+    assertDeliveryObligations(current, requestedDelivery);
+    if (current.acceptanceCorrections?.length) await verifyAcceptanceCorrections(current, adapters, await inspect(current));
     if (!validAcceptance(current) || !validateAcceptedContent(current.accepted, await inspect(current)).valid) {
       const invalid = { ...current, accepted: null, reviewDecision: null, deliveryResult: null, terminalProjection: null };
       return current.state === 'SelfGated' ? invalid : transitionRecord(invalid, 'SelfGated');

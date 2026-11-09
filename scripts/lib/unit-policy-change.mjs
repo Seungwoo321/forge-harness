@@ -3,6 +3,7 @@ import { createLedgerStore } from './ledger.mjs';
 import { resolvePolicy } from './policy.mjs';
 import { transitionRecord } from './unit-state.mjs';
 import { attemptsFor } from './stage-attempts.mjs';
+import { assertDeliveryObligations } from './acceptance-correction.mjs';
 
 const deliveries = new Set(['none', 'commit', 'push', 'pr', 'merge']);
 const identifier = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) && !['.', '..'].includes(value);
@@ -49,6 +50,7 @@ export async function changeUnitPolicy({ stateRoot, store, unit, request, userIn
         try { after = resolvePolicy({ unit: overrides, project: record.policy ?? {} }, { nonInteractive: true }).policy; }
         catch (error) { throw failure('POLICY_CHANGE_INVALID', `invalid ${field} policy: ${error.message}`); }
         if (effectArgsDigest(before[field]) === effectArgsDigest(after[field])) throw failure('POLICY_CHANGE_INVALID', `${field} is already set to the requested value`);
+        assertDeliveryObligations(record, after.delivery);
         await verifyApprovalInput(adapters.provider, { unit, userInputRef, effect: 'unit.policy.change', argsDigest: requestDigest,
           before: field === 'review' ? JSON.stringify(before.review) : before.delivery,
           after: field === 'review' ? JSON.stringify(after.review) : after.delivery, reason: request.reason });

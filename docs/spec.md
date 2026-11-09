@@ -191,6 +191,12 @@ AC 커버리지는 변경이 있는 모든 kind(`chore`·`impl`·`impl-risk`·`d
 4. 테스트로 검증할 수 없는 기준(예: 문서 존재, 설정값, 정본 문서의 절 존재)은 `exec` 또는 `module` 게이트가 같은 방식으로 `covers` 를 낸다. 예: `design` 단위의 기준 "AC-1: 상태도에 Blocked 복귀 전이가 있다"는 `module` 게이트 `docs/gates/state-diagram.mjs` 가 mermaid 블록을 파싱해 전이를 확인하고 `{ok: true, covers: ["AC-1"]}` 를 낸다. `chore` 단위의 기준 "AC-1: 린트 경고 0"은 린트 게이트 설정의 `covers: ["AC-1"]` 선언으로 연결한다.
 5. 커버되지 않은 기준은 `uncovered` 목록으로 구현 단계에 피드백되어 검증을 추가하게 한다.
 
+기준의 기본 검증 방식은 제품·산출물 게이트다. 외부 운영 관찰이나 수용 뒤 전달 의무를 이 방식으로 잘못 기록한 경우 `unit acceptance correct`가 같은 단위의 원문을 유지하며 별도 검증 영수증을 추가한다. 제출된 미수용 SelfGated 단위에서만 허용하며, 진행 중 단계·전달 계획·불확실한 효과가 있으면 거부한다. 정확한 revision·기준 digest·원 요청과 정본 digest·head·내용 fingerprint 및 실제 사용자 승인과 출처 증거가 필요하다. 신뢰 제공자는 원 권한과 기록 불일치를 독립 검증하며 제품 요구나 제품 요구를 포함한 혼합 기준의 재분류를 거부한다.
+
+`observation`은 참조와 바이트 digest로 결속된 외부 관찰이며 제공자가 현재 대상·운영 문맥에서 재검증한다. `delivery`는 commit/push/pr/merge 중 최소 전달 수준과 원 실행 소유자(engine/external)다. 수용과 전달에서 정정 출처와 관찰을 다시 확인한다. 기준·정책·실패·증거·재시도 이력은 유지하고 covered/deferred/dropped를 설정하지 않는다. 분류·전달 소유자 변경·전달 수준 하향은 거부하며 관찰 갱신은 새 영수증으로 남긴다. 정정 뒤 기존 리뷰는 감사 이력에 보존하고 새 검증·리뷰를 요구한다.
+
+커버리지 계산과 acceptance-coverage 제공자는 제품 기준 투영을 사용한다. 제공자의 `record.acceptanceObligations`에는 전체 원문, `record.acceptanceCorrections`에는 정정 이력이 남고 정정 이력은 해당 게이트 fingerprint에 결속된다. 다른 필수 게이트는 유지한다. 관찰은 테스트 성공이나 covers로 바꾸지 않는다. 리뷰 handoff는 전체 기준과 정정 이력을 포함한다. 엔진 소유 의무는 전달 정책과 실제 엔진 전달 수준으로 강제한다. 외부 소유 의무는 원 delivery:none을 유지하고 실제 finish·완료 투영·close/reconcile·finalize 경계에서 신뢰 제공자의 현재 원격 증거를 검증한다. 제품 수용 전에 외부 PR을 요구하지 않는다. 외부 전달 증거는 수용 대상과 실제 repo/branch/base/head/내용에 결속된 별도 영수증이며 테스트나 엔진 실행 원장이 아니다. 동일 트리 직접 자식 외부 commit만 기존 commit 결속 검증으로 SHA를 결속하고 원 검증·리뷰 SHA를 보존한다. 누락·위조·stale 증거는 완료와 세션 종료를 막는다. 목표 완료 사전검사도 제품 증거와 원 정정 영수증으로 기준을 연결하며 관찰·전달을 테스트 성공으로 집계하지 않는다. 실제 목표 완료는 완료 경계 검증을 거친 Closed 단위를 요구한다. 요청·증거 형식과 복구 순서는 [동일 단위 검증 정정](acceptance-recovery.md)에 정의한다.
+
 ### 5.2 Work Policy 필드
 
 **저장 루트**: Git 어댑터가 `git rev-parse --path-format=absolute --git-common-dir`의 실제 경로 아래 `work-state/`를 stateRoot로 고정한다. 모든 worktree가 같은 루트를 쓴다. project 정책은 `<stateRoot>/policy.json`, 단위·원장·큐·알림·인계도 그 아래다. projectRoot는 공통 Git 디렉터리의 주 checkout(또는 bare 저장소)의 루트로 어댑터가 제공한다. Git 밖에서는 `--state-root`와 `--project-root`를 필수로 받는다. 실행 cwd는 별도이며 정책 검색·상태 저장 기준이 아니다.
@@ -762,6 +768,8 @@ fingerprint 가 달라진 증거는 무효이고 해당 게이트부터 다시 �
 | tracker | null 또는 `{adapter,ref,projectionRevision,projected}`. null이면 투영 의무 없음 |
 | openDecisions[] | `{id,kind,question,options,blocks,requiredAction,canonRefs,notifiedAt,answer}` |
 | approvals[] | §8.6의 사용자 승인 레코드 |
+| externalDeliveryEvidence[] | 원 소유자 external인 전달 의무의 읽기 전용 원격 검증 영수증. 요청·수용·현재 대상 digest와 원본 참조·digest·전후 SHA 결속을 추가 전용으로 보존한다 |
+| acceptanceCorrections[] | `{request,userInputRef,requestDigest,revision,correctedAt,previousReview}`. 같은 기준의 최신 영수증을 적용하며 전체 이력과 원 acceptance는 보존한다 |
 | next | null 또는 `{unit,handoff}`. handoff는 path·digest 참조 |
 
 전체 목표는 Unit Record와 구분된 제어면 정본에 목적·완료 기준·승인 범위·남은 작업·정책 참조·revision·상태와 차단/해소 이력을 보존한다. 세션 custody와 native 목표·요청·착수 영수증은 해당 목표·단위·effect·incarnation에 결속된다. 목표의 완료는 마지막 단위의 수용만으로 추정하지 않고 각 전체 목표 기준의 유효한 근거와 남은 작업 부재를 확인한다. 목표·원장·잠금의 프로세스 중단 복구는 데이터 손실이나 동시 소유자를 만들지 않는다.
@@ -920,8 +928,11 @@ CLI 는 사람용 출력의 마지막 줄에 기계용 한 줄 `RESULT {json}` �
 | H-EV-04a | `evidence rerun --gate <id>` 는 통과 증거를 독립 재실행하고 결과를 기존 증거와 비교해 기록한다 | T |
 | H-EV-05 | 구현 세션의 자기 선언은 `Accepted` 근거가 되지 않는다. 근거는 게이트 증거 + AC 커버리지이며 필요시 같은 대상 ship 판정도 요구한다 | T |
 | H-EV-06 | Accepted는 head·내용 fingerprint에 묶인다. 동일 트리 전달 commit의 SHA 결속 외 head·내용 변경은 무효다 | T |
-| H-EV-07 | 변경이 있는 kind(`chore`·`impl`·`impl-risk`·`design`)에서 `deferred`·`dropped` 가 아닌 수용 기준마다 통과한 증거의 `covers` 가 연결되지 않으면 `Accepted` 로 전이되지 않는다. `ops`·`review` 는 대상이 아니다 | T |
+| H-EV-07 | 변경이 있는 kind(`chore`·`impl`·`impl-risk`·`design`)의 활성 제품·산출물 기준마다 통과한 증거의 `covers`가 연결돼야 Accepted가 된다. 기본 검증 방식은 제품·산출물 게이트이며, 검증된 정정 영수증이 있는 운영 관찰·전달 의무만 각 검증 시점의 계약을 따른다. `ops`·`review`는 대상이 아니다 | T |
 | H-EV-08 | 테스트 covers는 성공한 개별 테스트 이름에서만 추출하고 skip·todo·실패·주석은 제외하며, 비테스트 covers는 성공한 검증 결과로 연결한다. 보고서 부재·파싱 실패는 커버리지 실패이고, 스킬의 `coverage` 제안은 집계에 쓰이지 않는다 | T |
+| H-EV-10 | 동일 단위 검증 정정은 정확한 원문·출처·대상·사용자 승인과 독립 제공자 검증에 결속되고 기존 요구·증거·실패·리뷰 의무·재시도 정책을 보존한다. 위조·stale·경합·불확실한 효과는 정본을 바꾸지 않는다 | T |
+| H-EV-11 | 운영 관찰은 수용·전달에서 재검증하며 테스트 covers로 집계하지 않는다. 제품 기준 누락과 필수 게이트 실패는 정정 뒤에도 수용을 막는다 | T |
+| H-EV-12 | 엔진 소유 의무는 엔진 정책·실행 수준으로, 외부 소유 의무는 delivery:none을 유지하며 실제 완료 경계의 수용 대상 결속 원격 증거로 강제한다. 외부 증거 누락·위조·stale이면 finish/finalize/close/완료 투영이 거부되며 제품 수용은 외부 PR 전에 가능하다 | T |
 | **실패 처리** | | |
 | H-FL-01 | 모든 실패는 제품·하네스·환경·사용자 영역·불명 중 하나로 분류된다 | T |
 | H-FL-02 | 표시 서명은 분류 + causeKey, 예산 키는 실패 지점 + 요지다. 재분류에서도 예산을 유지하고 태스크 이름·ID는 제외한다 | T |

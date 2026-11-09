@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { authorizeDelivery } from './delivery.mjs';
+import { assertDeliveryObligations, externalDeliveryObligations, verifyExternalDeliveryBoundary } from './acceptance-correction.mjs';
 import { executeEffect, createLedgerStore } from './ledger.mjs';
 import { formatUnitResult, prepareSuccessor, validateHandoffPacket, writeUnitResult } from './report.mjs';
 import { prepareEffect, resolvePolicy } from './policy.mjs';
@@ -110,6 +111,12 @@ export async function finishSessionUnit({
   requestedDelivery ??= deliveryChanged ? policy.delivery : 'none';
   if (deliveryChanged && requestedDelivery !== policy.delivery) throw Object.assign(new Error('finish delivery must match the explicitly authorized unit policy'), { code: 'POLICY_CHANGE_MISMATCH' });
   const authorized = authorizeDelivery(policy, requestedDelivery);
+  assertDeliveryObligations(record, requestedDelivery);
+  if (externalDeliveryObligations(record).length) {
+    const deliveryEpoch = record.policyChanges?.at(-1)?.revision ?? 0;
+    record = await verifyExternalDeliveryBoundary({ store, unit, adapters });
+    if ((record.policyChanges?.at(-1)?.revision ?? 0) !== deliveryEpoch) throw Object.assign(new Error('policy changed during external verification'), { code: 'DELIVERY_PLAN_MISMATCH' });
+  }
   if (!successor?.approved && !goalComplete && !sameSession) throw Object.assign(new Error('session finish requires an approved successor or confirmed goal completion'), { code: 'USER_DECISION_REQUIRED' });
   formatUnitResult({ ...resultFields, outcome: sameSession ? { kind: 'continue', unit: sameSession.nextUnit } : { kind: 'complete' } });
   if (sameSession) {
@@ -222,11 +229,11 @@ export async function finishSessionUnit({
       summary: 'Recipient task verified; result delivery and exact owner closure are pending' };
   };
   const projected = await projectTerminalUnit({
-    store, unit, adapter: trackerAdapter, queue: createProjectionQueue(stateRoot, adapters), now: () => adapters.now(), git: adapters.git,
+    store, unit, adapter: trackerAdapter, queue: createProjectionQueue(stateRoot, adapters), now: () => adapters.now(), git: adapters.git, provider: adapters.provider,
   });
   if (!projected.projected) return { code: 3, state: 'Delivered', resultPath, resultDigest, handoff, delivery: authorized, successor: null, ...(returnTo ? { finalizePending: true } : {}), summary: 'Final tracker projection is queued; successor session has not started' };
   if (!successor?.approved && !returnTo) {
-    const closed = await commitTerminalClose({ store, unit, git: adapters.git });
+    const closed = await commitTerminalClose({ store, unit, git: adapters.git, provider: adapters.provider, now: adapters.now });
     if (closed.state === 'Closed' && continuity && goalComplete) await commitGoalCompletion({ continuityStore: createContinuityStore(stateRoot), unitStore: store, goalId: continuity.goal.id, unit });
     if (closed.state === 'Closed' && continuity && sameSession) await commitGoalContinuation({ continuityStore:createContinuityStore(stateRoot),unitStore:store,goalId:continuity.goal.id,unit });
     return { code: closed.state === 'Closed' ? 0 : 1, state: closed.state, resultPath, resultDigest, delivery: authorized, successor: null, summary: 'Unit completed' };
@@ -284,13 +291,14 @@ export async function finishSessionUnit({
 }
 
 export async function finalizeSessionUnit({ stateRoot, store, unit, adapters }) {
-  const record = await store.read(unit);
+  let record = await store.read(unit);
   const plan = record?.sessionFinalization;
   if (!plan || !['Delivered', 'Closed', 'Stopped'].includes(record.state)) throw Object.assign(new Error('no durable session finalization plan'), { code: 'INVALID_TRANSITION' });
   await taskPackets(plan);
   if (record.state === 'Delivered') {
-    const projection = await projectTerminalUnit({ store, unit, adapter: adapters.tracker, queue: createProjectionQueue(stateRoot, adapters), now: adapters.now, git: adapters.git });
+    const projection = await projectTerminalUnit({ store, unit, adapter: adapters.tracker, queue: createProjectionQueue(stateRoot, adapters), now: adapters.now, git: adapters.git, provider: adapters.provider });
     if (!projection.projected) return { code: 3, state: (await store.read(unit)).state, finalizePending: true, summary: 'Terminal tracker projection is pending' };
+    record = await store.read(unit);
   }
   const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
   const ledger = createLedgerStore(stateRoot);
@@ -330,6 +338,7 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters }) 
   if (!plan.sessionStart || !record.continuity) validateTaskReceipt(delivered.result, { args: deliveryArgs, key: prepareEffect('session.deliver', deliveryArgs).key });
   if (delivered.result.sessionId !== recipient.sessionId || delivered.result.incarnationId !== recipient.incarnationId) return pending('Result recipient identity changed');
   if (record.state !== 'Closed' && record.state !== 'Stopped') {
+    record = await verifyExternalDeliveryBoundary({ store, unit, adapters });
     const current = await adapters.git.inspectUnit({ unit, record });
     if (current.head !== record.accepted.head || current.contentFingerprint !== record.accepted.contentFingerprint) return pending('Accepted content changed before session close');
   }
@@ -368,7 +377,7 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters }) 
     });
     return {code:0,state:record.state,summary:'Result accepted and owner session closure verified',resultPath:plan.resultPath};
   }
-  const current = record.state === 'Closed' ? record : await commitTerminalClose({ store, unit, git: adapters.git, sessionStart: plan.sessionStart, sessionClose: closed });
+  const current = record.state === 'Closed' ? record : await commitTerminalClose({ store, unit, git: adapters.git, provider: adapters.provider, now: adapters.now, sessionStart: plan.sessionStart, sessionClose: closed });
   if (current.state === 'Closed' && current.goalCompletion) await commitGoalCompletion({continuityStore:createContinuityStore(stateRoot),unitStore:store,goalId:current.goalCompletion.goalId,unit});
   return { code: current.state === 'Closed' ? 0 : 3, state: current.state, summary: 'Result accepted and owner session closure verified', resultPath: plan.resultPath };
 }

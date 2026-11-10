@@ -67,6 +67,24 @@ test('missing or unsupported reports fail closed', () => {
   assert.equal(parseGateReport({ format: 'tap', report: 'TAP version 13\n1..2\nok 1 - AC-1', reportPath: 'x', acPattern: 'AC-\\d+', result: { exit: 0 } }).ok, false);
 });
 
+test('AC-1 sibling TAP scopes have independent plans and reject incomplete or failing nested scopes', () => {
+  const parse = report => parseGateReport({ format: 'tap', reportPath: 'nested.tap', acPattern: 'AC-\\d+', result: { exit: 0 }, report });
+  const report = 'TAP version 13\n    ok 1 - AC-1 first\n    1..1\nok 1 - first suite\n    ok 1 - AC-2 second\n    ok 2 - AC-3 third\n    1..2\nok 2 - second suite\n1..2\n';
+  assert.deepEqual(parse(report).covers, ['AC-1', 'AC-2', 'AC-3']);
+  assert.equal(parse(report).ok, true);
+  assert.equal(parse(report.replace('    1..1\nok 1', 'ok 1')).ok, false);
+  assert.equal(parse(report.replace('    1..1\nok 1', '    1..2\nok 1')).ok, false);
+  assert.equal(parse(report.replace('ok 1 - AC-2', 'not ok 1 - AC-2')).ok, false);
+  assert.equal(parse(report.replace('    ok 2 - AC-3 third', '    ok 2 - AC-3 third # SKIP unavailable')).covers.includes('AC-3'), false);
+  const deep = 'TAP version 13\n        1..1\n        ok 1 - AC-4 deep\n    ok 1 - nested suite\n    1..1\nok 1 - parent\n    1..1\n    ok 1 - AC-5 sibling\nok 2 - other parent\n1..2\n';
+  assert.deepEqual(parse(deep).covers, ['AC-4', 'AC-5']);
+  assert.equal(parse(deep.replace('        1..1\n', '')).ok, false);
+  assert.deepEqual(parse(report.replace('ok 1 - first suite', 'ok 1 - first suite # SKIP disabled')).covers, ['AC-2', 'AC-3']);
+  assert.deepEqual(parse(deep.replace('    ok 1 - nested suite', '    ok 1 - nested suite # TODO later')).covers, ['AC-5']);
+  assert.equal(parse(report.replace('ok 1 - first suite\n', '')).ok, false);
+  assert.equal(parse('TAP version 13\n    ok 1 - AC-1 first\n    1..1\n1..1\n    ok 1 - AC-2 second\n    1..1\nok 1 - parent\n').ok, false);
+});
+
 test('complete failing TAP is comparable product evidence while malformed reports are excluded', async () => {
   const stored = [];
   const adapter = {

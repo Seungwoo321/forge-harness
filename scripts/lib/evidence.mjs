@@ -70,27 +70,53 @@ function hasPendingJudge(result) {
 
 function testCasesFromTap(report, acPattern) {
   const regex = new RegExp(acPattern, 'g');
-  const tests = [];
-  const points = new Map();
-  const plans = new Map();
+  let tests = [];
+  const scopes = [{ indent: 0, points: 0, plan: null, tests: [], pending: [] }];
+  let incomplete = false;
+  const closeScope = () => {
+    const scope = scopes.pop();
+    if (scope.plan === null || !scope.points || scope.points !== scope.plan || scope.pending.length) incomplete = true;
+    if (scopes.length) {
+      if (scopes.at(-1).pending.length) incomplete = true;
+      scopes.at(-1).pending.push(scope.tests);
+    }
+    else tests = scope.tests;
+  };
   let lineNo = 0;
   for (const line of report.split(/\r?\n/)) {
     lineNo += 1;
     const plan = line.match(/^(\s*)1\.\.(\d+)\s*$/);
+    const point = line.match(/^(\s*)(ok|not ok)\s+(\d+)\s+-\s+(.*)$/i);
+    if (!plan && !point) continue;
+    const indent = (plan ?? point)[1].length;
+    while (scopes.length > 1 && scopes.at(-1).indent > indent) {
+      if (scopes.at(-2).indent < indent) {
+        scopes.splice(scopes.length - 1, 0, { indent, points: 0, plan: null, tests: [], pending: [] });
+      }
+      closeScope();
+    }
+    if (indent > scopes.at(-1).indent) {
+      if (scopes.at(-1).pending.length) incomplete = true;
+      scopes.push({ indent, points: 0, plan: null, tests: [], pending: [] });
+    }
+    const scope = scopes.at(-1);
     if (plan) {
-      plans.set(plan[1].length, Number(plan[2]));
+      if (scope.plan !== null) incomplete = true;
+      scope.plan = Number(plan[2]);
       continue;
     }
-    const point = line.match(/^(\s*)(ok|not ok)\s+(\d+)\s+-\s+(.*)$/i);
-    if (!point) continue;
-    points.set(point[1].length, (points.get(point[1].length) ?? 0) + 1);
+    scope.points += 1;
     const nameAndDirective = point[4].match(/^(.*?)(?:\s+#\s*(SKIP|TODO)\b.*)?$/i);
     const name = nameAndDirective[1].trim();
-    if (point[2].toLowerCase() !== 'ok' || nameAndDirective[2]) continue;
-    const covers = [...name.matchAll(regex)].map(result => result[0]);
-    tests.push({ id: String(lineNo), name, covers: [...new Set(covers)] });
+    if (point[2].toLowerCase() === 'ok' && !nameAndDirective[2]) {
+      scope.tests.push(...scope.pending.flat());
+      const covers = [...name.matchAll(regex)].map(result => result[0]);
+      scope.tests.push({ id: String(lineNo), name, covers: [...new Set(covers)] });
+    }
+    scope.pending = [];
   }
-  return { tests, points, plans };
+  while (scopes.length) closeScope();
+  return { tests, incomplete };
 }
 
 export function parseGateReport({ format, report, reportPath, acPattern, result }) {
@@ -108,11 +134,8 @@ export function parseGateReport({ format, report, reportPath, acPattern, result 
     if (!/^TAP version \d+\b/m.test(report) || !/^1\.\.\d+\s*$/m.test(report)) {
       return { ok: false, reason: 'TAP report is incomplete or invalid' };
     }
-    const levels = new Set([...parsedTap.plans.keys(), ...parsedTap.points.keys()]);
-    const incomplete = [...levels].some(indent => !parsedTap.plans.has(indent)
-      || parsedTap.points.get(indent) !== parsedTap.plans.get(indent));
     const hasFailure = /^\s*not ok\s+\d+\s+-/im.test(report);
-    if (incomplete) return { ok: false, reason: 'TAP test points do not match the plan' };
+    if (parsedTap.incomplete) return { ok: false, reason: 'TAP test points do not match the plan' };
     if (hasFailure && result.exit === 0) return { ok: false, reason: 'TAP test points include a failure with a successful exit' };
     if (result.exit === 0 && hasPendingJudge(result)) {
       return { ok: false, pending: true, exit: result.exit, report: reportPath, digest: reportDigest, tests: parsedTap.tests, covers: [], failureClass: null };

@@ -74,6 +74,8 @@ merge 전달은 시작할 때 원장의 기존 intent 경계를 고정한다. �
 
 전체 계약: [명세 §7·§8](spec.md#7-스킬-구성과-계약). 런타임 경계: [runtime-adapters.mjs](../scripts/lib/runtime-adapters.mjs). 외부 호출 진입점: [adapters.mjs](../scripts/lib/adapters.mjs).
 
+`unit.scope.approval.correct`와 `unit.goal.bind.recover`의 원 사람 승인·직전 차단 문맥·정확한 요청 및 현재 대상 결속은 [승인 출처·goal 결속 복구](goal-binding-recovery.md)를 따른다. 운영 메시지가 user 역할로 저장됐다는 사실만으로 사람 권한을 인정하지 않는다. 출처 정정은 원 승인 행을 보존하고, goal 결속은 기존 native 소유자 검증을 대신하지 않는다.
+
 동일 단위 검증 방식 정정의 정확한 제공자 입력·응답·증거 계약은 [검증 정정](acceptance-recovery.md#제공자-계약)에 정의한다. 사용자 입력 참조의 형식·원 저장소 접근은 호스트 제공자가 소유하며 코어는 특정 세션 제공자의 참조를 변환하거나 다른 출처로 대신 승인하지 않는다. 미지원 참조 형식은 승인 실패다. acceptance-coverage 제공자는 전달된 제품 기준 투영과 실제 제품 증거를 사용한다. 다른 HEAD의 경로 선택이나 미검증 ID 일괄 성공으로 누락을 숨기지 않는다.
 
 미수신 재시도는 native history/queue에 요청이 없고 정확한 입력이 composer에 남아 있을 때만 정책 상한 안에서 같은 intent로 Enter를 재개한다. 빈 composer나 단순 조회 실패로는 미제출을 추정하지 않는다.
@@ -85,6 +87,8 @@ merge 전달은 시작할 때 원장의 기존 intent 경계를 고정한다. �
 기존 사용자 소유권 등록은 [기존 소유자 복구](session-custody-recovery.md)의 `verifySessionAdoption` 및 `session.observe({recipient,nativeOwner:true})` 계약을 따른다. 현재 목표 정책과 과거 단위 정책의 세션 설정은 구분하며 실제 수신자의 native 신원은 `recipientEnv`로 확인한다.
 
 관리 session.start의 `input.submission`은 제어면이 제공하는 동일 intent의 영속 제출 경계다. session runner는 이 in-process context를 execute/verify에 보존하고 최초 입력 전에 비동기 mark를 기다린다. [동일 수신자 복구](native-goal-recovery.md)의 부재·재호출·관찰 전용 계약을 따른다.
+
+실행 정책 변경 후 기존 session.start를 관찰할 때 패키지 어댑터는 원 intent snapshot의 계정을 사용한다. [정책 변경 기동 복구](session-policy-recovery.md)는 `provider.verifySessionStartRecovery`의 읽기 전용 native 미착수·종료·큐 취소 증명과 `verifyUserInput`의 정확한 승인을 요구한다. 기본 어댑터는 이 권한 검증을 추정하지 않는다. 예약 명령은 새 worker를 만들지 않으며 다음 session-start가 예약된 snapshot으로 실행한다.
 
 Codex 0.167.0의 첫 입력 전 rollout은 아직 파일이 아닐 수 있다. 이 경우 별도 observer의 정확한 미로드 오류, 실제 worker가 연 queue SQLite root의 읽기 전용 queue/goal 검증, 원 managed 기동·동일 native 신원·미제출 intent, 전체 fresh Ready 화면을 결합한 `unmaterialized` 상태만 최초 입력 후보가 된다. 일반 조회 실패는 empty가 아니며 실제 목표·패킷·착수·훅 검증을 대체하지 않는다.
 

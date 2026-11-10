@@ -4,7 +4,7 @@ import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { authorizeDelivery } from './delivery.mjs';
 import { assertDeliveryObligations, externalDeliveryObligations, verifyExternalDeliveryBoundary } from './acceptance-correction.mjs';
-import { executeEffect, createLedgerStore } from './ledger.mjs';
+import { executeEffect, createLedgerStore, sessionStartRetired } from './ledger.mjs';
 import { formatUnitResult, prepareSuccessor, validateHandoffPacket, writeUnitResult } from './report.mjs';
 import { prepareEffect, resolvePolicy } from './policy.mjs';
 import { effectArgsDigest } from './approvals.mjs';
@@ -74,7 +74,7 @@ export async function finishSessionUnit({
   }
   const entries = await createLedgerStore(stateRoot).withLock(unit, ledger => ledger.read());
   const complete = new Set(entries.filter(row => row.event === 'result').map(row => row.seq));
-  const unresolved = entries.filter(row => row.event === 'intent' && !complete.has(row.seq));
+  const unresolved = entries.filter(row => row.event === 'intent' && !complete.has(row.seq) && !sessionStartRetired(entries,row));
   const existingStart = entries.findLast(row => row.event === 'intent' && row.effect === 'session.start' && row.args?.unit !== unit);
   const pendingSessionStart = successor?.approved && unresolved.length === 1
     && unresolved[0].effect === 'session.start'

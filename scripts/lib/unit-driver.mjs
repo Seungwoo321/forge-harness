@@ -23,7 +23,7 @@ import { acceptedDeliveryMetadata, validateDeliveryContext } from './delivery-fl
 import { validateAcceptedContent } from './delivery.mjs';
 import { resolveFindings } from './finding-resolution.mjs';
 import { recheckScope } from './scope-recheck.mjs';
-import { amendScope } from './scope-amend.mjs';
+import { amendScope, correctScopeApproval } from './scope-amend.mjs';
 import { finalizeWithin } from './finalize-wait.mjs';
 import { createContinuityStore } from './continuity-store.mjs';
 import { blockGoal, resumeGoal, appendGoalWork } from './continuity-transitions.mjs';
@@ -31,6 +31,8 @@ import { commitGoalCompletion } from './continuity-completion.mjs';
 import { commitGoalContinuation } from './continuity-finish.mjs';
 import { adoptGoalSession } from './continuity-custody.mjs';
 import { startGoalSession } from './continuity-start.mjs';
+import { recoverGoalSession } from './continuity-recover.mjs';
+import { recoverMissingGoalBinding } from './goal-bind-recovery.mjs';
 import { prepareSessionReturn } from './continuity-return.mjs';
 import { stopGoalSession } from './continuity-stop.mjs';
 import { changeUnitPolicy } from './unit-policy-change.mjs';
@@ -1371,7 +1373,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const goal = await store.create({goal:request.goal,source:request.source,policy:resolved.policy.session});
       return formatCliResult({ code: 0, summary: `Goal ${id} registered`, details: { goal } });
     }
-    if (noun !== 'unit' || !['start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'session-adopt', 'session-rebind', 'goal-bind', 'session-stop', 'session-return', 'policy', 'reopen'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct|drop <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
+    if (noun !== 'unit' || !['start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'session-recover', 'session-adopt', 'session-rebind', 'goal-bind', 'session-stop', 'session-return', 'policy', 'reopen'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct|drop <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit session-recover <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
     const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
     if (subcommand === 'acceptance') {
       const [action, unit] = rest;
@@ -1399,6 +1401,12 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
     }
     if (subcommand === 'scope') {
       const [action, unit] = rest;
+      if (action === 'approval-correct') {
+        if (rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit scope approval-correct requires <unit> --request <file> --user-input <ref>');
+        const request = await readJsonFile(path.resolve(cwd,parsed.options.request),'scope approval correction','CLI_USAGE');
+        const receipt = await correctScopeApproval({stateRoot:effectiveRoot,store:createUnitStateStore(effectiveRoot),unit,request,userInputRef:parsed.options['user-input'],adapters});
+        return formatCliResult({code:0,summary:`Scope approval corrected for ${unit}`,details:{unit,receipt}});
+      }
       if (action === 'amend') {
         if (rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit scope amend requires <unit> --request <file> --user-input <ref>');
         const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'scope amend request', 'CLI_USAGE');
@@ -1451,6 +1459,10 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const [unit] = rest;
       if (!unit || rest.length !== 1 || !parsed.options.request) usageError('unit goal-bind requires <unit> --request <file>');
       const request = await readJsonFile(path.resolve(cwd,parsed.options.request), 'goal binding request', 'CLI_USAGE');
+      if (Object.hasOwn(request,'recover')) {
+        const receipt = await recoverMissingGoalBinding({stateRoot:effectiveRoot,store:createUnitStateStore(effectiveRoot),unit,request,userInputRef:parsed.options['user-input'],adapters});
+        return formatCliResult({code:0,summary:'Missing goal binding recovered',details:{unit,receipt}});
+      }
       const goal = await createContinuityStore(effectiveRoot).read(request.goalId);
       const store = createUnitStateStore(effectiveRoot);
       const before = await store.read(unit);
@@ -1490,6 +1502,13 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const request = await readJsonFile(path.resolve(cwd,parsed.options.request), 'session adoption request', 'CLI_USAGE');
       const receipt = await adoptGoalSession({stateRoot:effectiveRoot,unit,request,userInputRef:parsed.options['user-input'],store:createUnitStateStore(effectiveRoot),adapters,cwd,rebind:subcommand === 'session-rebind'});
       return formatCliResult({code:0,summary:'Existing owner custody verified',details:{unit,receipt}});
+    }
+    if (subcommand === 'session-recover') {
+      const [unit] = rest;
+      if (!unit || rest.length !== 1 || !parsed.options.request || !parsed.options['user-input']) usageError('unit session-recover requires <unit> --request <file> --user-input <ref>');
+      const request = await readJsonFile(path.resolve(cwd,parsed.options.request), 'session recovery request', 'CLI_USAGE');
+      const receipt = await recoverGoalSession({stateRoot:effectiveRoot,unit,request,userInputRef:parsed.options['user-input'],store:createUnitStateStore(effectiveRoot),adapters});
+      return formatCliResult({code:0,summary:'Next session attempt reserved after verified terminal non-start',details:{unit,receipt}});
     }
     if (subcommand === 'session-start') {
       const [unit] = rest;

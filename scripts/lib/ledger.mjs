@@ -93,6 +93,11 @@ export function createLedgerStore(stateRoot) {
   return Object.freeze({ withLock });
 }
 
+export function sessionStartRetired(records, intent) {
+  return intent.effect === 'session.start' && records.some(row => row.event === 'session-start-recovery'
+    && row.seq === intent.seq && row.key === intent.key && row.intentDigest === effectArgsDigest(intent));
+}
+
 export async function executeEffect({
   unit,
   effect,
@@ -180,6 +185,8 @@ export async function executeEffect({
     const records = await ledger.read();
     const intents = records.filter(row => row.event === 'intent' && row.key === prepared.key);
     const priorIntent = intents.at(-1);
+    if (priorIntent && sessionStartRetired(records, priorIntent))
+      throw errorWithCode('EFFECT_RETIRED', 'session start was retired by verified recovery; use the reserved next attempt');
     if (priorIntent) {
       if (effect === 'session.start' && effectArgsDigest(priorIntent.args) !== effectArgsDigest(args))
         throw errorWithCode('EFFECT_UNCERTAIN', 'session start requires its original complete arguments');

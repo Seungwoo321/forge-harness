@@ -75,6 +75,8 @@ export async function commitGoalContinuation({continuityStore,unitStore,goalId,u
       throw Object.assign(new Error('goal continuation or session owner changed'), {code:'CONTINUITY_STALE'});
     }
     const identity = {sessionId:owner.sessionId,incarnationId:owner.incarnationId,cwd:owner.cwd,
+      ...(owner.goalPath ? {goalPath:owner.goalPath,goalDigest:owner.goalDigest} : {}),
+      ...(owner.policyDigest ? {policyDigest:owner.policyDigest} : {}),
       ...(owner.ownership === 'existing' ? {ownership:'existing',owner:owner.owner} : {})};
     return {...current,revision:current.revision+1,goal:{...current.goal,remaining:current.goal.remaining.slice(1)},
       ...(owner.ownership === 'existing'

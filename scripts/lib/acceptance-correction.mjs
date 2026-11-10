@@ -1,5 +1,5 @@
 import { effectArgsDigest, verifyApprovalInput } from './approvals.mjs';
-import { createLedgerStore } from './ledger.mjs';
+import { createLedgerStore, sessionStartRetired } from './ledger.mjs';
 import { attemptsFor } from './stage-attempts.mjs';
 import { resolvePolicy } from './policy.mjs';
 import { bindDeliveryCommit, validateAcceptedContent } from './delivery.mjs';
@@ -169,7 +169,7 @@ export async function correctAcceptance({ stateRoot, store, unit, request, userI
           fail('correction requires a submitted, unaccepted SelfGated change unit', 'INVALID_TRANSITION');
         }
         if (entries.some(entry => {
-          if (entry.event !== 'intent') return false;
+          if (entry.event !== 'intent' || sessionStartRetired(entries,entry)) return false;
           const latest = entries.findLast(row => row.event === 'result' && row.seq === entry.seq && row.key === entry.key);
           return !latest || ['unknown', 'uncertain'].includes(latest.result?.status);
         })) fail('reconcile uncertain effects before correction', 'EFFECT_UNCERTAIN');

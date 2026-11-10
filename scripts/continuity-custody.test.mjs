@@ -89,6 +89,28 @@ async function fixture(t,state = 'InReview',runtime = 'cmux') {
     setLive:value=>{live=value;},deny:()=>{authorized=false;},onVerify:value=>{hook=value;},launches:()=>launches};
 }
 
+test('verified startup retirement permits custody recovery only after replacement effects settle',async t=>{
+  for (const mode of ['missing','forged','pending-replacement','settled-replacement']) await t.test(mode,async t=>{
+    const f=await fixture(t),ledger=createLedgerStore(f.stateRoot);
+    const intent={event:'intent',seq:1,key:hash('original-start'),effect:'session.start',args:{attempt:1}};
+    await ledger.withLock('change',async log=>{
+      await log.append(intent);
+      if(mode!=='missing') await log.append({event:'session-start-recovery',seq:1,key:intent.key,
+        intentDigest:mode==='forged'?hash('foreign-intent'):effectArgsDigest(intent)});
+      if(['pending-replacement','settled-replacement'].includes(mode)) {
+        await log.append({event:'intent',seq:2,key:hash('replacement-start'),effect:'session.start',args:{attempt:2}});
+        if(mode==='settled-replacement') await log.append({event:'result',seq:2,key:hash('replacement-start'),result:{status:'completed'}});
+      }
+    });
+    const rows=await ledger.withLock('change',log=>log.read()),before=await readFile(f.unitFile);
+    const result=await f.adopt(await f.request());
+    if(mode==='settled-replacement') assert.equal(result.code,0,JSON.stringify(result));
+    else assert.equal(result.error,'EFFECT_UNCERTAIN',JSON.stringify(result));
+    assert.deepEqual(await readFile(f.unitFile),before);
+    assert.deepEqual(await ledger.withLock('change',log=>log.read()),rows);
+  });
+});
+
 test('public existing-owner adoption preserves InReview revision 36 and complete history byte-for-byte, then launches and submits distinct review',async t=>{
   const f=await fixture(t), before=await readFile(f.unitFile), request=await f.request();
   assert.equal((await f.adopt(request)).code,0);assert.deepEqual(await readFile(f.unitFile),before);
@@ -291,6 +313,28 @@ async function restarted(t,runtime = 'cmux') {
   const rebind=async body=>{const file=path.join(f.cwd,`${body.id}.json`);await writeFile(file,JSON.stringify(body));return f.run(['session-rebind','change','--request',file,'--user-input','native-rebind-message']);};
   return {...f,owner,previous,request,rebind,goalOwner,deny:()=>{authorized=false;},setAbsent:value=>{absent=value;},onVerify:value=>{hook=value;}};
 }
+
+test('a closed recovered reviewer permits owner rebind only after its replacement settles',async t=>{
+  for(const settled of [false,true]) await t.test(settled?'settled':'pending',async t=>{
+    const f=await restarted(t);
+    await f.store.create({schema:'harness.unit/1',unit:'recovered-review',kind:'review',targetUnit:'change',state:'Closed',
+      continuity:{goalId:'goal'},sessionFinalization:{closeReceipt:{result:{closed:true}}}});
+    const ledger=createLedgerStore(f.stateRoot),intent={event:'intent',seq:1,key:hash('original-review-start'),
+      effect:'session.start',args:{unit:'recovered-review',attempt:1}};
+    await ledger.withLock('recovered-review',async log=>{
+      await log.append(intent);
+      await log.append({event:'session-start-recovery',seq:1,key:intent.key,intentDigest:effectArgsDigest(intent)});
+      await log.append({event:'intent',seq:2,key:hash('replacement-review-start'),effect:'session.start',args:{unit:'recovered-review',attempt:2}});
+      if(settled) await log.append({event:'result',seq:2,key:hash('replacement-review-start'),result:{status:'completed'}});
+    });
+    const before=await readFile(f.unitFile),rows=await ledger.withLock('recovered-review',log=>log.read());
+    const result=await f.rebind(await f.request());
+    if(settled) assert.equal(result.code,0,JSON.stringify(result));
+    else assert.equal(result.error,'EFFECT_UNCERTAIN');
+    assert.deepEqual(await readFile(f.unitFile),before);
+    assert.deepEqual(await ledger.withLock('recovered-review',log=>log.read()),rows);
+  });
+});
 
 test('same-thread restart appends custody without changing Accepted unit bytes, replays exactly, and ordinary finish retains the process',async t=>{
   const f=await restarted(t),before=await readFile(f.unitFile),goal=await f.goals.read('goal'),request=await f.request();

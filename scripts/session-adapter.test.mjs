@@ -77,6 +77,59 @@ export async function createRuntimeAdapters(input){
   await goals.transaction('g',g=>({...g,revision:g.revision+1,reviews:[{unit:'review',sessionId:'surface',incarnationId:owner.incarnationId,cwd:root}]}));
   const stage=await createRuntimeAdapters({...args,options:{'state-root':stateRoot},argv:['unit','stage','submit','review','review']});
   assert.equal((await stage.sessionRunner.observe({cwd:root,targetCwd:root})).closable,true);
+  // A policy refresh does not change an adopted live owner's original account.
+  await goals.transaction('g',g=>({...g,revision:g.revision+1,policy:{...g.policy,account:'/new-account'},
+    policyChanges:[{previous:g.policy}]}));
+  assert.equal((await (await createRuntimeAdapters({...args,options:{'state-root':stateRoot},argv:['unit','finish','u']})).sessionRunner.observe({cwd:root,targetCwd:root})).worker.threadId,owner.worker.threadId);
+});
+
+test('packaged startup observer uses the original account after a policy refresh',async t=>{
+  const {createHash}=await import('node:crypto');
+  const {createContinuityStore}=await import('./lib/continuity-store.mjs');
+  const {createUnitStateStore}=await import('./lib/unit-state.mjs');
+  const {createLedgerStore}=await import('./lib/ledger.mjs');
+  const {snapshotGoal}=await import('./lib/continuity-snapshot.mjs');
+  const {prepareEffect}=await import('./lib/policy.mjs');
+  const root=await mkdtemp(path.join(tmpdir(),'observer-account-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const digest=bytes=>`sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+  const source=path.join(root,'goal.md'),handoffPath=path.join(root,'handoff.md');await writeFile(source,'goal');await writeFile(handoffPath,'handoff');
+  const goals=createContinuityStore(root),store=createUnitStateStore(root);
+  const policy={runtime:'cmux',provider:'codex',account:'/old-account',model:'model',effort:'high',argv:['codex']};
+  const goal=await goals.create({goal:{id:'g',objective:'goal',criteria:['done'],remaining:['u'],status:'active'},policy,source:{path:source,digest:digest('goal')}});
+  await store.create({schema:'harness.unit/1',unit:'u',kind:'impl',state:'Implementing',continuity:{goalId:'g'}});
+  const snapshot=await snapshotGoal(root,goal),args={unit:'u',role:'implementation',attempt:1,cwd:root,handoffPath,handoffDigest:digest('handoff'),goalPath:snapshot.path,goalDigest:snapshot.digest};
+  await createLedgerStore(root).withLock('u',l=>l.append({event:'intent',effect:'session.start',args,key:prepareEffect('session.start',args).key,seq:1}));
+  await goals.transaction('g',g=>({...g,revision:g.revision+1,policy:{...policy,account:'/new-account'}}));
+  const owner={runtime:'cmux',sessionId:'surface',incarnationId:'tty1:42:START',cwd:root,workerExecutable:'codex'};
+  await writeFile(path.join(root,'request.json'),JSON.stringify({parentRuntime:owner}));
+  const command=async (binary,args)=>{
+    let stdout;
+    if(binary==='cmux'&&args.includes('identify'))stdout=JSON.stringify({caller:{surface_id:'surface'}});
+    else if(binary==='cmux'&&args.includes('tree'))stdout=JSON.stringify({windows:[{id:'w',workspaces:[{id:'ws',panes:[{surfaces:[{id:'surface',type:'terminal',tty:'tty1'}]}]}]}]});
+    else if(binary==='ps')stdout=args.includes('pid=,pgid=,tpgid=,comm=')?'42 42 42 codex\n':'START';
+    else if(binary==='pwd')stdout=root;
+    else if(binary==='lsof')stdout=args.includes('cwd')?'n'+root+'\n':'n/old-account/thread-writer-locks/11111111-1111-4111-8111-111111111111.lock\n';
+    else throw Error('unexpected native mutation '+binary);
+    return {exitCode:0,stdout};
+  };
+  const {sessionRunner}=await createRuntimeAdapters({cwd:root,adapters:{command},options:{'state-root':root,request:'request.json'},argv:['unit','session-start','u']});
+  assert.equal((await sessionRunner.observe({cwd:root,targetCwd:root})).worker.threadId,'11111111-1111-4111-8111-111111111111');
+  // A reconciled successful old worker keeps its account/runtime for stage submission and finish too.
+  await goals.transaction('g',g=>({...g,revision:g.revision+1,bootstraps:[{unit:'u',attempt:1,...owner,goalPath:snapshot.path,goalDigest:snapshot.digest}],
+    policy:{...g.policy,runtime:'orca',provider:'claude',argv:['claude']}}));
+  for (const argv of [['unit','finish','u'],['unit','stage','submit','u','implement']]) {
+    const {sessionRunner}=await createRuntimeAdapters({cwd:root,adapters:{command},options:{'state-root':root},argv});
+    assert.equal((await sessionRunner.observe({cwd:root,targetCwd:root})).worker.threadId,'11111111-1111-4111-8111-111111111111');
+  }
+  // Same-session successors retain the old execution binding after refresh.
+  const {commitGoalContinuation}=await import('./lib/continuity-finish.mjs');
+  await goals.transaction('g',g=>({...g,revision:g.revision+1,goal:{...g.goal,remaining:['u','next']}}));
+  const current=await goals.read('g');
+  await store.update('u',r=>({...r,state:'Closed',goalContinuation:{goalId:'g',revision:current.revision,nextUnit:'next',owner}}));
+  await commitGoalContinuation({continuityStore:goals,unitStore:store,goalId:'g',unit:'u'});
+  await store.create({schema:'harness.unit/1',unit:'next',kind:'impl',state:'Implementing',continuity:{goalId:'g'}});
+  const {sessionRunner:continued}=await createRuntimeAdapters({cwd:root,adapters:{command},options:{'state-root':root},argv:['unit','finish','next']});
+  assert.equal((await continued.observe({cwd:root,targetCwd:root})).worker.threadId,'11111111-1111-4111-8111-111111111111');
 });
 
 test('public rebind uses the packaged observer and custom permission route, proving prior PID absence and preserving custody',async t=>{

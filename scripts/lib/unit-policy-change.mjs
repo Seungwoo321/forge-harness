@@ -1,5 +1,5 @@
 import { effectArgsDigest, verifyApprovalInput } from './approvals.mjs';
-import { createLedgerStore } from './ledger.mjs';
+import { createLedgerStore, sessionStartRetired } from './ledger.mjs';
 import { resolvePolicy } from './policy.mjs';
 import { transitionRecord } from './unit-state.mjs';
 import { attemptsFor } from './stage-attempts.mjs';
@@ -38,7 +38,7 @@ export async function changeUnitPolicy({ stateRoot, store, unit, request, userIn
           throw failure('INVALID_TRANSITION', 'policy changes require a submitted, undelivered unit with no session finalization');
         }
         if (entries.some(entry => {
-          if (entry.event !== 'intent') return false;
+          if (entry.event !== 'intent' || sessionStartRetired(entries,entry)) return false;
           const latest = entries.findLast(row => row.event === 'result' && row.seq === entry.seq && row.key === entry.key);
           return !latest || ['unknown', 'uncertain'].includes(latest.result?.status);
         })) {

@@ -78,3 +78,68 @@ export async function createRuntimeAdapters(input){
   const stage=await createRuntimeAdapters({...args,options:{'state-root':stateRoot},argv:['unit','stage','submit','review','review']});
   assert.equal((await stage.sessionRunner.observe({cwd:root,targetCwd:root})).closable,true);
 });
+
+test('public rebind uses the packaged observer and custom permission route, proving prior PID absence and preserving custody',async t=>{
+  const {realpath,readFile}=await import('node:fs/promises');
+  const {spawnSync}=await import('node:child_process');
+  const {fileURLToPath}=await import('node:url');
+  const {createHash}=await import('node:crypto');
+  const {createContinuityStore}=await import('./lib/continuity-store.mjs');
+  const {createUnitStateStore}=await import('./lib/unit-state.mjs');
+  const {effectArgsDigest}=await import('./lib/approvals.mjs');
+  const {goalOwner}=await import('./lib/continuity-custody.mjs');
+  const root=await realpath(await mkdtemp(path.join(tmpdir(),'packaged-rebind-')));t.after(()=>rm(root,{recursive:true,force:true}));
+  const hash=bytes=>`sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+  const stateRoot=path.join(root,'state'),store=createUnitStateStore(stateRoot),goals=createContinuityStore(stateRoot);
+  const source=path.join(root,'goal.md');await writeFile(source,'goal');
+  const policy={runtime:'cmux',provider:'codex',account:'/current-account',model:'model',effort:'high',argv:['codex']};
+  await goals.create({goal:{id:'g',objective:'goal',criteria:['done'],remaining:['u'],status:'active'},policy,source:{path:source,digest:hash('goal')}});
+  await store.create({schema:'harness.unit/1',unit:'u',kind:'chore',state:'Accepted',continuity:{goalId:'g'},head:'head',contentFingerprint:'content',
+    failures:[{signature:'preserved failure'}],accepted:{head:'head'},externalDeliveryEvidence:[{verified:true}]});
+  const thread='11111111-1111-4111-8111-111111111111';
+  const native=(pid,start)=>({runtime:'cmux',sessionId:'surface',incarnationId:`tty1:${pid}:${start}`,cwd:root,worker:{executable:'codex',pid,incarnationId:`tty1:${pid}:${start}`,threadId:thread}});
+  const old=native(42,'OLD'),owner=native(84,'NEW'),previous={id:'original',unit:'u',ownership:'existing',...old,owner:old,policyDigest:effectArgsDigest(policy)};
+  await goals.transaction('g',g=>({...g,revision:g.revision+1,adoptions:[previous]}));
+  const authority=path.join(root,'permission.txt');await writeFile(authority,'Authorized same-thread owner recovery for unit u and goal g');
+  const target={head:'head',contentFingerprint:'content'},unit=await store.read('u'),goal=await goals.read('g');
+  const request={id:'rebind',expectedRevision:unit.revision,expectedGoalRevision:goal.revision,unitDigest:effectArgsDigest(unit),goalDigest:effectArgsDigest(goal),
+    targetDigest:effectArgsDigest(target),owner,previousCustodyDigest:effectArgsDigest(previous),provenance:{ref:authority,digest:hash(await readFile(authority))},reason:'Source-authorized same-owner recovery'};
+  const requestFile=path.join(root,'rebind.json'),modeFile=path.join(root,'mode.json');await writeFile(requestFile,JSON.stringify(request));
+  const stub=path.join(root,'native.mjs');await writeFile(stub,`
+import {readFileSync} from 'node:fs';
+const mode=JSON.parse(readFileSync(${JSON.stringify(modeFile)}));const [binary,...args]=process.argv.slice(2);let value;
+if(binary==='cmux'&&args.includes('identify'))value=JSON.stringify({caller:{surface_id:mode==='caller'?'other':'surface'}});
+else if(binary==='cmux'&&args.includes('tree'))value=JSON.stringify({windows:[{id:'w',workspaces:[{id:'ws',panes:[{surfaces:[{id:'surface',type:'terminal',tty:'tty1'}]}]}]}]});
+else if(binary==='ps'&&args.includes('-axo')){if(mode==='unavailable')process.exit(1);value=mode==='malformed'?'ambiguous':mode==='live'?'42\\n84\\n':'84\\n';}
+else if(binary==='ps')value=args.includes('pid=,pgid=,tpgid=,comm=')?'84 84 84 codex\\n':'NEW';
+else if(binary==='pwd')value=process.cwd();
+else if(binary==='lsof')value=args.includes('cwd')?'n'+process.cwd()+'\\n':'n/current-account/thread-writer-locks/'+(mode==='thread'?'22222222-2222-4222-8222-222222222222':${JSON.stringify(thread)})+'.lock\\n';
+else throw Error('unexpected native mutation '+binary+' '+args.join(' '));
+process.stdout.write(value);
+`);
+  const packaged=fileURLToPath(new URL('./session-adapter.mjs',import.meta.url)),approvals=fileURLToPath(new URL('./lib/approvals.mjs',import.meta.url)),providers=path.join(root,'providers.mjs');
+  await writeFile(providers,`
+import {createRuntimeAdapters as packaged} from ${JSON.stringify(packaged)};
+import {readFile} from 'node:fs/promises';import {createHash} from 'node:crypto';import {effectArgsDigest} from ${JSON.stringify(approvals)};
+export async function createRuntimeAdapters(input){
+ const command=(binary,args,options)=>input.adapters.command(process.execPath,[${JSON.stringify(stub)},binary,...args],options);
+ const session=await packaged({...input,adapters:{...input.adapters,command}});
+ const proof=async binding=>binding.userInputRef==='actual-rebind-message'&&binding.previousCustodyDigest===${JSON.stringify(request.previousCustodyDigest)}
+ &&binding.ownerDigest===${JSON.stringify(effectArgsDigest(owner))}&&await readFile(${JSON.stringify(authority)},'utf8')==='Authorized same-thread owner recovery for unit u and goal g';
+ return {...session,git:{inspectUnit:async()=>({head:'head',contentFingerprint:'content'})},provider:{
+ verifyUserInput:async binding=>({...binding,verified:binding.effect==='unit.session.rebind'&&await proof(binding)}),
+ verifySessionRebind:async ({request,record,goal,target,previousCustody,...binding})=>({...binding,verified:await proof(binding)
+ &&effectArgsDigest(previousCustody)===binding.previousCustodyDigest&&effectArgsDigest(record)===binding.unitDigest&&effectArgsDigest(target)===binding.targetDigest
+ &&goal.policy.account==='/current-account'&&'sha256:'+createHash('sha256').update(await readFile(request.provenance.ref)).digest('hex')===request.provenance.digest})}};
+}
+`);
+  const cli=fileURLToPath(new URL('./unit.mjs',import.meta.url)),unitFile=path.join(stateRoot,'units/u/unit.json'),before=await readFile(unitFile);
+  const run=()=>{const child=spawnSync(process.execPath,[cli,'unit','session-rebind','u','--request',requestFile,'--user-input','actual-rebind-message',
+    '--state-root',stateRoot,'--project-root',root,'--adapters',providers],{cwd:root,encoding:'utf8'});return JSON.parse(child.stdout.slice(child.stdout.lastIndexOf('RESULT ')+7));};
+  for(const mode of ['live','unavailable','malformed','caller','thread']){
+    await writeFile(modeFile,JSON.stringify(mode));assert.notEqual(run().code,0,mode);assert.deepEqual(await readFile(unitFile),before);assert.deepEqual(await goals.read('g'),goal);
+  }
+  await writeFile(modeFile,JSON.stringify('absent'));const result=run();assert.equal(result.code,0,JSON.stringify(result));
+  assert.equal(run().receipt.duplicate,true);const current=await goals.read('g');assert.equal(current.rebindings.length,1);assert.deepEqual(current.adoptions,[previous]);
+  assert.deepEqual(goalOwner(current,'u').owner,owner);assert.deepEqual(await readFile(unitFile),before);
+});

@@ -412,7 +412,7 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
   return Object.freeze({
     contractVersion: 'harness.session-adapter/1',
     capabilities: ['fix-forward', 'failure-classification-five-way', 'retry-limit', 'ops-e0-only', 'policy-review'],
-    async observe({ cwd, targetCwd = cwd, recipient, nativeOwner = false }) {
+    async observe({ cwd, targetCwd = cwd, recipient, nativeOwner = false, previousOwner }) {
       if (recipient) {
         if (recipient.sessionId === parent.sessionId || !recipient.executable || !recipient.incarnationId) throw invalid('invalid return recipient');
         const observed = await inspect(recipient.sessionId, recipient.cwd, recipient.executable);
@@ -420,6 +420,16 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
         return nativeOwner ? {...observed,worker:await workerIdentity(observed,parent.recipientEnv)} : observed;
       }
       if (cwd !== parent.cwd || !path.isAbsolute(targetCwd)) throw invalid('parent or successor cwd is invalid');
+      const assertPreviousAbsent = async () => {
+        if (!previousOwner) return;
+        if (previousOwner.runtime !== runtime || previousOwner.sessionId !== parent.sessionId || previousOwner.cwd !== cwd
+          || !Number.isSafeInteger(previousOwner.worker?.pid) || previousOwner.worker.pid < 1) throw invalid('previous owner identity is invalid');
+        const rows = (await invoke('ps', ['-axo', 'pid='], cwd)).trim().split(/\s+/);
+        if (!rows.length || rows.some(value=>!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < 1)
+          || new Set(rows).size !== rows.length || rows.some(value=>Number(value) === previousOwner.worker.pid))
+          throw invalid('previous owner process is live or its absence is unproven');
+      };
+      await assertPreviousAbsent();
       if (runtime === 'cmux') {
         const identity = await cmux(['identify'], cwd);
         if (identity.caller?.surface_id !== parent.sessionId) throw invalid('cmux caller is not the configured parent');
@@ -432,7 +442,9 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       if (current.incarnationId !== parent.incarnationId) throw invalid('parent incarnation changed');
       const executable = parent.workerExecutable;
       const worker = executable ? await workerIdentity(await inspect(parent.sessionId, cwd, executable)) : undefined;
-      return { ...current, targetCwd: target, ...(worker ? { worker } : {}), closable: parent.closable === true };
+      if (worker && (worker.pid !== current.pid || worker.incarnationId !== current.incarnationId)) throw invalid('parent worker changed during observation');
+      await assertPreviousAbsent();
+      return { ...current, targetCwd: target, ...(worker ? { worker } : {}), closable: parent.closable === true, ...(previousOwner ? {previousOwnerAbsent:true} : {}) };
     },
     async execute(input) {
       if (input.effect === 'session.deliver') { const submission = {}; return poll(() => deliver(input, submission)); }

@@ -10,7 +10,7 @@ import {runUnitCli} from './lib/unit-driver.mjs';
 import {taskDigest} from './lib/session-task.mjs';
 import {prepareEffect} from './lib/policy.mjs';
 
-async function fixture(t,{pending=false,seed=true}={}) {
+async function fixture(t,{pending=false,seed=true,expandedFooter=false}={}) {
   const root=await mkdtemp(path.join(os.tmpdir(),'delivery-input-'));t.after(()=>rm(root,{recursive:true,force:true}));
   const ownerThread='00000000-0000-0000-0000-000000000001',receiverThread='00000000-0000-0000-0000-000000000002';
   const native=(sessionId,pid,tty,threadId)=>({runtime:'cmux',sessionId,incarnationId:`${tty}:${pid}:START`,cwd:root,executable:'codex',pid,tty,workspaceId:sessionId+'-workspace',threadId});
@@ -25,7 +25,7 @@ async function fixture(t,{pending=false,seed=true}={}) {
   const observations=Array.from({length:45},()=>({event:'verification',unit:'review',seq:2,key,status:'unknown',verify:{code:'SESSION_TASK_UNVERIFIED',message:'supported Codex composer is unavailable'}}));
   await writeFile(ledgerPath,seed?[intent,...observations].map(JSON.stringify).join('\n')+'\n':'');
   const prompt=`Read ${resultPath} (${resultDigest}); follow its referenced handoffs.`;
-  const state={draft:pending?prompt:'Ask Codex to do anything',mode:'normal',native:'ready',thread:receiverThread,pastes:0,returns:0,closes:0,closed:false,packetRead:true};
+  const state={draft:pending?prompt:'Ask Codex to do anything',mode:'normal',native:'ready',thread:receiverThread,pastes:0,returns:0,closes:0,closed:false,packetRead:true,footerStatus:'Ready'};
   const rows=async()=>(await readFile(ledgerPath,'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
   const command=async(binary,argv,options)=>{
     const records=await rows(),marked=records.some(r=>r.event==='submission'),confirmed=records.some(r=>r.event==='confirmation');
@@ -42,7 +42,7 @@ async function fixture(t,{pending=false,seed=true}={}) {
     else if(binary==='ps')stdout=argv.includes('tty=')?'supervisor':argv.includes('pid=,pgid=,tpgid=,comm=')?(argv.includes('tty1')?'22 22 22 codex':'33 33 33 codex'):'START';
     else if(binary==='lsof')stdout=argv.includes('-d')?'n'+root+'\n':`n${process.env.CODEX_HOME??process.env.HOME+'/.codex'}/thread-writer-locks/${argv.includes('22')?ownerThread:state.thread}.lock\n`;
     else if(binary==='cmux'&&argv.includes('terminal.viewport'))stdout=JSON.stringify({surface_id:'receiver',columns:44});
-    else if(binary==='cmux'&&argv.includes('read-screen')){const text=state.draft.match(/.{1,42}/gu)??[''];stdout=`› ${text.join('\n  ')}\n\n  Model high · ~/work…\n  ? for shortcuts\n`;}
+    else if(binary==='cmux'&&argv.includes('read-screen')){const text=state.draft.match(/.{1,42}/gu)??[''];stdout=`› ${text.join('\n  ')}\n\n`+(expandedFooter ? `  GPT-6.1-Sol high · ~/work/product · fix/change · ${state.footerStatus} ·…  ⚠ 1 warning · f2 to view\n` : '  Model high · ~/work…\n  ? for shortcuts\n');}
     else if(binary==='cmux'&&argv.includes('surface.send_text')){assert.equal(marked,true);assert.equal(confirmed,false);state.draft=JSON.parse(argv.at(-1)).text;state.pastes++;if(state.mode==='crash-paste')throw Error('paste acknowledgement lost');stdout='{}';}
     else if(binary==='cmux'&&argv.includes('send-key')){assert.equal(argv.at(-1),'Return');assert.ok(marked&&confirmed);state.returns++;state.native=state.mode==='queued'?'queued':state.mode==='accepted'?'accepted':'started';if(state.mode==='crash-return')throw Error('Return acknowledgement lost');stdout='OK';}
     else if(binary==='cmux'&&argv.includes('close-surface')){assert.equal(argv.at(-1),'owner');state.closes++;state.closed=true;stdout='OK';}
@@ -110,4 +110,17 @@ test('queued, accepted and started delivery remain observation-only; native pack
     const f=await fixture(t);f.state.native=native;f.state.packetRead=false;assert.equal((await f.run()).code,3);assert.equal(f.state.pastes,0);assert.equal(f.state.returns,0);assert.equal(f.state.closes,0);
     if(native==='started'){f.state.packetRead=true;assert.equal((await f.run()).code,0);assert.equal(f.state.closes,1);}
   });
+});
+
+
+test('public finalize recognizes expanded hintless Ready on the original seq2 and refuses Working or nonempty drafts',async t=>{
+  const f=await fixture(t,{expandedFooter:true});
+  for(const status of ['Working','Unknown']){
+    f.state.footerStatus=status;assert.equal((await f.run()).code,3);assert.equal(f.state.pastes,0);assert.equal(f.state.returns,0);
+  }
+  f.state.footerStatus='Ready';f.state.draft='foreign draft';assert.equal((await f.run()).code,3);assert.equal(f.state.pastes,0);
+  f.state.draft='Ask Codex to do anything';assert.equal((await f.run()).code,0);assert.equal((await f.run()).code,0);
+  assert.equal(f.state.pastes,1);assert.equal(f.state.returns,1);assert.equal(f.state.closes,1);
+  const rows=await f.rows();assert.deepEqual(rows.find(r=>r.seq===2&&r.event==='intent'),f.intent);
+  for(const event of ['intent','submission','confirmation','result'])assert.equal(rows.filter(r=>r.seq===2&&r.event===event).length,1);
 });

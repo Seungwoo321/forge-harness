@@ -54,7 +54,7 @@ test('changed accepted head or worktree content requires gate revalidation', () 
   assert.equal(result.nextStage, 'gates');
 });
 
-test('stale evidence reruns its gate before tracker projection or stage resume', () => {
+test('tracker reconciliation blocks executable stale-evidence revalidation', () => {
   const result = decideResume({
     record: record({ tracker: { ref: 'tracker-1' } }),
     git: git(),
@@ -62,8 +62,7 @@ test('stale evidence reruns its gate before tracker projection or stage resume',
     currentFingerprints: { tests: 'sha256:new' },
     tracker: { state: 'Implementing', revision: 2 },
   });
-  assert.equal(result.action, 'rerun-gate');
-  assert.equal(result.gate, 'tests');
+  assert.equal(result.action, 'project-tracker');
 });
 
 test('tracker mismatch is the final reconciliation step', () => {

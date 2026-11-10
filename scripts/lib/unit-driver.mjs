@@ -860,8 +860,8 @@ async function runResume({ stateRoot, unit, options, adapters }) {
     }});
   });
   return {
-    code: result.recovery?.action === 'resume' ? 0 : 3,
-    summary: result.recovery?.action === 'resume' ? `Resumed ${unit} at ${result.stage}` : `Unit ${unit} requires ${result.recovery?.action ?? 'resume inspection'}`,
+    code: result.stage ? 0 : 3,
+    summary: result.stage ? `Resumed ${unit} at ${result.stage}` : `Unit ${unit} requires ${result.recovery?.action ?? 'resume inspection'}`,
     details: { unit, state: result.record.state, ...(result.stage ? { stage: result.stage } : {}), ...(boundary ? { event: boundary } : {}), recovery: result.recovery },
   };
 }

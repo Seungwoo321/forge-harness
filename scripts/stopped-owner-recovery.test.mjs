@@ -12,6 +12,7 @@ import {taskDigest} from './lib/session-task.mjs';
 import {goalOwner} from './lib/continuity-custody.mjs';
 import {runUnitCli} from './lib/unit-driver.mjs';
 import {createSessionRunner} from './lib/session-runtime.mjs';
+import {gateFingerprint, canReuseEvidence} from './lib/evidence.mjs';
 
 const packet = ['목표: goal','수용 기준: done','작업관리: change','결정: approved','변경: retained','검증: source','남은 일·위험: access','다음 단위 첫 행동: resume'].join('\n');
 const fields = {title:'Stopped change',objective:'goal',acceptance:'pending',tracking:'change',decision:'blocked',changed:'retained',verification:'source',remainingRisk:'access',nextFirstAction:'resume'};
@@ -29,7 +30,7 @@ async function fixture(t, managed = false, stoppedFrom = 'Implementing') {
   await mkdir(path.join(stateRoot,'units/change/failures'),{recursive:true});
   const failurePath='units/change/failures/f1.json';await writeFile(path.join(stateRoot,failurePath),'failure');
   await store.create({schema:'harness.unit/1',unit:'change',kind:'impl',state:'Stopped',stoppedFrom,continuity:{goalId:'goal'},policy:{goal:{class:'product-prelaunch'},session:policy},canon:[],
-    failures:[{path:failurePath,digest:taskDigest('failure'),signature:'original'}],evidence:[{gate:'old',exit:1}],acceptance:[{id:'AC-1',text:'done'}],stages:[],openDecisions:[]});
+    failures:[{path:failurePath,digest:taskDigest('failure'),signature:'original'}],evidence:[{gate:'lint',fingerprint:'old',exit:0,status:'passed'}],acceptance:[{id:'AC-1',text:'done'}],stages:[],openDecisions:[]});
   await goals.transaction('goal',g=>({...g,revision:g.revision+1,goal:{...g.goal,status:'blocked',blocker:{unit:'change',reason:'access',resumeCondition:'access granted',evidence:failurePath}}}));
   let closed=true, authorized=true, hook=async()=>{}, launches=0;
   const target={head:'head',contentFingerprint:'content'}, parent={runtime:'cmux',sessionId:'supervisor',incarnationId:'parent-v1',cwd};
@@ -62,7 +63,7 @@ async function fixture(t, managed = false, stoppedFrom = 'Implementing') {
   const command=async(args,body)=>{const file=path.join(cwd,`request-${++serial}.json`);await writeFile(file,JSON.stringify(body));return run([...args,'--request',file]);};
   const recover=body=>command(['unit','stopped-owner-recover','change','--user-input','human'],body);
   const activate=async()=>command(['goal','resume','goal'],{expectedRevision:(await goals.read('goal')).revision,unit:'change',resolutionEvidence:'access granted'});
-  const resume=async()=>{const file=path.join(cwd,'snapshot.json');await writeFile(file,JSON.stringify({git:{head:'head',checkpoints:{},worktreeDiff:[],indexDiff:[]}}));return run(['unit','resume','change','--snapshot',file]);};
+  const resume=async(extra={})=>{const file=path.join(cwd,'snapshot.json');await writeFile(file,JSON.stringify({git:{head:'head',checkpoints:{},worktreeDiff:[],indexDiff:[]},currentFingerprints:{lint:'old'},...extra}));return run(['unit','resume','change','--snapshot',file]);};
   return {cwd,stateRoot,store,goals,unitFile,source,owner,custody,target,adapters,request,recover,run,activate,resume,
     setClosed:value=>{closed=value;},deny:()=>{authorized=false;},onVerify:value=>{hook=value;},launches:()=>launches,parent,command};
 }
@@ -177,4 +178,66 @@ test('packaged adapter resolves recovery requests and goal/unit resume to the ex
  assert.deepEqual(await registered.sessionRunner.observe({closedOwner:f.owner}),{closed:true,owner:f.owner});
  registered=await createRuntimeAdapters({cwd:f.cwd,adapters:{command},options:{'state-root':f.stateRoot},argv:['unit','resume','change']});
  assert.deepEqual(await registered.sessionRunner.observe({closedOwner:f.owner}),{closed:true,owner:f.owner});
+});
+
+test('AC-1 AC-2 recovered stale evidence resumes to executable gates and requires fresh independent review',async t=>{
+ for(const origin of ['SelfGated','InReview','Accepted'])await t.test(origin,async t=>{
+  const f=await fixture(t,false,origin);
+  await f.store.update('change',r=>({...r,policy:{...r.policy,review:{mode:'required',by:'session',triggers:[]}},
+   accepted:origin==='Accepted'?{head:'head',contentFingerprint:'content'}:null,
+   reviewedHead:'head',verdict:'ship',reviewDecision:{required:true,by:'session',contentFingerprint:'content'}}));
+  const original=await f.store.read('change');
+  assert.equal((await f.recover(await f.request())).code,0);assert.equal((await f.activate()).code,0);
+  // Snapshot evidence cannot hide the persisted lint result.
+  const result=await f.resume({evidence:[],currentFingerprints:{lint:'new'}});
+  assert.equal(result.code,0,JSON.stringify(result));assert.equal(result.stage,'gates');assert.equal(result.recovery.action,'rerun-gate');
+  const resumed=await f.store.read('change');assert.equal(resumed.state,'SelfGated');assert.equal(resumed.accepted,null);
+  assert.equal(resumed.reviewedHead,null);assert.equal(resumed.verdict,null);assert.equal(resumed.reviewDecision,null);
+  for(const key of ['failures','stages','acceptance'])assert.deepEqual(resumed[key],original[key]);
+  assert.deepEqual(resumed.evidence.slice(0,original.evidence.length),original.evidence);
+  assert.equal(resumed.evidence.at(-1).status,'stale');assert.deepEqual(resumed.evidence.at(-1).covers,[]);
+  assert.equal(canReuseEvidence(resumed.evidence.at(-1),'old',{id:'lint'}),false);
+  assert.equal(resumed.sessionHistory.at(-1).mode,'stopped-observation');assert.ok(resumed.stopReport);
+  assert.deepEqual(resumed.resumeRevalidations[0].previousAcceptance,original.accepted);
+  assert.equal(resumed.resumeRevalidations[0].previousReview.verdict,'ship');
+  const handoff=path.join(f.cwd,'revalidate.md');await writeFile(handoff,packet);
+  assert.equal((await f.command(['unit','session-start','change'],{cwd:f.cwd,handoffPath:handoff,handoffDigest:taskDigest(packet),parentRuntime:f.parent,waitSeconds:0})).code,0);
+  assert.equal(f.launches(),1);
+  const source='gate source';await writeFile(path.join(f.cwd,'gate.mjs'),source);
+  const executions=[];
+  f.adapters.gates={async describe(id){return {id,command:['node','gate.mjs',id],files:[{path:'gate.mjs',content:source}],format:'tap',acPattern:'AC-1'};}};
+  f.adapters.command=async(_binary,args)=>{executions.push(args.at(-1));return {exitCode:0,stdout:'TAP version 13\n1..1\nok 1 - AC-1 current validation\n'};};
+  const acceptance=await f.run(['unit','accept','change']);assert.equal(acceptance.code,20,JSON.stringify(acceptance));
+  assert.deepEqual(executions,['typecheck','lint','tests','build','acceptance-coverage']);
+  const reviewed=await f.store.read('change');assert.equal(reviewed.state,'InReview');assert.equal(reviewed.accepted,null);
+  assert.equal(reviewed.reviewedHead,null);assert.equal(reviewed.reviewDecision.required,true);
+  assert.equal(reviewed.evidence.filter(e=>e.gate==='lint').at(-1).fingerprint,gateFingerprint(await f.adapters.gates.describe('lint')));
+  assert.equal((await f.run(['unit','accept','change'])).code,20);assert.equal(executions.length,5);
+ });
+});
+
+test('AC-2 stale-evidence resume preserves stopped state when authority, closure or inspection conflicts',async t=>{
+ for(const mode of ['permission','closure','source','target','unit','review','pending-effect','checkpoint','fingerprint','tracker'])await t.test(mode,async t=>{
+  const f=await fixture(t,false,'SelfGated');
+  if(mode==='checkpoint')await f.store.update('change',r=>({...r,stages:[{name:'implement',attempts:[{n:1,checkpoint:'checkpoint'}]}]}));
+  if(mode==='tracker')await f.store.update('change',r=>({...r,tracker:{ref:'tracker'}}));
+  assert.equal((await f.recover(await f.request())).code,0);assert.equal((await f.activate()).code,0);
+  if(mode==='permission')f.deny();if(mode==='closure')f.setClosed(false);if(mode==='source')await writeFile(f.source,'changed');
+  if(mode==='target')f.target.head='other';if(mode==='unit')await f.store.update('change',r=>({...r,extra:'changed'}));
+  if(mode==='review')await f.store.create({schema:'harness.unit/1',unit:'review',kind:'review',state:'InReview',targetUnit:'change',continuity:{goalId:'goal'}});
+  if(mode==='pending-effect')await createLedgerStore(f.stateRoot).withLock('change',l=>l.append({event:'intent',unit:'change',seq:1,key:'pending',effect:'git.push'}));
+  const before=await readFile(f.unitFile),goal=await f.goals.read('goal');
+  const result=await f.resume({currentFingerprints:mode==='fingerprint'?{}:{lint:'new'}});
+  assert.notEqual(result.code,0,JSON.stringify(result));assert.deepEqual(await readFile(f.unitFile),before);assert.deepEqual(await f.goals.read('goal'),goal);assert.equal(f.launches(),0);
+ });
+});
+
+test('AC-1 stale evidence at an unfinished scope or implementation resumes its original stage before mandatory gates',async t=>{
+ for(const origin of ['Scoped','Implementing'])await t.test(origin,async t=>{
+  const f=await fixture(t,false,origin);assert.equal((await f.recover(await f.request())).code,0);assert.equal((await f.activate()).code,0);
+  const result=await f.resume({currentFingerprints:{lint:'new'}});assert.equal(result.code,0,JSON.stringify(result));
+  assert.equal(result.state,origin);assert.equal(result.stage,origin==='Scoped'?'scope':'implement');
+  assert.equal((await f.store.read('change')).evidence.at(-1).status,'stale');
+  assert.equal((await f.run(['unit','accept','change'])).error,'INVALID_TRANSITION');
+ });
 });

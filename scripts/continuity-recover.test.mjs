@@ -6,7 +6,7 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {createContinuityStore} from './lib/continuity-store.mjs';
 import {createUnitStateStore} from './lib/unit-state.mjs';
-import {createLedgerStore,executeEffect,sessionStartRetired} from './lib/ledger.mjs';
+import {createLedgerStore,executeEffect,sessionEffectRetired} from './lib/ledger.mjs';
 import {effectArgsDigest} from './lib/approvals.mjs';
 import {startGoalSession} from './lib/continuity-start.mjs';
 import {recoverGoalSession} from './lib/continuity-recover.mjs';
@@ -89,7 +89,7 @@ test('AC-2 public recovery reserves one durable new attempt and start survives r
   await assert.rejects(executeEffect({unit:'u',effect:'session.start',args:f.intent.args,policy:{goal:{class:'product-prelaunch'}},context:{productOwned:true},store:f.ledgerStore,
     adapter:{now:f.adapters.now,execute:async()=>{called=true;},verify:async()=>{called=true;}}}),{code:'EFFECT_RETIRED'});
   assert.equal(called,false);
-  assert.equal(sessionStartRetired(await f.rows(),f.intent),true);
+  assert.equal(sessionEffectRetired(await f.rows(),f.intent),true);
   assert.equal((await f.rows()).filter(row=>row.event==='session-start-recovery').length,1);
 });
 

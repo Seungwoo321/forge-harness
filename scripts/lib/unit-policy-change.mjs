@@ -1,5 +1,5 @@
 import { effectArgsDigest, verifyApprovalInput } from './approvals.mjs';
-import { createLedgerStore, sessionStartRetired } from './ledger.mjs';
+import { createLedgerStore, sessionEffectRetired } from './ledger.mjs';
 import { resolvePolicy } from './policy.mjs';
 import { transitionRecord } from './unit-state.mjs';
 import { attemptsFor } from './stage-attempts.mjs';
@@ -38,7 +38,7 @@ export async function changeUnitPolicy({ stateRoot, store, unit, request, userIn
           throw failure('INVALID_TRANSITION', 'policy changes require a submitted, undelivered unit with no session finalization');
         }
         if (entries.some(entry => {
-          if (entry.event !== 'intent' || sessionStartRetired(entries,entry)) return false;
+          if (entry.event !== 'intent' || sessionEffectRetired(entries,entry)) return false;
           const latest = entries.findLast(row => row.event === 'result' && row.seq === entry.seq && row.key === entry.key);
           return !latest || ['unknown', 'uncertain'].includes(latest.result?.status);
         })) {
@@ -50,7 +50,7 @@ export async function changeUnitPolicy({ stateRoot, store, unit, request, userIn
         try { after = resolvePolicy({ unit: overrides, project: record.policy ?? {} }, { nonInteractive: true }).policy; }
         catch (error) { throw failure('POLICY_CHANGE_INVALID', `invalid ${field} policy: ${error.message}`); }
         if (effectArgsDigest(before[field]) === effectArgsDigest(after[field])) throw failure('POLICY_CHANGE_INVALID', `${field} is already set to the requested value`);
-        assertDeliveryObligations(record, after.delivery);
+        assertDeliveryObligations(record, after.delivery, {allowIncomplete:true});
         await verifyApprovalInput(adapters.provider, { unit, userInputRef, effect: 'unit.policy.change', argsDigest: requestDigest,
           before: field === 'review' ? JSON.stringify(before.review) : before.delivery,
           after: field === 'review' ? JSON.stringify(after.review) : after.delivery, reason: request.reason });

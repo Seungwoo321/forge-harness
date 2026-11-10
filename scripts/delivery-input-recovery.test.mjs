@@ -10,7 +10,7 @@ import {runUnitCli} from './lib/unit-driver.mjs';
 import {taskDigest} from './lib/session-task.mjs';
 import {prepareEffect} from './lib/policy.mjs';
 
-async function fixture(t,{pending=false,seed=true,expandedFooter=false}={}) {
+async function fixture(t,{pending=false,seed=true,expandedFooter=false,legacy:legacyMode=false}={}) {
   const root=await mkdtemp(path.join(os.tmpdir(),'delivery-input-'));t.after(()=>rm(root,{recursive:true,force:true}));
   const ownerThread='00000000-0000-0000-0000-000000000001',receiverThread='00000000-0000-0000-0000-000000000002';
   const native=(sessionId,pid,tty,threadId)=>({runtime:'cmux',sessionId,incarnationId:`${tty}:${pid}:START`,cwd:root,executable:'codex',pid,tty,workspaceId:sessionId+'-workspace',threadId});
@@ -23,7 +23,11 @@ async function fixture(t,{pending=false,seed=true,expandedFooter=false}={}) {
   const store=createUnitStateStore(root);await store.create({schema:'harness.unit/1',unit:'review',kind:'review',state:'Closed',policy:{goal:{class:'task'},delivery:'none'},sessionFinalization:plan,acceptance:[],openDecisions:[],tracker:null});
   const ledgerPath=path.join(root,'units/review/ledger.ndjson'),intent={event:'intent',unit:'review',seq:2,class:'E3',effect:'session.deliver',key,args,intent_at:'time'};
   const observations=Array.from({length:45},()=>({event:'verification',unit:'review',seq:2,key,status:'unknown',verify:{code:'SESSION_TASK_UNVERIFIED',message:'supported Codex composer is unavailable'}}));
-  await writeFile(ledgerPath,seed?[intent,...observations].map(JSON.stringify).join('\n')+'\n':'');
+  const legacyPrompt=`Receive the completed work result and continue its authorized next action.\n${handoffPath}\n${handoffDigest}\nhandoff\n\n${resultPath}\n${resultDigest}\n${content}`;
+  const legacyBinding={runtime:'cmux',sessionId:recv.sessionId,incarnationId:recv.incarnationId,cwd:root,executable:'codex',pid:recv.pid,
+    threadId:receiverThread,promptDigest:taskDigest(legacyPrompt),packets:[{path:handoffPath,digest:handoffDigest},{path:resultPath,digest:resultDigest}]};
+  const boundaries=legacyMode?[{event:'submission',unit:'review',seq:2,key,binding:legacyBinding},{event:'confirmation',unit:'review',seq:2,key,binding:legacyBinding}]:[];
+  await writeFile(ledgerPath,seed?[intent,...observations,...boundaries].map(JSON.stringify).join('\n')+'\n':'');
   const prompt=`Read ${resultPath} (${resultDigest}); follow its referenced handoffs.`;
   const state={draft:pending?prompt:'Ask Codex to do anything',mode:'normal',native:'ready',thread:receiverThread,pastes:0,returns:0,queues:0,active:false,turnStatus:'inProgress',closes:0,closed:false,packetRead:true,footerStatus:'Ready'};
   const rows=async()=>(await readFile(ledgerPath,'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
@@ -52,7 +56,7 @@ async function fixture(t,{pending=false,seed=true,expandedFooter=false}={}) {
       const legacy=`Receive the completed work result and continue its authorized next action.\n${handoffPath}\n${handoffDigest}\nhandoff\n\n${resultPath}\n${resultDigest}\n${content}`;
       const prior=state.priorShort?[{id:'prior',status:'completed',items:[{type:'userMessage',id:'old',content:[{type:'text',text:prompt}]},{type:'agentMessage',id:'old-response'},{type:'commandExecution',status:'completed',exitCode:0,cwd:root,commandActions:[{type:'read',path:resultPath}],aggregatedOutput:content}]}]:[];
       const previousLegacy=['accepted','started'].includes(state.priorLegacy)?[{id:'legacy',status:'completed',items:[{type:'userMessage',id:'legacy-request',content:[{type:'text',text:legacy}]},...(state.priorLegacy==='started'?[{type:'agentMessage',id:'legacy-response'}]:[])]}]:[];
-      const current=['started','accepted'].includes(state.native)?[{id:'turn',status:'completed',items:[{type:'userMessage',id:'request',content:[{type:'text',text:state.deliveredPrompt??prompt}]},...(state.native==='started'?[{type:'agentMessage',id:'response'},...(state.packetRead?[{type:'commandExecution',id:'read',status:'completed',exitCode:0,cwd:root,commandActions:[{type:'read',path:resultPath}],aggregatedOutput:content}]:[])]:[])]}]:[];
+      const current=['started','accepted'].includes(state.native)?[{id:'turn',status:'completed',items:[{type:'userMessage',id:'request',content:[{type:'text',text:legacyMode?legacyPrompt:(state.deliveredPrompt??prompt)}]},...(state.native==='started'?[{type:'agentMessage',id:'response'},...(state.packetRead?[{type:'commandExecution',id:'read',status:'completed',exitCode:0,cwd:root,commandActions:[{type:'read',path:resultPath}],aggregatedOutput:content}]:[])]:[])]}]:[];
       stdout=JSON.stringify({thread:{id:request.threadId,cwd:root},queued:state.native==='queued'?[{clientUserMessageId:request.clientId}]:state.priorLegacy==='queued'?[{input:[{type:'text',text:legacy}]}]:[],turns:[...prior,...previousLegacy,...current,...(state.active?[{id:'active',status:state.turnStatus,items:[]}]:[])]});
     }
     else throw Error(`unexpected native command ${binary} ${argv}`);
@@ -66,6 +70,14 @@ async function fixture(t,{pending=false,seed=true,expandedFooter=false}={}) {
   };
   return {root,state,run,rows,prompt,intent,resultPath};
 }
+
+test('legacy delivery finalization preserves its original intent and does not resubmit',async t=>{
+  const f=await fixture(t,{legacy:true});f.state.native='started';const original=await f.rows();
+  const results=await Promise.all([f.run(),f.run()]);assert.ok(results.every(result=>result.code===0),JSON.stringify(results));
+  const rows=await f.rows();assert.deepEqual(rows.slice(0,original.length),original);
+  for(const event of ['intent','submission','confirmation','result'])assert.equal(rows.filter(row=>row.seq===2&&row.event===event).length,1,event);
+  assert.equal(f.state.pastes,0);assert.equal(f.state.returns,0);
+});
 
 test('public finalize resumes an unsubmitted empty delivery on its original seq despite prior unknown polls',async t=>{
   const f=await fixture(t);const results=await Promise.all([f.run(),f.run()]);assert.ok(results.every(r=>r.code===0),JSON.stringify(results));

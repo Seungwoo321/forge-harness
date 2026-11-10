@@ -226,6 +226,10 @@ export function prepareEffect(effect, args, requested = {}) {
     if (args?.[field] === undefined || args?.[field] === null) throw new TypeError(`missing effect key field: ${field}`);
   }
   const key = Object.fromEntries(definition.keyFields.map(field => [field, args[field]]));
+  if (['session.deliver','session.close'].includes(effect) && args.recoveryEpoch !== undefined) {
+    if (typeof args.recoveryEpoch !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(args.recoveryEpoch)) throw new TypeError('invalid session recovery epoch');
+    key.recoveryEpoch = args.recoveryEpoch;
+  }
   const digest = createHash('sha256').update(JSON.stringify(stable(key))).digest('hex');
   return { class: definition.class, effect, key: `sha256:${digest}`, args };
 }

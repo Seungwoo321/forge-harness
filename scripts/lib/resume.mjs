@@ -1,4 +1,4 @@
-import { sessionStartRetired } from './ledger.mjs';
+import { sessionEffectRetired } from './ledger.mjs';
 
 const validStates = new Set([
   'Scoped', 'Implementing', 'SelfGated', 'InReview', 'Accepted', 'Delivering', 'Delivered', 'Blocked', 'Stopped', 'Closed',
@@ -36,7 +36,7 @@ function pendingEffects(records) {
     if (row?.event === 'intent' && Number.isSafeInteger(row.seq)) intents.set(row.seq, row);
     if (row?.event === 'result' && Number.isSafeInteger(row.seq)) completed.add(row.seq);
   }
-  return [...intents.values()].filter(row => !completed.has(row.seq) && !sessionStartRetired(records,row)).sort((a, b) => a.seq - b.seq);
+  return [...intents.values()].filter(row => !completed.has(row.seq) && !sessionEffectRetired(records,row)).sort((a, b) => a.seq - b.seq);
 }
 
 function latestAttempts(record) {

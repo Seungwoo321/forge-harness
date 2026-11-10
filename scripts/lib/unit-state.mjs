@@ -223,6 +223,12 @@ export function createUnitStateStore(stateRoot) {
           error.code = 'UNIT_NOT_FOUND';
           throw error;
         }
+        if (current.state === 'Delivered' && current.continuity?.goalId) {
+          const {createContinuityStore}=await import('./continuity-store.mjs');
+          const goal=await createContinuityStore(stateRoot).read(current.continuity.goalId);
+          if (goal?.transfers?.some(item=>item.unit===unit&&item.deliveredContinuation===true))
+            throw Object.assign(new Error('delivered predecessor is retained by a goal continuation'),{code:'CONTINUITY_RETAINED'});
+        }
         const candidate = await mutate(structuredClone(current));
         if (!candidate || candidate.unit !== unit || candidate.schema !== schema) {
           throw new TypeError('update must preserve the unit identity and schema');

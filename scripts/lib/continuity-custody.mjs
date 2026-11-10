@@ -3,13 +3,13 @@ import { readFile, realpath, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { effectArgsDigest, verifyApprovalInput } from './approvals.mjs';
 import { createContinuityStore } from './continuity-store.mjs';
-import { createLedgerStore, sessionStartRetired } from './ledger.mjs';
+import { createLedgerStore, sessionEffectRetired } from './ledger.mjs';
 import { selectExecutionPolicy } from './continuity-decision.mjs';
 
 const fail = (message, code = 'CUSTODY_INVALID') => { throw Object.assign(new Error(message), {code}); };
 const text = value => typeof value === 'string' && value.trim().length > 0;
 const sha = value => typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value ?? '');
-const unresolved = rows => rows.some(row=>row.event === 'intent' && !sessionStartRetired(rows,row) && !rows.some(result=>result.event === 'result' && result.seq === row.seq && result.key === row.key
+const unresolved = rows => rows.some(row=>row.event === 'intent' && !sessionEffectRetired(rows,row) && !rows.some(result=>result.event === 'result' && result.seq === row.seq && result.key === row.key
   && !['unknown','uncertain'].includes(result.result?.status)));
 export const goalOwner = (goal, unit) => goal?.rebindings?.findLast(item => item.unit === unit) ?? goal?.adoptions?.findLast(item => item.unit === unit)
   ?? goal?.bootstraps?.findLast(item => item.unit === unit) ?? goal?.transfers?.find(item => item.successor === unit);

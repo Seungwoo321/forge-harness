@@ -171,3 +171,35 @@ test('exact-open PR verification replaces a historical PR identity before reuse'
     assert.equal(rows.findLast(row => row.event === 'result').result.pr, 2);
   } finally { await f.cleanup(); }
 });
+
+test('session recovery epoch must match the latest verified ledger checkpoint', async () => {
+  const f=await fixture();
+  try {
+    const {effectArgsDigest}=await import('./lib/approvals.mjs');
+    const policy={goal:{class:'product-prelaunch'},authority:{allow:[],deny:[]},delivery:'none'};
+    let calls=0; f.adapter.execute=async()=>{calls++;return {ok:true};};
+    const input={unit:'u',effect:'session.close',args:{session:'owner',incarnation:'one'},policy,
+      context:{explicitUserInstruction:true,productOwned:true},store:f.store,adapter:f.adapter};
+    await assert.rejects(executeEffect({...input,args:{...input.args,recoveryEpoch:'sha256:'+'1'.repeat(64)}}),{code:'EFFECT_RETIRED'});
+    await f.store.withLock('u',l=>l.append({event:'goal-completion-recovery',requestDigest:'sha256:'+'2'.repeat(64)}));
+    await assert.rejects(executeEffect(input),{code:'EFFECT_RETIRED'});
+    await assert.rejects(executeEffect({...input,args:{...input.args,recoveryEpoch:'sha256:'+'1'.repeat(64)}}),{code:'EFFECT_RETIRED'});
+    const recoveryEpoch=effectArgsDigest({rework:null,recovery:'sha256:'+'2'.repeat(64)});
+    assert.equal((await executeEffect({...input,args:{...input.args,recoveryEpoch}})).status,'completed');
+    assert.equal(calls,1);
+  } finally {await f.cleanup();}
+});
+
+test('completed-goal replay requires a recorded close and never executes a new effect',async()=>{
+  const f=await fixture();
+  try {
+    const policy={goal:{class:'product-prelaunch'},authority:{allow:[],deny:[]},delivery:'none'};
+    let calls=0; f.adapter.execute=async()=>{calls++;return {closed:true};};
+    f.adapter.fence=action=>action({completedOnly:true});
+    const input={unit:'u',effect:'session.close',args:{session:'owner',incarnation:'one'},policy,
+      context:{explicitUserInstruction:true,productOwned:true},store:f.store,adapter:f.adapter};
+    await assert.rejects(executeEffect(input),{code:'EFFECT_UNCERTAIN'});assert.equal(calls,0);
+    delete f.adapter.fence;assert.equal((await executeEffect(input)).status,'completed');
+    f.adapter.fence=action=>action({completedOnly:true});assert.equal((await executeEffect(input)).status,'duplicate');assert.equal(calls,1);
+  } finally {await f.cleanup();}
+});

@@ -471,6 +471,7 @@ test('managed final completion requires covered goal criteria and records comple
   assert.equal((await goals.read('goal2')).goal.status,'active');
   assert.equal((await finalizeSessionUnit({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',adapters})).state,'Closed');
   assert.equal((await goals.read('goal2')).goal.status,'complete');
+  assert.equal((await finalizeSessionUnit({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',adapters})).state,'Closed');
 });
 
 test('finish rejects acceptance and delivery policy replaced after it began', async t => {
@@ -589,4 +590,128 @@ test('same-session delivery may change after an authorized policy revision and r
   await f.store.update('unit-finish',r=>({...r,state:'Accepted',accepted:{head:'head-1',contentFingerprint:'sha256:current'}}));
   await assert.rejects(finishSessionUnit(base),{code:'ADAPTER_MISSING'});
   const updated=await f.store.read('unit-finish');assert.equal(updated.sameSessionContinuation.delivery,'merge');assert.equal(updated.sameSessionContinuation.bindings.length,2);
+});
+
+test('AC-2: an amended goal fences a pending finalizer before any close intent',async t=>{
+  const f=await fixture(t,false);
+  const {createContinuityStore}=await import('./lib/continuity-store.mjs');
+  const {createHash}=await import('node:crypto');
+  const source=path.join(f.root,'fence-goal.md'); await writeFile(source,'goal');
+  const goals=createContinuityStore(f.stateRoot);
+  await goals.create({goal:{id:'fence-goal',objective:'finish',criteria:['behavior verified'],remaining:['unit-finish'],status:'active'},
+    policy:{runtime:'cmux',provider:'codex',account:'/account',model:'model',effort:'high',argv:['codex']},
+    source:{path:source,digest:'sha256:'+createHash('sha256').update('goal').digest('hex')}});
+  await f.store.update('unit-finish',r=>({...r,continuityRequired:true,continuity:{goalId:'fence-goal'},acceptance:[{id:'AC-1',text:'behavior verified'}],
+    evidence:[{gate:'tests',status:'passed',exit:0,covers:['AC-1']}]}));
+  await goals.transaction('fence-goal',g=>({...g,revision:g.revision+1,bootstraps:[{unit:'unit-finish',sessionId:'parent',incarnationId:'parent-1',cwd:f.root}]}));
+  const owner={sessionId:'parent',incarnationId:'parent-1',cwd:f.root};
+  const recipient={sessionId:'supervisor',incarnationId:'supervisor-1',cwd:f.root,executable:'worker'};
+  let closes=0;
+  const session={async observe(input){return input.recipient?recipient:{...owner,closable:true,worker:{incarnationId:'worker-1'}};},
+    async execute(input){if(input.effect==='session.close'){closes++;return {...owner,closed:true};}const identity={sessionId:recipient.sessionId,incarnationId:recipient.incarnationId,cwd:f.root};return {...identity,task:{...identity,schema:'harness.task-receipt/1',effectKey:input.key,promptDigest:taskDigest('prompt'),threadId:'thread',requestId:'req',turnId:'turn',activityId:'activity',packets:[{path:input.args.resultPath,digest:input.args.resultDigest}]}};},
+    async verify(){return {status:'unknown'};}};
+  const adapters={...f.adapters,session};
+  await finishSessionUnit({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',resultFields,goalComplete:true,parentRuntime:owner,returnTo:recipient,
+    goalProof:[{criterion:'behavior verified',unit:'unit-finish',acceptance:'AC-1'}],adapters,sessionAdapter:session});
+  await goals.transaction('fence-goal',g=>({...g,revision:g.revision+1,goal:{...g.goal,remaining:['unit-finish','more-work']}}));
+  await assert.rejects(finalizeSessionUnit({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',adapters}),{code:'GOAL_INCOMPLETE'});
+  assert.equal(closes,0); assert.equal((await f.store.read('unit-finish')).state,'Delivered');
+  const rows=await createLedgerStore(f.stateRoot).withLock('unit-finish',l=>l.read());
+  assert.equal(rows.some(row=>row.effect==='session.close' && row.event==='intent'),false);
+});
+
+test('goal finish resumes its reserved completion after interruption before unit close', async t => {
+  const f=await fixture(t,false);
+  const {createContinuityStore}=await import('./lib/continuity-store.mjs');
+  const {createHash}=await import('node:crypto');
+  const source=path.join(f.root,'goal.md'); await writeFile(source,'finish the goal\n');
+  const digest=`sha256:${createHash('sha256').update(await readFile(source)).digest('hex')}`;
+  const goals=createContinuityStore(f.stateRoot);
+  await goals.create({goal:{id:'retry-goal',objective:'finish',criteria:['behavior verified'],remaining:['unit-finish'],status:'active'},policy:{runtime:'cmux',provider:'codex',account:'/account',model:'model',effort:'high',argv:['codex']},source:{path:source,digest}});
+  await f.store.update('unit-finish',current=>({...current,continuityRequired:true,continuity:{goalId:'retry-goal'},acceptance:[{id:'AC-1',text:'behavior verified'}],evidence:[{gate:'tests',status:'passed',exit:0,covers:['AC-1']}]}));
+  await goals.transaction('retry-goal',current=>({...current,revision:current.revision+1,bootstraps:[{unit:'unit-finish',sessionId:'parent',incarnationId:'parent-1',cwd:f.root}]}));
+  const parentRuntime={sessionId:'parent',incarnationId:'parent-1',cwd:f.root};
+  let interrupted=false;
+  const broken={...f.store,update:(unit,change)=>f.store.update(unit,async record=>{const next=await change(record); if(next.state==='Closed'&&!interrupted){interrupted=true;throw new Error('interruption');} return next;})};
+  const input={stateRoot:f.stateRoot,store:broken,unit:'unit-finish',resultFields,goalComplete:true,goalProof:[{criterion:'behavior verified',unit:'unit-finish',acceptance:'AC-1'}],parentRuntime,adapters:f.adapters,sessionAdapter:{}};
+  await assert.rejects(finishSessionUnit(input),/interruption/);
+  assert.ok((await goals.read('retry-goal')).completionReservation);
+  const before=await f.store.read('unit-finish');
+  await assert.rejects(finishSessionUnit({...input,store:f.store,goalProof:[]}),{code:'GOAL_COMPLETING'});
+  assert.deepEqual((await f.store.read('unit-finish')).goalCompletion,before.goalCompletion);
+  assert.equal((await finishSessionUnit({...input,store:f.store})).state,'Closed');
+  assert.equal((await goals.read('retry-goal')).goal.status,'complete');
+});
+
+test('concurrent goal completion cannot overwrite a reserved result', async t => {
+  const f=await fixture(t,false);
+  const {createContinuityStore}=await import('./lib/continuity-store.mjs');
+  const {createHash}=await import('node:crypto');
+  const source=path.join(f.root,'goal.md'); await writeFile(source,'finish the goal\n');
+  const digest=`sha256:${createHash('sha256').update(await readFile(source)).digest('hex')}`;
+  const goals=createContinuityStore(f.stateRoot);
+  await goals.create({goal:{id:'concurrent-goal',objective:'finish',criteria:['behavior verified'],remaining:['unit-finish'],status:'active'},policy:{runtime:'cmux',provider:'codex',account:'/account',model:'model',effort:'high',argv:['codex']},source:{path:source,digest}});
+  await f.store.update('unit-finish',r=>({...r,continuityRequired:true,continuity:{goalId:'concurrent-goal'},acceptance:[{id:'AC-1',text:'behavior verified'}],evidence:[{gate:'tests',status:'passed',exit:0,covers:['AC-1']}]}));
+  await goals.transaction('concurrent-goal',r=>({...r,revision:r.revision+1,bootstraps:[{unit:'unit-finish',sessionId:'parent',incarnationId:'parent-1',cwd:f.root}]}));
+  const parentRuntime={sessionId:'parent',incarnationId:'parent-1',cwd:f.root};
+  let signal,release; const started=new Promise(resolve=>{signal=resolve}),wait=new Promise(resolve=>{release=resolve}); t.after(()=>release());
+  let intercepted=false;
+  const delayed={...f.store,update:async(unit,change)=>f.store.update(unit,async record=>{const next=await change(record); if(!intercepted&&next.goalCompletion&&!record.goalCompletion){intercepted=true;signal();await wait;} return next;})};
+  const input={stateRoot:f.stateRoot,store:delayed,unit:'unit-finish',resultFields,goalComplete:true,goalProof:[{criterion:'behavior verified',unit:'unit-finish',acceptance:'AC-1'}],parentRuntime,adapters:f.adapters,sessionAdapter:{}};
+  const first=finishSessionUnit(input); await started;
+  // The second request waits for the unit lock; after release one completes and the other must fail safely.
+  const second=finishSessionUnit({...input,store:f.store,resultFields:{...resultFields,title:'Different result'}});
+  release();
+  const outcomes=await Promise.allSettled([first,second]);
+  assert.equal(outcomes.filter(item=>item.status==='fulfilled'&&item.value.state==='Closed').length,1);
+  const record=await f.store.read('unit-finish');
+  const result=await readFile(record.resultRef.path,'utf8');
+  assert.ok(record.resultRef.path.includes(createHash('sha256').update(result.slice(0,-1)).digest('hex')));
+});
+
+test('completion recovery uses new delivery and close effects after modeled reacceptance', async t => {
+  const f=await fixture(t,false);
+  const {createContinuityStore}=await import('./lib/continuity-store.mjs');
+  const {recoverGoalCompletion}=await import('./lib/completion-recover.mjs');
+  const {effectArgsDigest}=await import('./lib/approvals.mjs');
+  const {createHash}=await import('node:crypto');
+  const source=path.join(f.root,'goal.md'); await writeFile(source,'finish the goal\n');
+  const digest=`sha256:${createHash('sha256').update(await readFile(source)).digest('hex')}`;
+  const goals=createContinuityStore(f.stateRoot);
+  await goals.create({goal:{id:'recovery-goal',objective:'finish',criteria:['behavior verified'],remaining:['unit-finish'],status:'active'},policy:{runtime:'cmux',provider:'codex',account:'/account',model:'model',effort:'high',argv:['codex']},source:{path:source,digest}});
+  await f.store.update('unit-finish',r=>({...r,continuityRequired:true,continuity:{goalId:'recovery-goal'},reviewDecision:{verdict:'ship'},acceptance:[{id:'AC-1',text:'behavior verified'}],evidence:[{gate:'tests',status:'passed',exit:0,covers:['AC-1']}]}));
+  await goals.transaction('recovery-goal',g=>({...g,revision:g.revision+1,bootstraps:[{unit:'unit-finish',sessionId:'parent',incarnationId:'parent-1',cwd:f.root}]}));
+  const parentRuntime={sessionId:'parent',incarnationId:'parent-1',cwd:f.root};
+  const recipient={sessionId:'supervisor',incarnationId:'supervisor-1',cwd:f.root,executable:'worker'};
+  let closed=false,closeCalls=0,deliverCalls=0,head='head-1';
+  const session={
+    async observe(input){return input.recipient?recipient:{...parentRuntime,closable:true,worker:{incarnationId:'worker-1'}};},
+    async execute(input){
+      if(input.effect==='session.close'){closeCalls++;if(closeCalls===1) throw new Error('close receiver unavailable');closed=true;return {sessionId:'parent',incarnationId:'parent-1',closed:true};}
+      deliverCalls++; const identity={sessionId:'supervisor',incarnationId:'supervisor-1',cwd:f.root};
+      return {...identity,task:{...identity,schema:'harness.task-receipt/1',effectKey:input.key,promptDigest:taskDigest('prompt'),threadId:'thread',requestId:'request',turnId:'turn',activityId:'activity',packets:[{path:input.args.resultPath,digest:input.args.resultDigest}]}};
+    },
+    async verify(input){return input.effect==='session.close'&&closed?{status:'completed',result:{sessionId:'parent',incarnationId:'parent-1',closed:true}}:{status:'unknown'};},
+  };
+  const adapters={...f.adapters,session,git:{inspectUnit:async()=>({head,contentFingerprint:head==='head-1'?'sha256:current':'sha256:new'})}};
+  const input={stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',resultFields,goalComplete:true,goalProof:[{criterion:'behavior verified',unit:'unit-finish',acceptance:'AC-1'}],parentRuntime,returnTo:recipient,adapters,sessionAdapter:session};
+  assert.equal((await finishSessionUnit(input)).finalizePending,true);
+  assert.equal((await finalizeSessionUnit({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',adapters})).finalizePending,true);
+  await f.store.update('unit-finish',r=>({...r,state:'SelfGated',accepted:null,reviewDecision:null}));
+  const first=await f.store.read('unit-finish'), goal=await goals.read('recovery-goal');
+  head='head-2'; const target=await adapters.git.inspectUnit();
+  const request={id:'recover',expectedRevision:first.revision,expectedGoalRevision:goal.revision,reservationDigest:effectArgsDigest(goal.completionReservation),targetDigest:effectArgsDigest(target),provenance:{path:source,digest},reason:'accepted target changed'};
+  adapters.provider={verifyUserInput:async x=>({...x,verified:true}),verifyGoalCompletionRecovery:async x=>({...x,verified:true,closeNotApplied:true,oldExecutionFenced:true,ownerAlive:true,queueSettled:true,owner:x.record.sessionFinalization.owner,evidenceDigest:digest})};
+  await recoverGoalCompletion({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',request,userInputRef:'approved',adapters});
+  assert.deepEqual((await f.store.read('unit-finish')).completionRecoveries[0].prior.reviewDecision,{verdict:'ship'});
+  // Model successful independent gates/review and reacceptance of the changed target.
+  await f.store.update('unit-finish',r=>({...r,state:'Delivered',accepted:target,evidence:[{gate:'tests',status:'passed',exit:0,covers:['AC-1']}]}));
+  assert.equal((await finishSessionUnit(input)).finalizePending,true);
+  assert.equal((await finalizeSessionUnit({stateRoot:f.stateRoot,store:f.store,unit:'unit-finish',adapters})).state,'Closed');
+  assert.equal(deliverCalls,2);assert.equal(closeCalls,2);
+  const rows=await createLedgerStore(f.stateRoot).withLock('unit-finish',ledger=>ledger.read());
+  const delivered=rows.filter(row=>row.event==='intent'&&row.effect==='session.deliver');
+  const closes=rows.filter(row=>row.event==='intent'&&row.effect==='session.close');
+  assert.equal(delivered.length,2);assert.notEqual(delivered[0].key,delivered[1].key);
+  assert.equal(closes.length,2);assert.notEqual(closes[0].key,closes[1].key);
 });

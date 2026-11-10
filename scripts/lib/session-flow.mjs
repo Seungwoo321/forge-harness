@@ -4,7 +4,7 @@ import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { authorizeDelivery } from './delivery.mjs';
 import { assertDeliveryObligations, externalDeliveryObligations, verifyExternalDeliveryBoundary } from './acceptance-correction.mjs';
-import { executeEffect, createLedgerStore, sessionStartRetired } from './ledger.mjs';
+import { executeEffect, createLedgerStore, sessionEffectRetired } from './ledger.mjs';
 import { formatUnitResult, prepareSuccessor, validateHandoffPacket, writeUnitResult } from './report.mjs';
 import { prepareEffect, resolvePolicy } from './policy.mjs';
 import { effectArgsDigest } from './approvals.mjs';
@@ -15,7 +15,7 @@ import { createContinuityStore } from './continuity-store.mjs';
 import { snapshotGoal } from './continuity-snapshot.mjs';
 import { loadManagedLaunch } from './continuity-launch-io.mjs';
 import { selectExecutionPolicy } from './continuity-decision.mjs';
-import { commitGoalCompletion } from './continuity-completion.mjs';
+import { commitGoalCompletion, fenceGoalClose, fenceGoalDelivery } from './continuity-completion.mjs';
 import { prepareGoalFinish, recordGoalTransfer, commitGoalContinuation } from './continuity-finish.mjs';
 
 let temporarySequence = 0;
@@ -74,7 +74,7 @@ export async function finishSessionUnit({
   }
   const entries = await createLedgerStore(stateRoot).withLock(unit, ledger => ledger.read());
   const complete = new Set(entries.filter(row => row.event === 'result').map(row => row.seq));
-  const unresolved = entries.filter(row => row.event === 'intent' && !complete.has(row.seq) && !sessionStartRetired(entries,row));
+  const unresolved = entries.filter(row => row.event === 'intent' && !complete.has(row.seq) && !sessionEffectRetired(entries,row));
   const existingStart = entries.findLast(row => row.event === 'intent' && row.effect === 'session.start' && row.args?.unit !== unit);
   const pendingSessionStart = successor?.approved && unresolved.length === 1
     && unresolved[0].effect === 'session.start'
@@ -203,7 +203,8 @@ export async function finishSessionUnit({
   const delivered = await executeDelivery({ stateRoot, store, unit, requestedDelivery, delivery, adapters, expected, beforeEffect:retainedOwner ? observeParent : undefined });
   if (delivered.code !== 0) return delivered;
   record = await store.read(unit);
-  const handoff = pendingFiles?.handoff ?? (successor?.approved ? await writeHandoff(stateRoot, unit, handoffContent) : null);
+  const packetSlug = `${record.deliveredRework?.length ? `${unit}-rework-${record.deliveredRework.at(-1).revision}` : unit}${record.completionRecoveries?.length ? `-recovery-${record.completionRecoveries.length}` : ''}`;
+  const handoff = pendingFiles?.handoff ?? (successor?.approved ? await writeHandoff(stateRoot, packetSlug, handoffContent) : null);
   const goalSnapshot = continuity && successor?.approved ? (pendingFiles ? record.goalSnapshot : await snapshotGoal(stateRoot, continuity)) : null;
   const outcome = successor?.approved
     ? { kind: 'next', path: handoff.path, unit: lineValue(successor.unit, 'successor unit') }
@@ -212,18 +213,29 @@ export async function finishSessionUnit({
       : sameSession ? { kind: 'continue', unit: sameSession.nextUnit } : null;
   if (!outcome) throw Object.assign(new Error('session finish requires an approved successor or confirmed goal completion'), { code: 'USER_DECISION_REQUIRED' });
   const resultContent = pendingFiles?.resultContent ?? formatUnitResult({ ...resultFields, outcome });
-  const resultPath = pendingFiles?.resultPath ?? await writeUnitResult(stateRoot, unit, resultContent, { allowContinuing: Boolean(sameSession) });
+  const resultSlug = continuity && goalComplete ? `${packetSlug}-${createHash('sha256').update(resultContent).digest('hex')}` : packetSlug;
+  const resultPath = pendingFiles?.resultPath ?? await writeUnitResult(stateRoot, resultSlug, resultContent, { allowContinuing: Boolean(sameSession) });
   const resultDigest = pendingFiles?.resultDigest ?? `sha256:${createHash('sha256').update(await readFile(resultPath)).digest('hex')}`;
-  if (!pendingFiles) await store.update(unit, current => ({
+  if (!pendingFiles) await store.update(unit, async current => {
+    if (continuity && goalComplete) await createContinuityStore(stateRoot).transaction(continuity.goal.id, goal => {
+      if (goal?.revision !== continuity.revision || effectArgsDigest(goal.completionReservation ?? null) !== effectArgsDigest(continuity.completionReservation ?? null))
+        throw Object.assign(new Error('goal changed before completion was recorded'), {code:'GOAL_COMPLETING'});
+      return goal;
+    }, continuity.completionReservation ? {completionReservation:effectArgsDigest(continuity.completionReservation)} : {});
+    return ({
     ...current,
     result: resultContent,
     resultRef: { path: resultPath, digest: resultDigest },
     next: handoff ? { unit: successor.unit, handoff } : sameSession ? { unit: sameSession.nextUnit, sameSession: true } : null,
     ...(goalSnapshot ? { goalSnapshot } : {}),
-    ...(continuity && goalComplete ? { goalCompletion: { goalId: continuity.goal.id, revision: continuity.revision, proof: goalProof } } : {}),
+    ...(continuity && goalComplete ? { goalCompletion: continuity.completionReservation && current.goalCompletion
+      && continuity.completionReservation.completionDigest === effectArgsDigest(current.goalCompletion)
+      && effectArgsDigest(current.goalCompletion.proof) === effectArgsDigest(goalProof ?? null)
+      ? current.goalCompletion : { goalId: continuity.goal.id, revision: continuity.revision, proof: goalProof } } : {}),
     ...(continuity && sameSession ? { goalContinuation: { goalId:continuity.goal.id, revision:continuity.revision, nextUnit:sameSession.nextUnit, owner:parentRuntime } } : {}),
     ...(returnTo ? { sessionFinalization: { owner, ...(retainedOwner ? {retainedOwner} : {}), recipient: returnTo, resultPath, resultDigest, sessionStart: null } } : {}),
-  }));
+    });
+  });
   const prepareFinalization = async (recipient, sessionStart = null) => {
     if (!owner?.incarnationId || (!retainedOwner && owner.closable !== true) || !owner.worker?.incarnationId || owner.sessionId === recipient.sessionId) {
       return { code: 3, state: 'Delivered', resultPath, resultDigest, handoff, sessionId: recipient.sessionId, summary: 'A runtime-authorized closable worker owner is required' };
@@ -240,6 +252,10 @@ export async function finishSessionUnit({
   if (!projected.projected) return { code: 3, state: 'Delivered', resultPath, resultDigest, handoff, delivery: authorized, successor: null, ...(returnTo ? { finalizePending: true } : {}), summary: 'Final tracker projection is queued; successor session has not started' };
   if (!successor?.approved && !returnTo) {
     if (retainedOwner) await observeParent();
+    if (continuity && goalComplete) {
+      const current = await store.read(unit);
+      await fenceGoalClose({continuityStore:createContinuityStore(stateRoot),unitStore:store,unit,plan:current.sessionFinalization ?? null,completion:current.goalCompletion,action:async()=>{}});
+    }
     const closed = await commitTerminalClose({ store, unit, git: adapters.git, provider: adapters.provider, now: adapters.now });
     if (closed.state === 'Closed' && continuity && goalComplete) await commitGoalCompletion({ continuityStore: createContinuityStore(stateRoot), unitStore: store, goalId: continuity.goal.id, unit });
     if (closed.state === 'Closed' && continuity && sameSession) await commitGoalContinuation({ continuityStore:createContinuityStore(stateRoot),unitStore:store,goalId:continuity.goal.id,unit });
@@ -310,7 +326,10 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters }) 
   const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
   const ledger = createLedgerStore(stateRoot);
   const recipient = plan.recipient;
-  const deliveryArgs = { ...plan, cwd: recipient.cwd, session: recipient.sessionId, incarnation: recipient.incarnationId };
+  const recoveryEpoch = record.deliveredRework?.length || record.completionRecoveries?.length
+    ? effectArgsDigest({rework:record.deliveredRework?.at(-1)?.requestDigest ?? null,recovery:record.completionRecoveries?.at(-1)?.requestDigest ?? null}) : undefined;
+  const {deliveryReceipt, ownerRetained, closeReceipt, ...deliveryPlan} = plan;
+  const deliveryArgs = { ...deliveryPlan, ...(recoveryEpoch ? {recoveryEpoch} : {}), cwd: recipient.cwd, session: recipient.sessionId, incarnation: recipient.incarnationId };
   const pending = summary => ({ code: 3, state: record.state, summary, finalizePending: true });
   const observeCustody = async () => {
     if (plan.retainedOwner) assertAdoptedOwner(plan.retainedOwner,await adapters.session.observe({cwd:plan.owner.cwd,targetCwd:plan.owner.cwd}));
@@ -333,11 +352,12 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters }) 
   } else {
     delivered = await executeEffect({ unit, effect: 'session.deliver', args: deliveryArgs, policy,
     context: { explicitUserInstruction: true, productOwned: true }, store: ledger,
-    adapter: { now: adapters.now, async execute(input) { await observeCustody(); return validateTaskReceipt(await adapters.session.execute(input), input); },
+    adapter: { now: adapters.now, fence:action=>fenceGoalDelivery({continuityStore:createContinuityStore(stateRoot),unitStore:store,unit,plan,action}),
+      async execute(input) { await observeCustody(); return validateTaskReceipt(await adapters.session.execute(input), input); },
       async verify(input) {
         await observeCustody();
         const value = await adapters.session.verify(input);
-        if (value?.status === 'not-applied' && value.verify?.nativeRequestAbsent === true && value.verify.exactPendingComposer === true
+        if (!input.reconcileOnly && value?.status === 'not-applied' && value.verify?.nativeRequestAbsent === true && value.verify.exactPendingComposer === true
           && value.result?.sessionId === recipient.sessionId && value.result.incarnationId === recipient.incarnationId
           && input.verificationCount + 1 < policy.retry.maxPerSignature) {
           return { status: 'completed', result: validateTaskReceipt(await adapters.session.execute(input), input) };
@@ -357,24 +377,27 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters }) 
   }
   await observeCustody();
   if (plan.retainedOwner) {
+    if (record.state !== 'Closed' && record.state !== 'Stopped') await fenceGoalClose({continuityStore:createContinuityStore(stateRoot),unitStore:store,unit,plan,completion:record.goalCompletion ?? null,action:async()=>{}});
     await store.update(unit,current => ({...current,sessionFinalization:{...current.sessionFinalization,deliveryReceipt:delivered,ownerRetained:true}}));
     const current = record.state === 'Closed' || record.state === 'Stopped' ? record : await commitTerminalClose({store,unit,git:adapters.git,provider:adapters.provider,now:adapters.now,sessionStart:plan.sessionStart,sessionRetention:plan.retainedOwner});
     if (current.state === 'Closed' && current.goalCompletion) await commitGoalCompletion({continuityStore:createContinuityStore(stateRoot),unitStore:store,goalId:current.goalCompletion.goalId,unit});
     return {code:current.state === 'Closed' || current.state === 'Stopped' ? 0 : 3,state:current.state,resultPath:plan.resultPath,summary:current.state === 'Closed' || current.state === 'Stopped' ? 'Result accepted; existing user session retained' : 'Accepted target changed before terminal completion'};
   }
   const closeArgs = { owner: plan.owner, recipient, session: plan.owner.sessionId, incarnation: plan.owner.incarnationId,
-    resultDigest: plan.resultDigest, deliveryKey: delivered.key };
+    resultDigest: plan.resultDigest, deliveryKey: delivered.key, ...(recoveryEpoch ? {recoveryEpoch} : {}) };
   const validateClose = result => {
     if (result?.closed !== true || result.sessionId !== plan.owner.sessionId || result.incarnationId !== plan.owner.incarnationId) throw new Error('unverified close result');
     return result;
   };
   const closeEffect = { unit, effect: 'session.close', args: closeArgs, policy,
     context: { explicitUserInstruction: true, productOwned: true }, store: ledger,
-    adapter: { now: adapters.now, async execute(input) { await observeCustody(); return validateClose(await adapters.session.execute(input)); },
+    adapter: { now: adapters.now,
+      fence: action => fenceGoalClose({continuityStore:createContinuityStore(stateRoot),unitStore:store,unit,plan,completion:record.goalCompletion ?? null,action}),
+      async execute(input) { await observeCustody(); return validateClose(await adapters.session.execute(input)); },
       async verify(input) {
         await observeCustody();
         const result = await adapters.session.verify(input);
-        if (result?.status === 'not-applied' && result.result?.sessionId === plan.owner.sessionId
+        if (!input.reconcileOnly && result?.status === 'not-applied' && result.result?.sessionId === plan.owner.sessionId
           && result.result.incarnationId === plan.owner.incarnationId && input.verificationCount + 1 < policy.retry.maxPerSignature) {
           return { status: 'completed', result: validateClose(await adapters.session.execute(input)) };
         }

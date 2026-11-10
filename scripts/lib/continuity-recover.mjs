@@ -3,7 +3,7 @@ import {readFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import {effectArgsDigest,verifyApprovalInput} from './approvals.mjs';
 import {createContinuityStore} from './continuity-store.mjs';
-import {createLedgerStore} from './ledger.mjs';
+import {createLedgerStore,sessionEffectRetired} from './ledger.mjs';
 import {goalOwner} from './continuity-custody.mjs';
 import {loadManagedLaunch} from './continuity-launch-io.mjs';
 import {snapshotGoal} from './continuity-snapshot.mjs';
@@ -46,8 +46,8 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
       || intent.args.unit!==unit || intent.args.role!==(review?'review':'implementation') || prepareEffect('session.start',intent.args).key!==intent.key
       || rows.some(row=>row.event==='session-start-recovery' && row.key===intent.key)
       || rows.some(row=>row.event==='result' && row.key===intent.key && row.seq===intent.seq)) fail('only the latest unresolved startup can be recovered','EFFECT_UNCERTAIN');
-    if (rows.some(row=>row.event==='intent' && row!==intent && !rows.some(done=>done.event==='result' && done.seq===row.seq && done.key===row.key)
-      && !rows.some(done=>done.event==='session-start-recovery' && done.seq===row.seq && done.key===row.key))) fail('another effect remains uncertain','EFFECT_UNCERTAIN');
+    if (rows.some(row=>row.event==='intent' && row!==intent && !sessionEffectRetired(rows,row)
+      && !rows.some(done=>done.event==='result' && done.seq===row.seq && done.key===row.key))) fail('another effect remains uncertain','EFFECT_UNCERTAIN');
     const original=JSON.parse(await readFile(intent.args.goalPath,'utf8'));
     await loadManagedLaunch(intent.args);
     const before=await goals.read(record.continuity.goalId);

@@ -93,8 +93,10 @@ export function createLedgerStore(stateRoot) {
   return Object.freeze({ withLock });
 }
 
-export function sessionStartRetired(records, intent) {
-  return intent.effect === 'session.start' && records.some(row => row.event === 'session-start-recovery'
+export function sessionEffectRetired(records, intent) {
+  return records.some(row => (intent.effect === 'session.start' && row.event === 'session-start-recovery'
+    || intent.effect === 'session.deliver' && row.event === 'delivered-rework'
+    || intent.effect === 'session.close' && row.event === 'goal-completion-recovery')
     && row.seq === intent.seq && row.key === intent.key && row.intentDigest === effectArgsDigest(intent));
 }
 
@@ -179,14 +181,25 @@ export async function executeEffect({
       return {...input,submission};
     };
     const verify = async input => {
-      try { return await adapter.verify(await submissionInput(input,true)); }
+      if (ledger.assertEffect) await ledger.assertEffect({effect,key:prepared.key,phase:'verify'});
+      try { return await adapter.verify(await submissionInput({...input,...(ledger.reconcileOnly?{reconcileOnly:true}:{})},true)); }
       catch (error) { return {status:'unknown',verify:effect === 'session.deliver' || effect === 'session.start' && input.args.goalPath ? {code:error.code ?? 'SESSION_OBSERVATION_INVALID',message:error.message} : null}; }
     };
+    const perform = async ({completedOnly = false} = {}) => {
     const records = await ledger.read();
+    if (['session.deliver','session.close'].includes(effect)) {
+      const rework=records.findLast(row=>row.event==='delivered-rework');
+      const recovery=records.findLast(row=>row.event==='goal-completion-recovery');
+      const epoch=rework || recovery ? effectArgsDigest({rework:rework?.requestDigest ?? null,recovery:recovery?.requestDigest ?? null}) : undefined;
+      if (args.recoveryEpoch!==epoch) throw errorWithCode('EFFECT_RETIRED','session effect does not match its verified recovery epoch');
+    }
     const intents = records.filter(row => row.event === 'intent' && row.key === prepared.key);
     const priorIntent = intents.at(-1);
-    if (priorIntent && sessionStartRetired(records, priorIntent))
-      throw errorWithCode('EFFECT_RETIRED', 'session start was retired by verified recovery; use the reserved next attempt');
+    if (completedOnly && (!priorIntent || !records.some(row=>row.event==='result' && row.seq===priorIntent.seq
+      && row.key===priorIntent.key && (effect==='session.close' ? row.result?.closed===true : effect==='session.deliver' && row.result?.task))))
+      throw errorWithCode('EFFECT_UNCERTAIN','completed goal requires its existing exact session receipt');
+    if (priorIntent && sessionEffectRetired(records, priorIntent))
+      throw errorWithCode('EFFECT_RETIRED', 'session effect was retired by verified recovery');
     if (priorIntent) {
       if (effect === 'session.start' && effectArgsDigest(priorIntent.args) !== effectArgsDigest(args))
         throw errorWithCode('EFFECT_UNCERTAIN', 'session start requires its original complete arguments');
@@ -259,6 +272,7 @@ export async function executeEffect({
       event: 'intent', unit, seq, class: effectClass, effect, key: prepared.key,
       args, intent_at: adapter.now(), approvalRef, compensate: null,
     };
+    if (ledger.assertEffect) await ledger.assertEffect({effect,key:prepared.key,phase:'execute'});
     await ledger.append(intent);
     try {
       const result = await adapter.execute(await submissionInput({ effect, args, key: prepared.key, seq },false));
@@ -268,5 +282,7 @@ export async function executeEffect({
     } catch {
       return { status: 'uncertain', key: prepared.key, seq, verification: null };
     }
+    };
+    return typeof adapter.fence === 'function' ? adapter.fence(perform) : perform();
   });
 }

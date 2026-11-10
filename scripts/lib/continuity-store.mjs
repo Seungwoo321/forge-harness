@@ -24,13 +24,17 @@ export function createContinuityStore(stateRoot) {
       return record;
     } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   }
-  async function transaction(id, change) {
+  async function transaction(id, change, { completionReservation, reworkReservation } = {}) {
     const files = paths(id);
     await mkdir(files.directory, { recursive: true });
     const lock = await acquireContinuityLock(files.lock);
     let temporary;
     try {
       const current = await read(id);
+      if (current?.completionReservation && effectArgsDigest(current.completionReservation) !== completionReservation)
+        throw failure('GOAL_COMPLETING', 'goal completion is reserved by its finalizer');
+      if (current?.reworkReservation && current.reworkReservation.requestDigest !== reworkReservation)
+        throw failure('GOAL_REWORKING', 'goal is reserved by delivered rework');
       const next = await change(current);
       if (next === current) return current;
       if (next.schema !== 'harness.goal/1' || next.goal?.id !== id || next.revision !== (current?.revision ?? 0) + 1) throw failure('CONTINUITY_INVALID', 'invalid goal transition');

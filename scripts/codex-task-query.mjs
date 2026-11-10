@@ -26,6 +26,7 @@ try {
       if (operation !== 'goal-observe' || nativeGoal) throw readError;
       return observeUnmaterializedThread({rpc,initialization,threadId,account,sqliteRoot,cwd,readError});
     }
+    if (thread.id !== threadId || thread.cwd !== cwd) throw new Error('worker thread changed during observation');
     if (operation === 'goal') {
       return { thread: { id: thread.id, cwd: thread.cwd }, goal: nativeGoal };
     }
@@ -46,8 +47,9 @@ try {
     const goal = operation === 'goal-observe' ? nativeGoal : undefined;
     const hooks = operation === 'goal-observe' ? await rpc('hooks/list', {cwds:[cwd]}) : undefined;
     if (operation === 'queue') {
-      const accepted = turns.some(turn => turn.items.some(item => item.type === 'userMessage' && item.clientId === clientId));
-      if (!accepted && !queued.some(item => item.clientUserMessageId === clientId)) {
+      const samePrompt = parts => Array.isArray(parts) && parts.length > 0 && parts.every(part => part.type === 'text' && typeof part.text === 'string') && parts.map(part => part.text).join('') === prompt;
+      const accepted = turns.some(turn => turn.items.some(item => item.type === 'userMessage' && (item.clientId === clientId || samePrompt(item.content))));
+      if (!accepted && !queued.some(item => item.clientUserMessageId === clientId || samePrompt(item.input))) {
         await rpc('thread/queue/add', { threadId, clientUserMessageId: clientId, input: [{ type: 'text', text: prompt, text_elements: [] }] });
       }
     } else if (!['read', 'goal-observe'].includes(operation)) throw new Error('unsupported worker operation');

@@ -5,7 +5,7 @@ import { createCodexTaskTransport } from './codex-task.mjs';
 import { createClaudeTaskTransport } from './claude-task.mjs';
 import { observeTask, observeGoalTask, taskPackets, taskDigest } from './session-task.mjs';
 import { submitNativeGoal } from './goal-composer.mjs';
-import { codexComposerMatches, submitCodexComposer } from './codex-composer.mjs';
+import { codexComposerMatches, codexComposerWorking, submitCodexComposer } from './codex-composer.mjs';
 import { claudeComposerMatches, submitClaudeComposer } from './claude-composer.mjs';
 import { loadManagedLaunch } from './continuity-launch-io.mjs';
 import { effectArgsDigest } from './approvals.mjs';
@@ -308,20 +308,45 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     const packets = await taskPackets(input.args);
     const interactive = runtime === 'cmux' && ['codex','claude'].includes(path.basename(observed.executable)) && !taskTransport;
     const legacyPrompt = `Receive the completed work result and continue its authorized next action.\n${packets.map(packet => `${packet.path}\n${packet.digest}\n${packet.content}`).join('\n')}`;
-    const prompt = interactive
-      ? `Read ${input.args.resultPath} (${input.args.resultDigest}); follow its referenced handoffs.`
-      : legacyPrompt;
     const workerTransport = transportFor(observed.executable, parent.recipientEnv);
     const durable = interactive && path.basename(observed.executable) === 'codex' ? input.submission : undefined;
+    const nativeQueue = durable ? createCodexTaskTransport({command, executable:observed.executable, env:parent.recipientEnv}) : null;
+    const shortPrompt = `Read ${input.args.resultPath} (${input.args.resultDigest}); follow its referenced handoffs.`;
+    const route = 'codex-native-queue/1';
+    const keyedComposer = 'codex-keyed-composer/1';
+    const initial = durable && !durable.attempted ? await nativeQueue.observe({observed,input,prompt:shortPrompt,packets}) : null;
+    if (initial && durable.recovery) {
+      const legacy = await nativeQueue.observe({observed,input,prompt:legacyPrompt,packets});
+      if (['queued','accepted','started'].includes(legacy.state) || initial.state === 'started') throw invalid('unbound prior result request is ambiguous');
+    }
+    const active = initial && (initial.active || initial.state === 'ready' && codexComposerWorking(await invoke('cmux', ['read-screen', '--workspace', observed.workspaceId, '--surface', observed.sessionId], observed.cwd)));
+    const queueRoute = durable?.binding?.route === route || Boolean(active && (initial.state === 'ready' || initial.state === 'started' && !durable.recovery));
+    const keyed = queueRoute || durable?.binding?.route === keyedComposer || Boolean(initial?.state === 'started' && !durable.recovery);
+    const selectedRoute = queueRoute ? route : keyed ? keyedComposer : undefined;
+    const prompt = interactive ? keyed ? `${shortPrompt} [delivery ${input.key}]` : shortPrompt : legacyPrompt;
     const binding = threadId => ({runtime:observed.runtime,sessionId:observed.sessionId,incarnationId:observed.incarnationId,cwd:observed.cwd,
       executable:observed.executable,pid:observed.pid,threadId,promptDigest:taskDigest(prompt),goalDigest:input.args.goalDigest,
-      packets:packets.map(({path,digest})=>({path,digest}))});
+      packets:packets.map(({path,digest})=>({path,digest})), ...(selectedRoute ? {route:selectedRoute} : {})});
     const transport = workerTransport && { ...workerTransport, async submit(request) {
       if (interactive && path.basename(observed.executable) === 'codex') {
         if (typeof durable?.mark !== 'function' || typeof durable.confirm !== 'function' || durable.readOnly || durable.confirmed) throw invalid('durable result submission boundary is unavailable or consumed');
         const current = binding(request.fence);
         if (recipient.worker?.threadId && current.threadId !== recipient.worker.threadId
           || durable.attempted && effectArgsDigest(current) !== effectArgsDigest(durable.binding)) throw invalid('result submission owner or packets changed');
+        if (queueRoute) {
+          const verifyQueue = async () => {
+            if (JSON.stringify(await inspect(observed.sessionId, observed.cwd, observed.executable)) !== JSON.stringify(observed)) throw invalid('recipient changed before queue submission');
+            const state = await nativeQueue.observe(request);
+            if (state.state !== 'ready' || state.fence !== request.fence) throw invalid('recipient queue changed before submission');
+            await taskPackets(input.args);
+          };
+          await verifyQueue();
+          if (!durable.attempted) await durable.mark(current);
+          await verifyQueue();
+          await durable.confirm(current);
+          await verifyQueue();
+          return nativeQueue.submit(request);
+        }
         return workerTransport.submit({...request,
           beforePaste:async()=>{await durable.mark(current);},
           beforeEnter:async()=>{if (!durable.attempted) await durable.mark(current); await durable.confirm(current);},
@@ -332,7 +357,7 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       return workerTransport.submit(request);
     } };
     let result;
-    if (interactive) {
+    if (interactive && !keyed) {
       try { result = await observeTask({ transport, observed, input, prompt: legacyPrompt, packets }); }
       catch (error) { if (error.taskState !== 'ready') throw error; }
     }

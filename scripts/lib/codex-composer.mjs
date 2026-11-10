@@ -18,6 +18,13 @@ function composer(screen) {
   return nativeComposerContents(screen, 'codex');
 }
 
+export function codexComposerWorking(screen) {
+  const lines = screen.split('\n').map(line => line.trimEnd());
+  const start = lines.findLastIndex(line => /^ ?› /.test(line));
+  const footer = lines.slice(start + 1).findLast(line => /^ {2}GPT-[A-Za-z0-9.-]+ (?:low|medium|high|xhigh|max) · /.test(line));
+  return start >= 0 && /· Working ·/.test(footer ?? '');
+}
+
 export function codexComposerMatches(screen, prompt) { return composerTextMatches(composer(screen), prompt); }
 
 export async function submitCodexComposer({ prompt, read, paste, enter, verify, beforePaste = () => {}, beforeEnter = () => {} }) {

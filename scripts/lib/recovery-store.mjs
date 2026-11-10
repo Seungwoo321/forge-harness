@@ -164,7 +164,7 @@ export function createRecoveryStore(stateRoot) {
   });
 }
 
-export async function resumeUnitFailure({ store, unit, snapshot }) {
+export async function resumeUnitFailure({ store, unit, snapshot, validateStopped }) {
   if (!store || typeof store.read !== 'function' || typeof store.update !== 'function') throw new TypeError('Unit Record store is required');
   const record = await store.read(unit);
   if (!record) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
@@ -172,7 +172,14 @@ export async function resumeUnitFailure({ store, unit, snapshot }) {
   const recovery = decideResume({ record, ...snapshot });
   if (recovery.action !== 'resume') return { record, recovery };
   const updated = ['Blocked', 'Stopped'].includes(record.state)
-    ? await store.update(unit, current => {
+    ? await store.update(unit, async current => {
+      if (current.revision !== record.revision) throw Object.assign(new Error('unit changed before resume'), {code:'CONTINUITY_STALE'});
+      let observation;
+      if (current.state === 'Stopped' && current.stopReport && !current.sessionFinalization) {
+        if (!validateStopped) throw Object.assign(new Error('retained stopped owner closure is not verified'), {code:'SESSION_CLOSE_PENDING'});
+        observation = await validateStopped(current);
+        if (!observation) throw Object.assign(new Error('retained stopped owner closure is not verified'), {code:'SESSION_CLOSE_PENDING'});
+      }
       if (current.sessionFinalization?.mode === 'stopped' && !current.sessionFinalization.closeReceipt?.result?.closed)
         throw Object.assign(new Error('stopped owner closure is not verified'), {code:'SESSION_CLOSE_PENDING'});
       const resumed = { ...current, ...resumeFailure(current) };
@@ -180,6 +187,7 @@ export async function resumeUnitFailure({ store, unit, snapshot }) {
         resumed.sessionHistory = [...(current.sessionHistory ?? []), current.sessionFinalization];
         resumed.sessionFinalization = null;
       }
+      if (observation) resumed.sessionHistory = [...(current.sessionHistory ?? []), observation];
       return resumed;
     }) : record;
   const stage = ({ Scoped: 'scope', Implementing: 'implement', SelfGated: 'gates', InReview: 'review', Accepted: 'delivery', Delivering: 'delivery', Delivered: 'handoff' })[updated.state];

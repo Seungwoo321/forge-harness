@@ -11,8 +11,12 @@ const text = value => typeof value === 'string' && value.trim().length > 0;
 const sha = value => typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value ?? '');
 const unresolved = rows => rows.some(row=>row.event === 'intent' && !sessionEffectRetired(rows,row) && !rows.some(result=>result.event === 'result' && result.seq === row.seq && result.key === row.key
   && !['unknown','uncertain'].includes(result.result?.status)));
-export const goalOwner = (goal, unit) => goal?.rebindings?.findLast(item => item.unit === unit) ?? goal?.adoptions?.findLast(item => item.unit === unit)
-  ?? goal?.bootstraps?.findLast(item => item.unit === unit) ?? goal?.transfers?.find(item => item.successor === unit);
+export function goalOwner(goal, unit) {
+  const retired = new Set((goal?.stoppedOwnerRecoveries ?? []).flatMap(item => item.retiredCustodyDigests));
+  const current = item => item.unit === unit && !retired.has(effectArgsDigest(item));
+  return goal?.rebindings?.findLast(current) ?? goal?.adoptions?.findLast(current)
+    ?? goal?.bootstraps?.findLast(current) ?? goal?.transfers?.findLast(item => item.successor === unit && !retired.has(effectArgsDigest(item)));
+}
 
 // Only identity fields enter the fence; transient UI/process observation metadata is not authority.
 export function nativeOwner(owner) {
@@ -32,7 +36,7 @@ async function verifySource(source) {
     || `sha256:${createHash('sha256').update(await readFile(source.path)).digest('hex')}` !== source.digest)
     fail('canonical source changed', 'CUSTODY_STALE');
 }
-async function assertReviewsSettled({stateRoot,store,goal,unit}) {
+export async function assertReviewsSettled({stateRoot,store,goal,unit}) {
   const reviews = new Set((goal.reviews ?? []).filter(item=>item.targetUnit === unit).map(item=>item.unit));
   for (const entry of await readdir(path.join(stateRoot,'units'),{withFileTypes:true})) {
     if (!entry.isDirectory()) continue;

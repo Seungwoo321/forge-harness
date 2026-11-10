@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createContinuityStore } from './continuity-store.mjs';
 import { snapshotGoal } from './continuity-snapshot.mjs';
 import { loadManagedLaunch } from './continuity-launch-io.mjs';
-import { selectExecutionPolicy } from './continuity-decision.mjs';
+import { selectExecutionPolicy, executionPoliciesEqual } from './continuity-decision.mjs';
 import { validateHandoffPacket } from './report.mjs';
 import { createLedgerStore, executeEffect } from './ledger.mjs';
 import { validateTaskReceipt } from './session-task.mjs';
@@ -54,6 +54,9 @@ async function startLocked({stateRoot,unit,request,store,adapters,record,goal,le
   if (targetCustody?.ownership === 'existing' && (!targetRecord || targetRecord.state !== 'InReview')) throw failure('adopted review target must be InReview');
   const priorIntent = rows.findLast(row => row.event === 'intent' && row.effect === 'session.start' && row.args?.unit === unit && row.args?.attempt === attempt);
   const boundArgs = priorIntent?.args ?? (reservation?.nextArgs.attempt === attempt ? reservation.nextArgs : null);
+  const {policy} = resolvePolicy({unit:record.policyOverrides ?? {},project:record.policy ?? {}},{nonInteractive:true});
+  if (review && targetCustody?.ownership === 'existing' && !boundArgs && !executionPoliciesEqual(policy.session, goal.policy))
+    throw Object.assign(new Error('fresh review execution policy differs from the current goal'), {code:'CONTINUITY_STALE'});
   const entries = review ? goal.reviews : goal.bootstraps;
   const previousBootstrap = entries?.find(item => item.unit === unit && (item.attempt ?? 1) === attempt);
   const goalSnapshot = boundArgs ? {path:boundArgs.goalPath,digest:boundArgs.goalDigest} : previousBootstrap ? {path:previousBootstrap.goalPath,digest:previousBootstrap.goalDigest} : await snapshotGoal(stateRoot, goal);
@@ -65,7 +68,6 @@ async function startLocked({stateRoot,unit,request,store,adapters,record,goal,le
     if (boundArgs.targetDigest !== args.targetDigest || effectArgsDigest(original.goal) !== effectArgsDigest(goal.goal) || effectArgsDigest(original.source) !== effectArgsDigest(goal.source))
       throw failure('existing intent must retain its original source and target');
   }
-  const {policy} = resolvePolicy({unit:record.policyOverrides ?? {},project:record.policy ?? {}},{nonInteractive:true});
   const owner = await adapters.session.observe({cwd:request.parentRuntime?.cwd,targetCwd:request.cwd});
   const original = JSON.parse(await readFile(goalSnapshot.path,'utf8'));
   if (owner.runtime !== selectExecutionPolicy(original.policy,args.role).runtime) throw failure('configured session runtime differs from original execution policy');

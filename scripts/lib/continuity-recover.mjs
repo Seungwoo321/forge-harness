@@ -8,7 +8,7 @@ import {goalOwner} from './continuity-custody.mjs';
 import {loadManagedLaunch} from './continuity-launch-io.mjs';
 import {snapshotGoal} from './continuity-snapshot.mjs';
 import {prepareEffect} from './policy.mjs';
-import {selectExecutionPolicy} from './continuity-decision.mjs';
+import {selectExecutionPolicy,executionPoliciesEqual} from './continuity-decision.mjs';
 
 const fail = (message,code='SESSION_RECOVERY_INVALID') => {throw Object.assign(new Error(message),{code});};
 const digest = value => typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value);
@@ -59,7 +59,7 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
         || original.goal.id!==goal.goal.id || effectArgsDigest(original.source)!==effectArgsDigest(goal.source)) fail('goal changed or is not the current target','CONTINUITY_STALE');
       const owners=review?goal.reviews:goal.bootstraps;
       if (owners?.some(item=>item.unit===unit) || !review && goalOwner(goal,unit)) fail('startup already has a registered owner','SESSION_RECOVERY_CONFLICT');
-      if (effectArgsDigest(original.policy)===effectArgsDigest(goal.policy)) fail('execution policy must change before recovery');
+      if (executionPoliciesEqual(original.policy,goal.policy)) fail('execution policy must change before recovery');
       if (intent.args.targetDigest!== (targetRecord?effectArgsDigest(targetRecord):undefined)) fail('review target changed','CONTINUITY_STALE');
       await checkFile(goal.source); await checkFile(request.provenance);
       if (typeof adapters.provider?.verifySessionStartRecovery!=='function') fail('trusted terminal non-start verifier is required','ADAPTER_MISSING');

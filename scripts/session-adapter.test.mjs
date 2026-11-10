@@ -81,6 +81,13 @@ export async function createRuntimeAdapters(input){
   await goals.transaction('g',g=>({...g,revision:g.revision+1,policy:{...g.policy,account:'/new-account'},
     policyChanges:[{previous:g.policy}]}));
   assert.equal((await (await createRuntimeAdapters({...args,options:{'state-root':stateRoot},argv:['unit','finish','u']})).sessionRunner.observe({cwd:root,targetCwd:root})).worker.threadId,owner.worker.threadId);
+  // Goal recovery observes its request's actual unit using the prior custody account, never the changed goal default.
+  const recoveryFile=path.join(root,'policy-recovery.json');await writeFile(recoveryFile,JSON.stringify({unit:'u',owner}));
+  const recovery=await createRuntimeAdapters({...args,options:{'state-root':stateRoot,request:recoveryFile},argv:['goal','policy-recover','g']});
+  const observed=await recovery.sessionRunner.observe({cwd:root,targetCwd:root});
+  assert.equal(observed.worker.threadId,owner.worker.threadId);assert.equal(observed.closable,false);
+  await writeFile(recoveryFile,JSON.stringify({unit:'../g',owner}));
+  await assert.rejects(createRuntimeAdapters({...args,options:{'state-root':stateRoot,request:recoveryFile},argv:['goal','policy-recover','g']}),/state root and unit/);
 });
 
 test('packaged startup observer uses the original account after a policy refresh',async t=>{

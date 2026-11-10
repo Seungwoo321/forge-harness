@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';
+import {mkdtemp,readFile,writeFile,rm,mkdir} from 'node:fs/promises';
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
 import {createAdapters} from './lib/adapters.mjs';
@@ -95,6 +97,29 @@ test('AC-1 AC-2 active recipient receives one native queue request and closes on
   f.state.native='started';assert.equal((await f.run()).code,3);assert.equal(f.state.closes,0);
   f.state.packetRead=true;assert.equal((await f.run()).code,0);assert.equal(f.state.closes,1);
   const rows=await f.rows();for(const event of ['intent','submission','confirmation','result'])assert.equal(rows.filter(r=>r.seq===2&&r.event===event).length,1,event);
+});
+
+test('AC-4 guarded owner yields for its original queued review and closes only the reviewer after a real read',async t=>{
+  const f=await fixture(t);f.state.active=true;f.state.packetRead=false;
+  assert.equal((await f.run()).code,3);assert.equal(f.state.queues,1);
+  const store=createUnitStateStore(f.root),review=await store.read('review'),plan=review.sessionFinalization;
+  await store.update('review',r=>({...r,targetUnit:'current',continuity:{goalId:'g'}}));
+  await store.create({schema:'harness.unit/1',unit:'current',kind:'impl',state:'InReview',continuity:{goalId:'g'}});
+  await mkdir(path.join(f.root,'goals/g'),{recursive:true});
+  await writeFile(path.join(f.root,'goals/g/goal.json'),JSON.stringify({schema:'harness.goal/1',revision:1,goal:{id:'g',objective:'Receive review',criteria:['review'],status:'active',remaining:['current']},
+    policy:{runtime:'cmux',provider:'codex',account:process.env.CODEX_HOME??process.env.HOME+'/.codex',model:'model',effort:'high',argv:['codex']},
+    bootstraps:[{unit:'current',...plan.recipient}],reviews:[{unit:'review',targetUnit:'current',...plan.owner}]}));
+  const hook=fileURLToPath(new URL('./continuity-stop-hook.mjs',import.meta.url));
+  const stopped=spawnSync(process.execPath,[hook],{encoding:'utf8',input:'{}',env:{...process.env,
+    FORGE_CONTINUITY_ROOT:f.root,FORGE_CONTINUITY_GOAL:'g',FORGE_CONTINUITY_UNIT:'current'}});
+  assert.equal(stopped.status,0,stopped.stderr);const output=JSON.parse(stopped.stdout);
+  assert.equal(output.decision,undefined);assert.match(output.systemMessage,/Yield this turn/);
+  assert.equal(f.state.closes,0);assert.equal((await store.read('current')).state,'InReview');
+  f.state.active=false;f.state.native='started';assert.equal((await f.run()).code,3);assert.equal(f.state.closes,0);
+  f.state.packetRead=true;assert.equal((await f.run()).code,0);assert.equal(f.state.closes,1);
+  assert.equal(f.state.queues,1);assert.equal(f.state.pastes,0);assert.equal(f.state.returns,0);
+  const rows=await f.rows();for(const event of ['intent','submission','confirmation','result'])assert.equal(rows.filter(r=>r.seq===2&&r.event===event).length,1,event);
+  assert.equal((await store.read('current')).state,'InReview');
 });
 
 test('AC-1 AC-2 Working footer queues once when an independent history observer reports the active turn interrupted',async t=>{

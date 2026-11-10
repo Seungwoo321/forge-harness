@@ -25,7 +25,7 @@ async function fixture(t,{pending=false,seed=true,expandedFooter=false}={}) {
   const observations=Array.from({length:45},()=>({event:'verification',unit:'review',seq:2,key,status:'unknown',verify:{code:'SESSION_TASK_UNVERIFIED',message:'supported Codex composer is unavailable'}}));
   await writeFile(ledgerPath,seed?[intent,...observations].map(JSON.stringify).join('\n')+'\n':'');
   const prompt=`Read ${resultPath} (${resultDigest}); follow its referenced handoffs.`;
-  const state={draft:pending?prompt:'Ask Codex to do anything',mode:'normal',native:'ready',thread:receiverThread,pastes:0,returns:0,closes:0,closed:false,packetRead:true,footerStatus:'Ready'};
+  const state={draft:pending?prompt:'Ask Codex to do anything',mode:'normal',native:'ready',thread:receiverThread,pastes:0,returns:0,queues:0,active:false,turnStatus:'inProgress',closes:0,closed:false,packetRead:true,footerStatus:'Ready'};
   const rows=async()=>(await readFile(ledgerPath,'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
   const command=async(binary,argv,options)=>{
     const records=await rows(),marked=records.some(r=>r.event==='submission'),confirmed=records.some(r=>r.event==='confirmation');
@@ -44,9 +44,17 @@ async function fixture(t,{pending=false,seed=true,expandedFooter=false}={}) {
     else if(binary==='cmux'&&argv.includes('terminal.viewport'))stdout=JSON.stringify({surface_id:'receiver',columns:44});
     else if(binary==='cmux'&&argv.includes('read-screen')){const text=state.draft.match(/.{1,42}/gu)??[''];stdout=`› ${text.join('\n  ')}\n\n`+(expandedFooter ? `  GPT-6.1-Sol high · ~/work/product · fix/change · ${state.footerStatus} ·…  ⚠ 1 warning · f2 to view\n` : '  Model high · ~/work…\n  ? for shortcuts\n');}
     else if(binary==='cmux'&&argv.includes('surface.send_text')){assert.equal(marked,true);assert.equal(confirmed,false);state.draft=JSON.parse(argv.at(-1)).text;state.pastes++;if(state.mode==='crash-paste')throw Error('paste acknowledgement lost');stdout='{}';}
-    else if(binary==='cmux'&&argv.includes('send-key')){assert.equal(argv.at(-1),'Return');assert.ok(marked&&confirmed);state.returns++;state.native=state.mode==='queued'?'queued':state.mode==='accepted'?'accepted':'started';if(state.mode==='crash-return')throw Error('Return acknowledgement lost');stdout='OK';}
+    else if(binary==='cmux'&&argv.includes('send-key')){assert.equal(argv.at(-1),'Return');assert.ok(marked&&confirmed);state.returns++;state.deliveredPrompt=state.draft;state.native=state.mode==='queued'?'queued':state.mode==='accepted'?'accepted':'started';if(state.mode==='crash-return')throw Error('Return acknowledgement lost');stdout='OK';}
     else if(binary==='cmux'&&argv.includes('close-surface')){assert.equal(argv.at(-1),'owner');state.closes++;state.closed=true;stdout='OK';}
-    else if(binary===process.execPath){const request=JSON.parse(options.input);stdout=JSON.stringify({thread:{id:request.threadId,cwd:root},queued:state.native==='queued'?[{clientUserMessageId:request.clientId}]:[],turns:['started','accepted'].includes(state.native)?[{id:'turn',status:'completed',items:[{type:'userMessage',id:'request',content:[{type:'text',text:prompt}]},...(state.native==='started'?[{type:'agentMessage',id:'response'},...(state.packetRead?[{type:'commandExecution',id:'read',status:'completed',exitCode:0,cwd:root,commandActions:[{type:'read',path:resultPath}],aggregatedOutput:content}]:[])]:[])]}]:[]});}
+    else if(binary===process.execPath){
+      const request=JSON.parse(options.input);
+      if(request.operation==='queue'){assert.ok(marked&&confirmed);state.queues++;state.deliveredPrompt=request.prompt;state.native='queued';if(state.mode==='crash-queue')throw Error('queue acknowledgement lost');}
+      const legacy=`Receive the completed work result and continue its authorized next action.\n${handoffPath}\n${handoffDigest}\nhandoff\n\n${resultPath}\n${resultDigest}\n${content}`;
+      const prior=state.priorShort?[{id:'prior',status:'completed',items:[{type:'userMessage',id:'old',content:[{type:'text',text:prompt}]},{type:'agentMessage',id:'old-response'},{type:'commandExecution',status:'completed',exitCode:0,cwd:root,commandActions:[{type:'read',path:resultPath}],aggregatedOutput:content}]}]:[];
+      const previousLegacy=['accepted','started'].includes(state.priorLegacy)?[{id:'legacy',status:'completed',items:[{type:'userMessage',id:'legacy-request',content:[{type:'text',text:legacy}]},...(state.priorLegacy==='started'?[{type:'agentMessage',id:'legacy-response'}]:[])]}]:[];
+      const current=['started','accepted'].includes(state.native)?[{id:'turn',status:'completed',items:[{type:'userMessage',id:'request',content:[{type:'text',text:state.deliveredPrompt??prompt}]},...(state.native==='started'?[{type:'agentMessage',id:'response'},...(state.packetRead?[{type:'commandExecution',id:'read',status:'completed',exitCode:0,cwd:root,commandActions:[{type:'read',path:resultPath}],aggregatedOutput:content}]:[])]:[])]}]:[];
+      stdout=JSON.stringify({thread:{id:request.threadId,cwd:root},queued:state.native==='queued'?[{clientUserMessageId:request.clientId}]:state.priorLegacy==='queued'?[{input:[{type:'text',text:legacy}]}]:[],turns:[...prior,...previousLegacy,...current,...(state.active?[{id:'active',status:state.turnStatus,items:[]}]:[])]});
+    }
     else throw Error(`unexpected native command ${binary} ${argv}`);
     return {exitCode:0,stdout};
   };
@@ -65,6 +73,77 @@ test('public finalize resumes an unsubmitted empty delivery on its original seq 
   const rows=await f.rows();assert.deepEqual(rows.find(r=>r.event==='intent'&&r.seq===2),f.intent);
   for(const event of ['intent','submission','confirmation','result'])assert.equal(rows.filter(r=>r.seq===2&&r.event===event).length,1,event);
   assert.equal(rows.filter(r=>r.seq===2&&r.event==='verification'&&r.status==='unknown').length,45);
+});
+
+test('AC-1 AC-2 active recipient receives one native queue request and closes only after reading the packet',async t=>{
+  const f=await fixture(t);f.state.active=true;f.state.packetRead=false;
+  assert.equal((await f.run()).code,3);assert.equal((await f.run()).code,3);
+  assert.match(f.state.deliveredPrompt,/\[delivery sha256:[a-f0-9]{64}\]$/);
+  assert.equal(f.state.queues,1);assert.equal(f.state.pastes,0);assert.equal(f.state.returns,0);assert.equal(f.state.closes,0);
+  f.state.native='started';assert.equal((await f.run()).code,3);assert.equal(f.state.closes,0);
+  f.state.packetRead=true;assert.equal((await f.run()).code,0);assert.equal(f.state.closes,1);
+  const rows=await f.rows();for(const event of ['intent','submission','confirmation','result'])assert.equal(rows.filter(r=>r.seq===2&&r.event===event).length,1,event);
+});
+
+test('AC-1 AC-2 Working footer queues once when an independent history observer reports the active turn interrupted',async t=>{
+  const f=await fixture(t,{expandedFooter:true});f.state.active=true;f.state.turnStatus='interrupted';f.state.footerStatus='Working';
+  assert.equal((await f.run()).code,3);assert.equal((await f.run()).code,3);
+  assert.equal(f.state.queues,1);assert.equal(f.state.pastes,0);assert.equal(f.state.returns,0);assert.equal(f.state.closes,0);
+  assert.match(f.state.deliveredPrompt,/\[delivery sha256:[a-f0-9]{64}\]$/);
+  f.state.native='started';f.state.packetRead=false;assert.equal((await f.run()).code,3);assert.equal(f.state.closes,0);
+  f.state.packetRead=true;assert.equal((await f.run()).code,0);assert.equal(f.state.closes,1);
+  const rows=await f.rows();for(const event of ['intent','submission','confirmation','result'])assert.equal(rows.filter(r=>r.seq===2&&r.event===event).length,1,event);
+});
+
+test('AC-3 a prior short reference cannot satisfy a new active queue effect',async t=>{
+  const f=await fixture(t,{seed:false});f.state.active=true;f.state.priorShort=true;
+  assert.equal((await f.run()).code,3);assert.equal(f.state.queues,1);assert.equal(f.state.closes,0);
+  assert.match(f.state.deliveredPrompt,/\[delivery sha256:[a-f0-9]{64}\]$/);
+  f.state.native='started';assert.equal((await f.run()).code,0);assert.equal(f.state.closes,1);
+});
+
+test('AC-3 ambiguous older unbound short reference remains observation-only',async t=>{
+  const f=await fixture(t);f.state.active=true;f.state.priorShort=true;
+  assert.equal((await f.run()).code,3);assert.equal(f.state.queues,0);assert.equal(f.state.pastes,0);assert.equal(f.state.closes,0);
+});
+
+test('AC-3 an old short receipt cannot complete a fresh idle effect',async t=>{
+  const f=await fixture(t,{seed:false});f.state.priorShort=true;f.state.packetRead=false;
+  assert.equal((await f.run()).code,3);assert.equal(f.state.pastes,1);assert.equal(f.state.closes,0);
+  assert.match(f.state.deliveredPrompt,/\[delivery sha256:[a-f0-9]{64}\]$/);
+  f.state.packetRead=true;assert.equal((await f.run()).code,0);assert.equal(f.state.closes,1);
+});
+
+test('AC-3 ambiguous legacy messages never authorize a second active delivery',async t=>{
+  for(const previous of ['queued','accepted','started'])await t.test(previous,async t=>{
+    const f=await fixture(t);f.state.active=true;f.state.priorLegacy=previous;
+    assert.equal((await f.run()).code,3);assert.equal(f.state.queues,0);assert.equal(f.state.pastes,0);assert.equal(f.state.closes,0);
+  });
+});
+
+test('AC-3 a lost queue acknowledgement never submits the result twice',async t=>{
+  const f=await fixture(t);f.state.active=true;f.state.mode='crash-queue';assert.equal((await f.run()).code,3);
+  f.state.mode='normal';assert.equal((await f.run()).code,3);assert.equal(f.state.queues,1);assert.equal(f.state.closes,0);
+  f.state.native='started';assert.equal((await f.run()).code,0);assert.equal(f.state.queues,1);assert.equal(f.state.closes,1);
+});
+
+test('AC-3 a queue route recovers an unconfirmed checkpoint once but never repeats a consumed confirmation',async t=>{
+  for(const mode of ['crash-submission','crash-confirmation'])await t.test(mode,async t=>{
+    const f=await fixture(t);f.state.active=true;f.state.mode=mode;assert.equal((await f.run()).code,3);
+    f.state.mode='normal';assert.equal((await f.run()).code,3);
+    assert.equal(f.state.queues,mode==='crash-submission'?1:0);assert.equal(f.state.pastes,0);assert.equal(f.state.closes,0);
+    const rows=await f.rows();assert.equal(rows.filter(r=>r.event==='submission').length,1);assert.equal(rows.filter(r=>r.event==='confirmation').length,1);
+    assert.equal(rows.find(r=>r.event==='submission').binding.route,'codex-native-queue/1');
+    if(mode==='crash-submission'){f.state.native='started';assert.equal((await f.run()).code,0);assert.equal(f.state.queues,1);}
+  });
+});
+
+test('AC-3 a changed packet or native queue at either durable boundary prevents active-recipient submission',async t=>{
+  for(const boundary of ['submission','confirmation'])for(const change of ['packet','native'])await t.test(boundary+'-'+change,async t=>{
+    const f=await fixture(t);f.state.active=true;f.state.mode=`boundary-${boundary}-${change}`;
+    assert.equal((await f.run()).code,3);f.state.mode='normal';assert.notEqual((await f.run()).code,0);
+    assert.equal(f.state.queues,0);assert.equal(f.state.pastes,0);assert.equal(f.state.closes,0);
+  });
 });
 
 test('a fresh public delivery also records both durable boundaries before native effects',async t=>{
@@ -108,16 +187,14 @@ test('foreign draft, changed packet and changed native thread cannot resume a co
 test('queued, accepted and started delivery remain observation-only; native packet read is required',async t=>{
   for(const native of ['queued','accepted','started'])await t.test(native,async t=>{
     const f=await fixture(t);f.state.native=native;f.state.packetRead=false;assert.equal((await f.run()).code,3);assert.equal(f.state.pastes,0);assert.equal(f.state.returns,0);assert.equal(f.state.closes,0);
-    if(native==='started'){f.state.packetRead=true;assert.equal((await f.run()).code,0);assert.equal(f.state.closes,1);}
+    if(native==='started'){f.state.packetRead=true;assert.equal((await f.run()).code,3);assert.equal(f.state.closes,0);}
   });
 });
 
 
-test('public finalize recognizes expanded hintless Ready on the original seq2 and refuses Working or nonempty drafts',async t=>{
+test('public finalize recognizes expanded hintless Ready on the original seq2 and refuses unknown status or nonempty drafts',async t=>{
   const f=await fixture(t,{expandedFooter:true});
-  for(const status of ['Working','Unknown']){
-    f.state.footerStatus=status;assert.equal((await f.run()).code,3);assert.equal(f.state.pastes,0);assert.equal(f.state.returns,0);
-  }
+  f.state.footerStatus='Unknown';assert.equal((await f.run()).code,3);assert.equal(f.state.pastes,0);assert.equal(f.state.returns,0);
   f.state.footerStatus='Ready';f.state.draft='foreign draft';assert.equal((await f.run()).code,3);assert.equal(f.state.pastes,0);
   f.state.draft='Ask Codex to do anything';assert.equal((await f.run()).code,0);assert.equal((await f.run()).code,0);
   assert.equal(f.state.pastes,1);assert.equal(f.state.returns,1);assert.equal(f.state.closes,1);

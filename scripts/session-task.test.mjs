@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { observeTask, observeGoalTask, taskDigest, validateTaskReceipt } from './lib/session-task.mjs';
 import { createCodexTaskTransport } from './lib/codex-task.mjs';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createAdapters } from './lib/adapters.mjs';
@@ -52,6 +52,7 @@ test('native goal submission is never repeated after an uncertain result', async
 test('native metadata selects the unique primary thread among child locks and rejects ambiguity', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'thread-identity-'));
   t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(path.join(root, 'package.json'), '{"type":"commonjs"}');
   const executable = path.join(root, 'codex');
   await writeFile(executable, `#!/usr/bin/env node
 const rl=require('node:readline').createInterface({input:process.stdin});
@@ -104,6 +105,57 @@ test('conditional delivery rejects a different ready native fence observed durin
   transport.observe = async()=>({state:'ready',fence:'replacement-thread'});
   await assert.rejects(transport.submit({observed,input:{...input,effect:'session.deliver'},fence:threadId}),/fence changed/);
   assert.equal(sends,0);
+});
+
+test('AC-3 native queue refuses thread ownership drift before queue RPC', async () => {
+  const original='00000000-0000-0000-0000-000000000001',replacement='00000000-0000-0000-0000-000000000002';
+  let checks=0,queries=0;
+  const transport=createCodexTaskTransport({command:async binary=>{
+    if(binary==='lsof') return {exitCode:0,stdout:`n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${++checks===1?original:replacement}.lock\n`};
+    queries++;throw Error('queue RPC must not run');
+  }});
+  await assert.rejects(transport.submit({observed,input:{...input,effect:'session.deliver'},fence:original}),/fence changed/);
+  assert.equal(queries,0);
+});
+
+test('AC-3 native queue checks thread metadata before any queue mutation', async t => {
+  const root=await mkdtemp(path.join(os.tmpdir(),'queue-metadata-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  await writeFile(path.join(root,'package.json'),'{"type":"commonjs"}');
+  const executable=path.join(root,'codex'),marker=path.join(root,'mutations');await writeFile(marker,'');
+  for(const field of ['id','cwd']) {
+    await writeFile(executable,`#!/usr/bin/env node
+const fs=require('node:fs'),rl=require('node:readline').createInterface({input:process.stdin});
+rl.on('line',line=>{const r=JSON.parse(line);if(!Object.hasOwn(r,'id'))return;
+if(r.method==='thread/queue/add')fs.appendFileSync(${JSON.stringify(marker)},'add\\n');
+const thread={id:${JSON.stringify(field==='id'?'other':'thread')},cwd:${JSON.stringify(field==='cwd'?'/other':observed.cwd)}};
+const result=r.method==='initialize'?{}:r.method==='thread/read'?{thread}:{data:[],nextCursor:null};
+process.stdout.write(JSON.stringify({id:r.id,result})+'\\n');});
+`,{mode:0o755});
+    const result=await createAdapters().command(process.execPath,[path.resolve('scripts/codex-task-query.mjs')],{cwd:root,
+      input:JSON.stringify({operation:'queue',executable,threadId:'thread',cwd:observed.cwd,prompt:'result',clientId:'effect'})});
+    assert.notEqual(result.exitCode,0);assert.match(result.stderr,/thread changed/);assert.equal(await readFile(marker,'utf8'),'');
+  }
+});
+
+test('AC-3 native queue rechecks exact keyed requests before adding', async t => {
+  const root=await mkdtemp(path.join(os.tmpdir(),'queue-recheck-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  await writeFile(path.join(root,'package.json'),'{"type":"commonjs"}');
+  const executable=path.join(root,'codex'),marker=path.join(root,'mutations');await writeFile(marker,'');
+  for(const state of ['accepted','queued']) {
+    await writeFile(executable,`#!/usr/bin/env node
+const fs=require('node:fs'),rl=require('node:readline').createInterface({input:process.stdin});
+rl.on('line',line=>{const r=JSON.parse(line);if(!Object.hasOwn(r,'id'))return;
+if(r.method==='thread/queue/add')fs.appendFileSync(${JSON.stringify(marker)},'add\\n');
+const prior=[{type:'text',text:'effect-keyed result'}],state=${JSON.stringify(state)};
+let result=r.method==='initialize'?{}:r.method==='thread/read'?{thread:{id:'thread',cwd:${JSON.stringify(observed.cwd)}}}:{data:[],nextCursor:null};
+if(r.method==='thread/turns/list'&&state==='accepted')result.data=[{items:[{type:'userMessage',content:prior}]}];
+if(r.method==='thread/queue/list'&&state==='queued')result.data=[{input:prior}];
+process.stdout.write(JSON.stringify({id:r.id,result})+'\\n');});
+`,{mode:0o755});
+    const result=await createAdapters().command(process.execPath,[path.resolve('scripts/codex-task-query.mjs')],{cwd:root,
+      input:JSON.stringify({operation:'queue',executable,threadId:'thread',cwd:observed.cwd,prompt:'effect-keyed result',clientId:'effect'})});
+    assert.equal(result.exitCode,0,result.stderr);assert.equal(await readFile(marker,'utf8'),'');
+  }
 });
 
 test('goal activity must follow native goal creation and needs no ordinary user message', async () => {
@@ -304,7 +356,7 @@ test('native Codex evidence binds writer lock, exact prompt and actual packet re
     return { exitCode: 0, stdout: JSON.stringify({ thread: { id: threadId, cwd: observed.cwd },
       queued: mode === 'queued' ? [{ clientUserMessageId: input.key, input: [{ type: 'text', text: 'prompt' }] }] : [],
       turns: mode === 'queued' ? [] : [{ id: 'turn', status: turnStatus, items: [
-        { type: 'userMessage', id: 'request', content: [{ type: 'text', text: mode === 'wrong-prompt' ? 'other' : 'prompt' }] },
+        { type: 'userMessage', id: 'request', content: [{ type: 'text', text: mode === 'wrong-prompt' ? 'other' : 'prompt' }, ...(mode === 'foreign-extra' ? [{ type:'image',url:'foreign' }] : [])] },
         { type: 'commandExecution', id: 'tool', status: 'completed', exitCode: 0, cwd: '/work',
           commandActions: mode.startsWith('checksum') ? [{ type: 'unknown' }] : [{ type: 'read', path: packets[0].path }],
           aggregatedOutput: mode === 'wrong-packet' ? 'old packet' : packets[0].content
@@ -321,7 +373,7 @@ test('native Codex evidence binds writer lock, exact prompt and actual packet re
   assert.equal((await observeTask(request)).task.threadId, threadId);
   mode = 'checksum';
   assert.equal((await observeTask(request)).task.packets[0].digest, packets[0].digest);
-  for (const value of ['queued', 'wrong-prompt', 'wrong-packet', 'checksum-wrong-file', 'appended', 'wrong-checksum-read']) {
+  for (const value of ['queued', 'wrong-prompt', 'foreign-extra', 'wrong-packet', 'checksum-wrong-file', 'appended', 'wrong-checksum-read']) {
     mode = value;
     await assert.rejects(observeTask(request), { code: 'SESSION_TASK_UNVERIFIED' });
   }

@@ -93,3 +93,7 @@ merge 전달은 시작할 때 원장의 기존 intent 경계를 고정한다. �
 Codex 0.167.0의 첫 입력 전 rollout은 아직 파일이 아닐 수 있다. 이 경우 별도 observer의 정확한 미로드 오류, 실제 worker가 연 queue SQLite root의 읽기 전용 queue/goal 검증, 원 managed 기동·동일 native 신원·미제출 intent, 전체 fresh Ready 화면을 결합한 `unmaterialized` 상태만 최초 입력 후보가 된다. 일반 조회 실패는 empty가 아니며 실제 목표·패킷·착수·훅 검증을 대체하지 않는다.
 
 사전 Return composer 실패가 기록된 동일 submission은 전체 정확한 pending draft만 재입력 없이 재개한다. 알려진 첫 burst 슬래시 소실은 기본 입력 정책까지 검증한 별도 `draft-repair` 경계로만 정정하며, 검증된 raw03 한 번으로 전체 nonempty textarea를 취소하고 실제 empty를 관찰한다. 성공 응답만으로 키 전달·전체 clear를 추정하지 않는다. 구 경로의 실패한 clear는 같은 binding·정확한 손상 원문·실패 기록을 검증한 단일 `draft-clear-recovery` 경계로만 재개하고 원 marker를 보존한다. 최초 인자가 실제 화면에 정착한 뒤 나머지를 입력하며, `confirmation` 경계를 동기화한 뒤 Return을 한 번만 보낸다. 새 경로의 불확실한 clear·Return은 반복하지 않는다.
+
+실행 중인 Codex 수신자에게 결과를 반환할 때는 실제 native thread의 활성 턴 또는 검증된 terminal의 지원되는 Working 상태 행을 확인하고 원 intent의 submission·confirmation 경계 뒤 native queue에 한 번 전달한다. 경계마다 동일 수신자·thread·대기열·불변 패킷을 다시 확인한다. 전송 후에는 실제 메시지 처리와 결과 패킷 읽기가 확인될 때만 수신으로 판정한다. 턴이 유휴이면 기존 composer 계약을 유지한다.
+
+기존 전달 의도의 제출 기록이 없고 과거 동일 문구의 실제 요청이 관찰되면 서로 다른 효과를 구별할 수 없으므로 자동 재전송하거나 수신 완료로 판정하지 않는다. queue 경로의 제출 경계만 기록되고 confirmation은 없는 경우에는 동일 route·thread·패킷과 요청 부재를 다시 검증한 뒤 confirmation부터 이어간다.

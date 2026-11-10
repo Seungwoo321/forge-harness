@@ -435,6 +435,35 @@ test('only a fresh launch may use missing Claude startup history; positive pendi
 
 const expandedFooterScreen = text => `› ${text.replaceAll('\n','\n  ')}\n\n  GPT-6.1-Sol high · ~/work/product · fix/change · Ready ·…  ⚠ 1 warning · f2 to view\n`;
 
+const warningFooterScreen = text => `› ${text.replaceAll('\n','\n  ')}\n\n  GPT-6.1-Sol high · ~/repo/app · chore/maintenance-policy · Ready · Context 45% left · we…\n                                                                 ⚠ 6 warnings · f2 to view\n`;
+
+test('observed Ready context footer and separate warning row preserve an already pasted wrapped reference',async()=>{
+  const prompt=`Read /repo/result.md (sha256:${'a'.repeat(64)}); follow its referenced handoffs.`;
+  const view=warningFooterScreen(prompt.replace('referenced handoffs.','referenced\nhandoffs.'));
+  assert.equal(codexComposerMatches(view,prompt),true);
+  assert.equal(codexComposerMatches(view,prompt.replace('result.md','other.md')),false);
+  let pastes=0,enters=0;
+  await submitCodexComposer({prompt,read:async()=>view,verify:async()=>{},paste:async()=>{pastes++;},enter:async()=>{enters++;}});
+  assert.equal(pastes,0);assert.equal(enters,1);
+});
+
+test('separate warning footer refuses changed drafts and ambiguous or unsupported terminal suffixes',async()=>{
+  const prompt='Read /repo/result.md (sha256:exact)';
+  for(const view of [warningFooterScreen('human draft'),
+    ...['Working','Unknown'].map(status=>warningFooterScreen(prompt).replace('Ready',status)),
+    warningFooterScreen(prompt).replace('Context 45%','Context 145%'),
+    warningFooterScreen(prompt).replace('we…','unrecognized'),
+    warningFooterScreen(prompt)+'foreign tail',warningFooterScreen(prompt)+'  ⚠ 6 warnings · f2 to view',
+    warningFooterScreen(warningFooterScreen(prompt)),
+    warningFooterScreen(prompt)+'› foreign draft',
+    warningFooterScreen('foreign prefix\n› '+prompt),
+    warningFooterScreen(prompt+'\nmodel · Ready · context\nforeign tail')]){
+    let mutations=0;
+    await assert.rejects(submitCodexComposer({prompt,read:async()=>view,verify:async()=>{},paste:async()=>{mutations++;},enter:async()=>{mutations++;}}));
+    assert.equal(mutations,0);
+  }
+});
+
 test('the observed expanded Ready footer needs no hint row and preserves the complete wrapped draft',async()=>{
   const prompt='Read /work/result (sha256:exact); follow its referenced handoffs.';
   assert.equal(codexComposerMatches(expandedFooterScreen(prompt),prompt),true);

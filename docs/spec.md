@@ -672,7 +672,7 @@ E2 이상의 부작용은 수행 전에 의도를, 수행 후 결과를 원장�
 4. 마지막 Evidence Record 의 fingerprint 와 현재 입력 fingerprint 비교
 5. 작업관리 도구 (투영이므로 불일치하면 갱신 대상)
 
-fingerprint 가 달라진 증거는 무효이고 해당 게이트부터 다시 실행한다. 재개 단계는 `blockedFrom`(Blocked) 또는 `stoppedFrom`(Stopped)이며, 항상 구현 단계로 돌아가지 않는다.
+fingerprint 가 달라진 증거는 무효이고 해당 게이트부터 다시 실행한다. 재개 단계는 `blockedFrom`(Blocked) 또는 `stoppedFrom`(Stopped)이며, 항상 구현 단계로 돌아가지 않는다. `rerun-gate`·`revalidate`가 필요한 미전달 변경 단위의 원 단계가 SelfGated·InReview·Accepted이면, 제어면은 효과·Git/체크포인트·전체 증거 지문·작업관리 투영을 확인하고 같은 단위를 원 단계로 복구한 뒤 SelfGated로 전환한다. 중단 소유자의 권한·종료와 revision 검증은 전환 전에 반복한다. 원 증거는 보존하고 무효화 행은 stale·빈 coverage로 추가하며, 이전 수용·리뷰는 resumeRevalidations에 보존하고 현재 수용·리뷰를 해제한다. 새 수용은 현재 입력의 필수 게이트와 정책상 독립 리뷰를 요구한다. Scoped·Implementing은 증거를 무효화하고 원 단계의 미완료 작업을 재개하며 정상 제출 후 필수 게이트를 실행한다. Delivered·Closed·호환되지 않는 단위 종류·전달 계획·전달 결과·충돌하는 종료가 있으면 이 경로로 재개하지 않는다. 독립 증거 rerun의 동일 입력 계약은 바꾸지 않는다([ADR 0036](adr/0036-executable-resume-revalidation.md)).
 
 ### 8.9 중단 보고
 

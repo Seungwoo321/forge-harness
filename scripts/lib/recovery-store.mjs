@@ -3,6 +3,7 @@ import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { createCauseKey, decideFailure, finishResolver, reserveRetry, resumeFailure, transitionForFailure } from './classify.mjs';
 import { decideResume } from './resume.mjs';
+import { transitionRecord } from './unit-state.mjs';
 
 function digest(value) {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
@@ -169,9 +170,14 @@ export async function resumeUnitFailure({ store, unit, snapshot, validateStopped
   const record = await store.read(unit);
   if (!record) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
   if (!snapshot || typeof snapshot !== 'object') throw new TypeError('resume snapshot is required');
-  const recovery = decideResume({ record, ...snapshot });
-  if (recovery.action !== 'resume') return { record, recovery };
-  const updated = ['Blocked', 'Stopped'].includes(record.state)
+  const recovery = decideResume({ ...snapshot, record, evidence: record.evidence ?? [] });
+  const revalidate = ['rerun-gate', 'revalidate'].includes(recovery.action);
+  if (recovery.action !== 'resume' && !revalidate) return { record, recovery };
+  const beforeGates = ['Scoped', 'Implementing'].includes(recovery.resumeState) && !record.accepted;
+  if (revalidate && (!(beforeGates || ['SelfGated', 'InReview', 'Accepted'].includes(recovery.resumeState))
+    || ['review', 'ops'].includes(record.kind) || record.deliveryPlan || record.deliveryResult
+    || record.sessionFinalization && record.sessionFinalization.mode !== 'stopped')) return { record, recovery };
+  const updated = revalidate || ['Blocked', 'Stopped'].includes(record.state)
     ? await store.update(unit, async current => {
       if (current.revision !== record.revision) throw Object.assign(new Error('unit changed before resume'), {code:'CONTINUITY_STALE'});
       let observation;
@@ -182,12 +188,23 @@ export async function resumeUnitFailure({ store, unit, snapshot, validateStopped
       }
       if (current.sessionFinalization?.mode === 'stopped' && !current.sessionFinalization.closeReceipt?.result?.closed)
         throw Object.assign(new Error('stopped owner closure is not verified'), {code:'SESSION_CLOSE_PENDING'});
-      const resumed = { ...current, ...resumeFailure(current) };
+      let resumed = ['Blocked', 'Stopped'].includes(current.state) ? { ...current, ...resumeFailure(current) } : { ...current };
       if (current.sessionFinalization?.mode === 'stopped') {
         resumed.sessionHistory = [...(current.sessionHistory ?? []), current.sessionFinalization];
         resumed.sessionFinalization = null;
       }
       if (observation) resumed.sessionHistory = [...(current.sessionHistory ?? []), observation];
+      if (revalidate) {
+        const latest = new Map((current.evidence ?? []).map(item => [item.gate, item]));
+        const invalidated = [...latest.values()].filter(item => recovery.action === 'revalidate' || item.gate === recovery.gate)
+          .map(item => ({ ...item, status: 'stale', covers: [] }));
+        resumed = { ...resumed, accepted: null, reviewDecision: null, reviewedHead: null, verdict: null,
+          evidence: [...(current.evidence ?? []), ...invalidated],
+          resumeRevalidations: [...(current.resumeRevalidations ?? []), { revision: current.revision + 1, fromState: current.state,
+            resumeState: recovery.resumeState, recovery, previousAcceptance: current.accepted ?? null,
+            previousReview: { reviewDecision: current.reviewDecision ?? null, reviewedHead: current.reviewedHead ?? null, verdict: current.verdict ?? null } }] };
+        if (!beforeGates && resumed.state !== 'SelfGated') resumed = transitionRecord(resumed, 'SelfGated');
+      }
       return resumed;
     }) : record;
   const stage = ({ Scoped: 'scope', Implementing: 'implement', SelfGated: 'gates', InReview: 'review', Accepted: 'delivery', Delivering: 'delivery', Delivered: 'handoff' })[updated.state];

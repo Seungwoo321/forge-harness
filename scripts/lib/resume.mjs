@@ -87,20 +87,22 @@ export function decideResume({ record, ledger = [], git, evidence = [], currentF
     return decision('inspect-git', { unit: record.unit, resumeState: targetState, checkpoint: latest.attempt.checkpoint, reason: 'checkpoint status is unknown' });
   }
 
+  let revalidation;
   if (record.accepted && (
     git.head !== record.accepted.head
     || (git.contentFingerprint !== undefined && git.contentFingerprint !== record.accepted.contentFingerprint)
     || git.worktreeDiff.length > 0 || git.indexDiff.length > 0
   )) {
-    return decision('revalidate', { unit: record.unit, fromState: record.state, resumeState: targetState, nextStage: 'gates', reason: 'accepted content changed' });
+    revalidation = decision('revalidate', { unit: record.unit, fromState: record.state, resumeState: targetState, nextStage: 'gates', reason: 'accepted content changed' });
   }
 
   for (const item of latestEvidence(evidence)) {
-    if (!Object.hasOwn(currentFingerprints, item.gate)) {
+    if (typeof currentFingerprints[item.gate] !== 'string' || !currentFingerprints[item.gate]) {
       return decision('inspect-evidence', { unit: record.unit, gate: item.gate, resumeState: targetState, reason: 'current fingerprint is unavailable' });
     }
-    if (item.fingerprint !== currentFingerprints[item.gate] || item.exit !== 0 || item.failureClass != null || item.nondeterministic === true) {
-      return decision('rerun-gate', { unit: record.unit, gate: item.gate, resumeState: targetState, reason: item.fingerprint !== currentFingerprints[item.gate] ? 'evidence fingerprint changed' : 'latest evidence did not pass' });
+    if (item.fingerprint !== currentFingerprints[item.gate] || item.exit !== 0 || item.failureClass != null || item.nondeterministic === true
+      || ['stale', 'failed', 'pending', 'nondeterministic'].includes(item.status) || item.judge?.status === 'pending') {
+      revalidation ??= decision('rerun-gate', { unit: record.unit, gate: item.gate, resumeState: targetState, reason: item.fingerprint !== currentFingerprints[item.gate] ? 'evidence fingerprint changed' : 'latest evidence did not pass' });
     }
   }
 
@@ -113,6 +115,7 @@ export function decideResume({ record, ledger = [], git, evidence = [], currentF
     }
   }
 
+  if (revalidation) return revalidation;
   if (record.state === 'Closed') return decision('complete', { unit: record.unit, state: 'Closed' });
   const state = targetState;
   return decision('resume', {

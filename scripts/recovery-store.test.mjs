@@ -167,3 +167,52 @@ test('unit retry CLI uses the persisted policy limit after diagnosis', async t =
   const third = await run(['unit', 'fail', 'unit-cli-retry', '--failure', input]);
   assert.equal(third.action, 'diagnose');
 });
+
+test('AC-1 changed accepted content resumes through revalidation and preserves prior proof',async t=>{
+ for(const state of ['Accepted','Blocked','Stopped'])await t.test(state,async t=>{
+  const {store}=await fixture(t,'accepted-change',state);
+  const proof={head:'head-1',contentFingerprint:'content-1'};
+  await store.update('accepted-change',r=>({...r,blockedFrom:state==='Blocked'?'Accepted':null,stoppedFrom:state==='Stopped'?'Accepted':null,
+   accepted:proof,evidence:[{gate:'lint',fingerprint:'fingerprint',exit:0,status:'passed',covers:['AC-1']}],
+   reviewDecision:{required:true},reviewedHead:'head-1',verdict:'ship'}));
+  const result=await resumeUnitFailure({store,unit:'accepted-change',snapshot:{git:{head:'head-2',checkpoints:{},worktreeDiff:[],indexDiff:[]},currentFingerprints:{lint:'fingerprint'}}});
+  assert.equal(result.recovery.action,'revalidate');assert.equal(result.stage,'gates');assert.equal(result.record.state,'SelfGated');
+  assert.equal(result.record.accepted,null);assert.equal(result.record.reviewedHead,null);
+  assert.deepEqual(result.record.resumeRevalidations[0].previousAcceptance,proof);
+  assert.equal(result.record.evidence.length,2);assert.equal(result.record.evidence[0].status,'passed');assert.equal(result.record.evidence[1].status,'stale');
+ });
+});
+
+test('AC-2 revalidation cannot reopen terminal, delivery or incompatible lifecycle states',async t=>{
+ for(const mode of ['Closed','Delivered','Delivering','review','delivery-plan','delivery-result','finalization'])await t.test(mode,async t=>{
+  const {store}=await fixture(t,'conflict');
+  await store.update('conflict',r=>({...r,state:['Closed','Delivered','Delivering','Implementing'].includes(mode)?mode:'SelfGated',
+   kind:mode==='review'?'review':'impl',deliveryPlan:mode==='delivery-plan'?{head:'head'}:null,
+   deliveryResult:mode==='delivery-result'?{head:'head'}:null,sessionFinalization:mode==='finalization'?{mode:'finish'}:null,
+   evidence:[{gate:'lint',fingerprint:'old',exit:0,status:'passed'}]}));
+  const before=await store.read('conflict');
+  const result=await resumeUnitFailure({store,unit:'conflict',snapshot:{git:{head:'head',checkpoints:{},worktreeDiff:[],indexDiff:[]},currentFingerprints:{lint:'new'}}});
+  assert.equal(result.stage,undefined);assert.deepEqual(await store.read('conflict'),before);
+ });
+});
+
+test('AC-2 stale evidence still requires exact stopped finalization and rejects concurrent revision changes',async t=>{
+ for(const mode of ['closure','revision','record-override','missing-fingerprint'])await t.test(mode,async t=>{
+  const {store}=await fixture(t,'guard','Stopped');
+  await store.update('guard',r=>({...r,evidence:[{gate:'lint',fingerprint:'old',exit:0,status:'passed'}],
+   ...(mode==='closure'?{sessionFinalization:{mode:'stopped',closeReceipt:{result:{closed:false}}}}:{})}));
+  const before=await store.read('guard'),snapshot={git:{head:'head',checkpoints:{},worktreeDiff:[],indexDiff:[]},currentFingerprints:mode==='missing-fingerprint'?{}:{lint:'new'}};
+  if(mode==='revision'){
+   const update=store.update;const racedStore={...store,async update(unit,action){await update(unit,r=>({...r,extra:'concurrent'}));return update(unit,action);}};
+   await assert.rejects(resumeUnitFailure({store:racedStore,unit:'guard',snapshot}),{code:'CONTINUITY_STALE'});
+   const after=await store.read('guard');assert.equal(after.state,'Stopped');assert.deepEqual(after.evidence,before.evidence);assert.equal(after.resumeRevalidations,undefined);
+  }else if(mode==='closure'){
+   await assert.rejects(resumeUnitFailure({store,unit:'guard',snapshot}),{code:'SESSION_CLOSE_PENDING'});assert.deepEqual(await store.read('guard'),before);
+  }else if(mode==='record-override'){
+   snapshot.record={...before,state:'Closed'};
+   const result=await resumeUnitFailure({store,unit:'guard',snapshot});assert.equal(result.stage,'gates');assert.equal(result.record.state,'SelfGated');
+  }else{
+   const result=await resumeUnitFailure({store,unit:'guard',snapshot});assert.equal(result.recovery.action,'inspect-evidence');assert.deepEqual(await store.read('guard'),before);
+  }
+ });
+});

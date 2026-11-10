@@ -24,7 +24,7 @@ async function fixture(t,preTurn=false,initialInput=false,multiline=false) {
   const owner={runtime:'cmux',sessionId:'owner',incarnationId:'tty1:11:START',cwd,worker:{executable:'codex',pid:11,incarnationId:'tty1:11:START',threadId:'owner-thread'}};
   await goals.transaction('g',g=>({...g,revision:g.revision+1,adoptions:[{unit:'change',ownership:'existing',...owner,owner}]}));
   await store.create({schema:'harness.unit/1',unit:'change',kind:'chore',state:'InReview',continuity:{goalId:'g'},head:'head',contentFingerprint:'content',policy:{goal:{class:'task'},review:{mode:'required',by:'session',triggers:[]}}});
-  await store.create({schema:'harness.unit/1',unit:'review',kind:'review',state:'InReview',targetUnit:'change',continuity:{goalId:'g'},policy:{goal:{class:'task'}}});
+  await store.create({schema:'harness.unit/1',unit:'review',kind:'review',state:'InReview',targetUnit:'change',continuity:{goalId:'g'},policy:{goal:{class:'task'},session:(await goals.read('g')).policy}});
   const nativeFile=path.join(cwd,'native.json'),stub=path.join(cwd,'native.mjs');
   await writeFile(nativeFile,JSON.stringify({exists:false,trust:false,native:'absent',absence:true,thread:'review-thread',draft:'',launches:0,returns:0,writes:[]}));
   const read=async()=>JSON.parse(await readFile(nativeFile));

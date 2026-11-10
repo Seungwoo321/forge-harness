@@ -408,3 +408,20 @@ test('an unregistered reviewer with an uncertain start fences rebind, including 
     assert.deepEqual(await readFile(f.unitFile),before);assert.deepEqual(await f.goals.read('goal'),goal);
   });
 });
+
+test('AC-3 a fresh review registered under superseded settings cannot launch after policy restoration',async t=>{
+  const f=await fixture(t);
+  assert.equal((await f.adopt(await f.request())).code,0);
+  const goal=await f.goals.read('goal');
+  const requestFile=path.join(f.cwd,'stale-review.json');
+  const bad={...goal.policy,roles:{review:{effort:'medium'}}};
+  await f.goals.transaction('goal',g=>({...g,revision:g.revision+1,policy:bad}));
+  await writeFile(requestFile,JSON.stringify({kind:'review',targetUnit:'change',goalId:'goal',request:{text:'review',userInputRef:'review'},policyOverrides:{session:bad}}));
+  assert.equal((await f.run(['start','stale-review','--request',requestFile,'--non-interactive'])).code,0);
+  await f.goals.transaction('goal',g=>({...g,revision:g.revision+1,policy:goal.policy}));
+  const handoffPath=path.join(f.cwd,'stale-handoff.md');await writeFile(handoffPath,packet);
+  const launch=path.join(f.cwd,'stale-launch.json');await writeFile(launch,JSON.stringify({cwd:f.cwd,handoffPath,handoffDigest:hash(packet),parentRuntime:f.owner,waitSeconds:0}));
+  const result=await f.run(['session-start','stale-review','--request',launch]);
+  assert.equal(result.error,'CONTINUITY_STALE',JSON.stringify(result)); assert.equal(f.launches(),0);
+  assert.deepEqual(await createLedgerStore(f.stateRoot).withLock('stale-review',l=>l.read()),[]);
+});

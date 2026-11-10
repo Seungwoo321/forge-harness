@@ -32,6 +32,8 @@ import { commitGoalContinuation } from './continuity-finish.mjs';
 import { adoptGoalSession } from './continuity-custody.mjs';
 import { startGoalSession } from './continuity-start.mjs';
 import { recoverGoalSession } from './continuity-recover.mjs';
+import { executionPoliciesEqual } from './continuity-decision.mjs';
+import { recoverGoalPolicy } from './goal-policy-recovery.mjs';
 import { reopenDelivered } from './delivered-rework.mjs';
 import { recoverGoalCompletion } from './completion-recover.mjs';
 import { establishCompoundLegacyFence, preflightCompoundLegacyFence } from './compound-legacy-fence.mjs';
@@ -1191,33 +1193,56 @@ async function runUnitStart({ stateRoot, unit, options, cwd }) {
     if (!continuity || continuity.goal.status !== 'active' || !continuity.goal.remaining.includes(goalUnit)) {
       throw Object.assign(new Error('unit must be listed in an active goal'), { code: 'CONTINUITY_INVALID' });
     }
-    if (JSON.stringify(stable(policy.policy.session)) !== JSON.stringify(stable(continuity.policy)))
+    if (!executionPoliciesEqual(policy.policy.session, continuity.policy))
       throw Object.assign(new Error('resolved execution policy differs from the registered goal'), { code: 'CONTINUITY_STALE' });
     const source = await readFile(continuity.source.path);
     if (`sha256:${createHash('sha256').update(source).digest('hex')}` !== continuity.source.digest)
       throw Object.assign(new Error('goal source changed'), { code: 'CONTINUITY_STALE' });
   }
   const state = request.kind === 'review' ? 'InReview' : 'Scoped';
-  const record = await store.create({
-    schema: 'harness.unit/1', unit, kind: request.kind, state,
-    request: { text: request.request.text, userInputRef: request.request.userInputRef,
-      ...(continuity ? { overallGoal: { id: continuity.goal.id, objective: continuity.goal.objective, criteria: continuity.goal.criteria, source: continuity.source } } : {}) },
-    ...(request.targetUnit ? { targetUnit: request.targetUnit } : {}),
-    ...(request.kind !== 'review' || continuity ? { continuityRequired: true } : {}),
-    ...(continuity ? { continuity: { goalId: continuity.goal.id } } : {}),
-    goal: { class: policy.policy.goal.class, source: policy.policySources['goal.class'] },
-    policy: policy.policy, policySources: policy.policySources,
-    ...(request.policyOverrides ? { policyOverrides: request.policyOverrides } : {}),
-    ...(request.userOverrides ? { userOverrides: request.userOverrides } : {}),
-    ...(request.tracker ? { tracker: request.tracker } : { tracker: null }),
-    isolation: request.isolation ?? policy.policy.isolation ?? 'worktree',
-    canon: request.canon ?? [], scopePaths: [], acceptance: [], stages: [], changedPaths: [],
-    diff: null, handoff: null, feedback: [], evidence: [], findings: [], failures: [],
-    assumptions: [], openDecisions: [], coverage: [], riskAssessment: null, verdict: null,
-    reviewedHead: null, reviewDecision: null, accepted: null, deliveryResult: null,
-    approvals: [], next: null,
+  const create = async () => {
+    const record = await store.create({
+      schema: 'harness.unit/1', unit, kind: request.kind, state,
+      request: { text: request.request.text, userInputRef: request.request.userInputRef,
+        ...(continuity ? { overallGoal: { id: continuity.goal.id, objective: continuity.goal.objective, criteria: continuity.goal.criteria, source: continuity.source } } : {}) },
+      ...(request.targetUnit ? { targetUnit: request.targetUnit } : {}),
+      ...(request.kind !== 'review' || continuity ? { continuityRequired: true } : {}),
+      ...(continuity ? { continuity: { goalId: continuity.goal.id } } : {}),
+      goal: { class: policy.policy.goal.class, source: policy.policySources['goal.class'] },
+      policy: policy.policy, policySources: policy.policySources,
+      ...(request.policyOverrides ? { policyOverrides: request.policyOverrides } : {}),
+      ...(request.userOverrides ? { userOverrides: request.userOverrides } : {}),
+      ...(request.tracker ? { tracker: request.tracker } : { tracker: null }),
+      isolation: request.isolation ?? policy.policy.isolation ?? 'worktree',
+      canon: request.canon ?? [], scopePaths: [], acceptance: [], stages: [], changedPaths: [],
+      diff: null, handoff: null, feedback: [], evidence: [], findings: [], failures: [],
+      assumptions: [], openDecisions: [], coverage: [], riskAssessment: null, verdict: null,
+      reviewedHead: null, reviewDecision: null, accepted: null, deliveryResult: null,
+      approvals: [], next: null,
+    });
+    return { code: 0, summary: `Started unit ${unit}`, details: { unit, state: record.state, kind: record.kind, goal: record.goal, profile: profile.kind, resumed: false } };
+  };
+  if (!continuity) return create();
+  // Registration shares custody locks with recovery; a delayed create must not retain a superseded goal or strand a review ID.
+  return createLedgerStore(stateRoot).withLock(unit, async () => {
+    let result;
+    const register = async target => {
+      if (request.kind === 'review' && (!reviewTarget || digest(target) !== digest(reviewTarget)))
+        throw Object.assign(new Error('review target changed before registration'), {code:'CONTINUITY_STALE'});
+      await createContinuityStore(stateRoot).transaction(goalId, async current => {
+        if (!current || digest(current) !== digest(continuity))
+          throw Object.assign(new Error('goal changed before unit registration'), {code:'CONTINUITY_STALE'});
+        const source = await readFile(current.source.path);
+        if (`sha256:${createHash('sha256').update(source).digest('hex')}` !== current.source.digest)
+          throw Object.assign(new Error('goal source changed before registration'), {code:'CONTINUITY_STALE'});
+        result = await create();
+        return current;
+      });
+    };
+    if (request.kind === 'review') await store.withLock(request.targetUnit, register);
+    else await register();
+    return result;
   });
-  return { code: 0, summary: `Started unit ${unit}`, details: { unit, state: record.state, kind: record.kind, goal: record.goal, profile: profile.kind, resumed: false } };
 }
 
 async function runDecision({ stateRoot, unit, action, options, adapters }) {
@@ -1259,7 +1284,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
     }
     if (noun === 'goal') {
       const [id] = rest;
-      if (!id || rest.length !== 1 || !['create', 'show', 'block', 'resume', 'reconcile', 'add-work', 'policy-refresh', 'amend'].includes(subcommand)) usageError('usage: goal create|show|policy-refresh|amend <id> [--request <file>] [--user-input <ref>]');
+      if (!id || rest.length !== 1 || !['create', 'show', 'block', 'resume', 'reconcile', 'add-work', 'policy-refresh', 'policy-recover', 'amend'].includes(subcommand)) usageError('usage: goal create|show|policy-refresh|policy-recover|amend <id> [--request <file>] [--user-input <ref>]');
       const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
       const store = createContinuityStore(effectiveRoot);
       if (subcommand === 'show') {
@@ -1336,6 +1361,12 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
         }
         return formatCliResult({ code: 0, summary: `Goal ${id} amended`, details: { goal } });
       }
+      if (subcommand === 'policy-recover') {
+        if (!parsed.options.request || !parsed.options['user-input']) usageError('goal policy-recover requires --request <file> --user-input <ref>');
+        const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'goal policy recovery request', 'CLI_USAGE');
+        const receipt = await recoverGoalPolicy({stateRoot:effectiveRoot,store:createUnitStateStore(effectiveRoot),goalId:id,request,userInputRef:parsed.options['user-input'],adapters,cwd});
+        return formatCliResult({code:0,summary:`Goal ${id} execution policy recovered`,details:{receipt}});
+      }
       if (subcommand === 'policy-refresh') {
         // An approved work-policy change reaches an active goal only through this path: the stored execution policy is
         // re-resolved, verified against the exact user authorization, and recorded with its predecessor.
@@ -1351,7 +1382,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
           ...(parsed.options['global-root'] ? {globalRoot:path.resolve(cwd,parsed.options['global-root'])} : {}),
           nonInteractive:parsed.options['non-interactive'] === true});
         const session = resolved.policy.session;
-        if (JSON.stringify(stable(session)) === JSON.stringify(stable(current.policy)))
+        if (executionPoliciesEqual(session, current.policy))
           return formatCliResult({ code: 0, summary: `Goal ${id} execution policy unchanged`, details: { goal: current } });
         if (current.revision !== request.expectedRevision) throw Object.assign(new Error('goal changed since the refresh was requested'), { code: 'CONTINUITY_STALE' });
         const userInputRef = parsed.options['user-input'];
@@ -1511,7 +1542,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
         || (!successor && (before.state !== 'Scoped' || (before.stages ?? []).length !== 0)))
         throw Object.assign(new Error('unit must be unscoped and listed in an active goal'), {code:'CONTINUITY_INVALID'});
       const source = await readFile(goal.source.path);
-      if (`sha256:${createHash('sha256').update(source).digest('hex')}` !== goal.source.digest || JSON.stringify(stable(before.policy?.session)) !== JSON.stringify(stable(goal.policy)))
+      if (`sha256:${createHash('sha256').update(source).digest('hex')}` !== goal.source.digest || !executionPoliciesEqual(before.policy?.session, goal.policy))
         throw Object.assign(new Error('goal source or execution policy differs'), {code:'CONTINUITY_STALE'});
       const record = await store.update(unit, current => {
         if (current.revision !== before.revision || (current.continuity?.goalId && current.continuity.goalId !== goal.goal.id))

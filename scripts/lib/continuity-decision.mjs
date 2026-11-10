@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 
 const nonempty = value => typeof value === 'string' && value.trim() && !value.includes('\0');
 const id = value => nonempty(value) && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) && value !== '.' && value !== '..';
@@ -32,6 +33,16 @@ export function selectExecutionPolicy(policy, role) {
   }
   const selected = { ...base, ...(roles?.[role] ?? {}) };
   return validateExecutionPolicy(selected);
+}
+
+// Empty role maps clear inherited overrides but carry no execution-policy difference.
+export function executionPoliciesEqual(left, right) {
+  const neutral = policy => {
+    selectExecutionPolicy(policy, 'implementation');
+    const { roles, ...base } = policy;
+    return roles && Object.keys(roles).length ? policy : base;
+  };
+  return isDeepStrictEqual(neutral(left), neutral(right));
 }
 
 export function decideContinuity({ goal, unit, successor, goalComplete = false }) {

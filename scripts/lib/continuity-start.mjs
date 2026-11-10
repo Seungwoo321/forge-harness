@@ -35,14 +35,19 @@ export async function startGoalSession({ stateRoot, unit, request, store, adapte
 
 async function startLocked({stateRoot,unit,request,store,adapters,record,goal,ledger,targetRecord}) {
   const review = record?.kind === 'review';
+  const recovered = record.sessionHistory?.at(-1);
+  const recoveredActive = recovered?.mode === 'stopped-observation'
+    && effectArgsDigest(recovered.recovery) === effectArgsDigest(goal?.stoppedOwnerRecoveries?.findLast(item => item.unit === unit))
+    && ['SelfGated','InReview','Accepted'].includes(record.state);
   if (review && record && !record.continuity?.goalId) throw failure('review unit is not bound to a goal: create it with goalId in the unit start request ({kind: "review", targetUnit, goalId})');
-  if (!record?.continuity?.goalId || !(review ? record.state === 'InReview' : ['Scoped','Implementing'].includes(record.state))) throw failure('unit must be active and bound to a goal');
+  if (!record?.continuity?.goalId || !(review ? record.state === 'InReview' : ['Scoped','Implementing'].includes(record.state) || recoveredActive)) throw failure('unit must be active and bound to a goal');
   if (!goal || goal.goal.status !== 'active' || goal.goal.remaining[0] !== (review ? record.targetUnit : unit)) throw failure('unit is not outstanding in an active goal');
   const rows = await ledger.read();
   const reservation = rows.findLast(row => row.event === 'session-start-recovery');
   const historyLength = record.sessionHistory?.length ?? 0;
   const attempt = Math.max(historyLength + 1, reservation ? reservation.nextArgs.attempt + historyLength - reservation.sessionHistoryLength : 1);
-  if (!review && (goal.adoptions?.some(item => item.unit === unit) || attempt === 1 && (goal.transfers ?? []).some(item => item.successor === unit))) throw failure('successor already has a recorded owner');
+  const currentOwner = goalOwner(goal,unit);
+  if (!review && (currentOwner?.ownership === 'existing' || attempt === 1 && currentOwner?.successor === unit)) throw failure('successor already has a recorded owner');
   const source = await readFile(goal.source.path);
   if (`sha256:${createHash('sha256').update(source).digest('hex')}` !== goal.source.digest) throw failure('goal source changed');
   if (!request || !path.isAbsolute(request.cwd ?? '') || !path.isAbsolute(request.handoffPath ?? '') || !/^sha256:[a-f0-9]{64}$/.test(request.handoffDigest ?? '')) throw failure('absolute cwd and immutable handoff are required');

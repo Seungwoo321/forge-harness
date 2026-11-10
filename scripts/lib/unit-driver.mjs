@@ -26,12 +26,13 @@ import { recheckScope } from './scope-recheck.mjs';
 import { amendScope, correctScopeApproval } from './scope-amend.mjs';
 import { finalizeWithin } from './finalize-wait.mjs';
 import { createContinuityStore } from './continuity-store.mjs';
-import { blockGoal, resumeGoal, appendGoalWork } from './continuity-transitions.mjs';
+import { blockGoal, appendGoalWork } from './continuity-transitions.mjs';
 import { commitGoalCompletion } from './continuity-completion.mjs';
 import { commitGoalContinuation } from './continuity-finish.mjs';
 import { adoptGoalSession } from './continuity-custody.mjs';
 import { startGoalSession } from './continuity-start.mjs';
 import { recoverGoalSession } from './continuity-recover.mjs';
+import { recoverStoppedOwner, resumeStoppedGoal, verifyRecoveredStop } from './stopped-owner-recovery.mjs';
 import { executionPoliciesEqual } from './continuity-decision.mjs';
 import { recoverGoalPolicy } from './goal-policy-recovery.mjs';
 import { reopenDelivered } from './delivered-rework.mjs';
@@ -837,7 +838,7 @@ async function runRetry({ stateRoot, unit, options }) {
   };
 }
 
-async function runResume({ stateRoot, unit, options }) {
+async function runResume({ stateRoot, unit, options, adapters }) {
   if (!options.snapshot) usageError('unit resume requires --snapshot <file>');
   const snapshot = await readJsonFile(path.resolve(options.snapshot), 'resume snapshot', 'CLI_USAGE');
   const boundary = classifySessionBoundary(snapshot.event);
@@ -846,8 +847,18 @@ async function runResume({ stateRoot, unit, options }) {
     const goal = await createContinuityStore(stateRoot).read(existing.continuity.goalId);
     if (!goal || goal.goal.status !== 'active' || !goal.goal.remaining.includes(unit)) throw Object.assign(new Error('goal must be resumed before its unit'), {code:'GOAL_BLOCKED'});
   }
-  const pendingLedger = await createLedgerStore(stateRoot).withLock(unit, ledger => ledger.read());
-  const result = await resumeUnitFailure({ store: createUnitStateStore(stateRoot), unit, snapshot: { ...snapshot, ledger: pendingLedger } });
+  const store = createUnitStateStore(stateRoot);
+  const result = await createLedgerStore(stateRoot).withLock(unit, async ledger => {
+    const rows = await ledger.read();
+    return resumeUnitFailure({store,unit,snapshot:{...snapshot,ledger:rows},validateStopped: async record => {
+      let observation;
+      await createContinuityStore(stateRoot).transaction(record.continuity.goalId, async goal => {
+        observation = await verifyRecoveredStop({stateRoot,store,record,goal,rows,adapters,resumed:true});
+        return goal;
+      });
+      return observation;
+    }});
+  });
   return {
     code: result.recovery?.action === 'resume' ? 0 : 3,
     summary: result.recovery?.action === 'resume' ? `Resumed ${unit} at ${result.stage}` : `Unit ${unit} requires ${result.recovery?.action ?? 'resume inspection'}`,
@@ -1315,8 +1326,6 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
         const record = await createUnitStateStore(effectiveRoot).read(request.unit);
         if (!record || record.continuity?.goalId !== id || record.state !== 'Stopped')
           throw Object.assign(new Error('goal blocker requires its stopped unit'), {code:'CONTINUITY_INVALID'});
-        if (subcommand === 'resume' && !record.sessionFinalization?.closeReceipt?.result?.closed)
-          throw Object.assign(new Error('stopped owner must be verified closed before goal resume'), {code:'SESSION_CLOSE_PENDING'});
         if (subcommand === 'block') {
           const failure = record.failures?.at(-1);
           if (!failure || failure.path !== request.evidence || !failure.path.startsWith(`units/${request.unit}/failures/`))
@@ -1325,7 +1334,8 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
           if (`sha256:${createHash('sha256').update(bytes).digest('hex')}` !== failure.digest)
             throw Object.assign(new Error('recorded failure changed'), {code:'CONTINUITY_STALE'});
         }
-        const goal = await store.transaction(id, current => subcommand === 'block' ? blockGoal(current, request) : resumeGoal(current, request));
+        const goal = subcommand === 'block' ? await store.transaction(id, current => blockGoal(current,request))
+          : await resumeStoppedGoal({stateRoot:effectiveRoot,store:createUnitStateStore(effectiveRoot),id,request,adapters});
         return formatCliResult({ code: 0, summary: `Goal ${id} ${subcommand === 'block' ? 'blocked' : 'resumed'}`, details: { goal } });
       }
       if (subcommand === 'amend') {
@@ -1409,7 +1419,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const goal = await store.create({goal:request.goal,source:request.source,policy:resolved.policy.session});
       return formatCliResult({ code: 0, summary: `Goal ${id} registered`, details: { goal } });
     }
-    if (noun !== 'unit' || !['start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'session-recover', 'session-adopt', 'session-rebind', 'goal-bind', 'session-stop', 'session-return', 'policy', 'reopen', 'rework', 'completion-recover', 'delivered-preflight', 'delivered-fence', 'delivered-reconcile', 'delivered-continue'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen|rework|completion-recover|delivered-preflight|delivered-fence|delivered-reconcile|delivered-continue <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct|drop <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit session-recover <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
+    if (noun !== 'unit' || !['start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'session-recover', 'session-adopt', 'session-rebind', 'stopped-owner-recover', 'goal-bind', 'session-stop', 'session-return', 'policy', 'reopen', 'rework', 'completion-recover', 'delivered-preflight', 'delivered-fence', 'delivered-reconcile', 'delivered-continue'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen|rework|completion-recover|delivered-preflight|delivered-fence|delivered-reconcile|delivered-continue <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct|drop <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit session-recover <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
     const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
     if (subcommand === 'acceptance') {
       const [action, unit] = rest;
@@ -1573,6 +1583,13 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const receipt = await adoptGoalSession({stateRoot:effectiveRoot,unit,request,userInputRef:parsed.options['user-input'],store:createUnitStateStore(effectiveRoot),adapters,cwd,rebind:subcommand === 'session-rebind'});
       return formatCliResult({code:0,summary:'Existing owner custody verified',details:{unit,receipt}});
     }
+    if (subcommand === 'stopped-owner-recover') {
+      const [unit] = rest;
+      if (!unit || rest.length !== 1 || !parsed.options.request || !parsed.options['user-input']) usageError('unit stopped-owner-recover requires <unit> --request <file> --user-input <ref>');
+      const request = await readJsonFile(path.resolve(cwd,parsed.options.request), 'stopped owner recovery request', 'CLI_USAGE');
+      const receipt = await recoverStoppedOwner({stateRoot:effectiveRoot,unit,request,userInputRef:parsed.options['user-input'],store:createUnitStateStore(effectiveRoot),adapters});
+      return formatCliResult({code:0,summary:'External stopped owner closure verified',details:{unit,receipt}});
+    }
     if (subcommand === 'session-recover') {
       const [unit] = rest;
       if (!unit || rest.length !== 1 || !parsed.options.request || !parsed.options['user-input']) usageError('unit session-recover requires <unit> --request <file> --user-input <ref>');
@@ -1634,7 +1651,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       if (!unit) usageError(`unit ${subcommand} requires <unit>`);
       const result = subcommand === 'fail'
         ? await runFailure({ stateRoot: effectiveRoot, unit, options: parsed.options, adapters })
-        : await runResume({ stateRoot: effectiveRoot, unit, options: parsed.options });
+        : await runResume({ stateRoot: effectiveRoot, unit, options: parsed.options, adapters });
       return formatCliResult(result);
     }
     if (subcommand === 'close') {

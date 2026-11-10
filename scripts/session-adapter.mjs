@@ -14,7 +14,7 @@ import { effectArgsDigest } from './lib/approvals.mjs';
 export async function createRuntimeAdapters({ cwd, adapters, options, argv }) {
   const {positional} = parseUnitArgs(argv);
   const request = options.request ? JSON.parse(await readFile(path.resolve(cwd, options.request),'utf8')) : null;
-  const unit = positional[0] === 'goal' && positional[1] === 'policy-recover' ? request?.unit : positional[positional[1] === 'stage' ? 3 : 2];
+  const unit = positional[0] === 'goal' && ['policy-recover','resume'].includes(positional[1]) ? request?.unit : positional[positional[1] === 'stage' ? 3 : 2];
   if (!options['state-root'] || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(unit ?? '') || ['.','..'].includes(unit)) throw new TypeError('session adapter requires an explicit state root and unit');
   const stateRoot = path.resolve(cwd, options['state-root']);
   const record = JSON.parse(await readFile(path.join(stateRoot,'units',unit,'unit.json'),'utf8'));
@@ -49,7 +49,9 @@ export async function createRuntimeAdapters({ cwd, adapters, options, argv }) {
   const recipientPolicy = record.kind === 'review' ? await custodyPolicy(goalOwner(goal,record.targetUnit)) : observationPolicy;
   const execution = observationPolicy ? selectExecutionPolicy(observationPolicy,role) : null;
   const registeredOwner = custody?.owner ?? (custody && execution ? {...custody,runtime:execution.runtime,workerExecutable:execution.argv[0]} : null);
-  const owner = adopting ? request?.owner : request?.parentRuntime ?? record.sessionFinalization?.owner ?? registeredOwner;
+  const recoveryOwner = goal?.stoppedOwnerRecoveries?.findLast(item => item.unit === unit)?.request.owner;
+  const owner = adopting || positional[1] === 'stopped-owner-recover' ? request?.owner
+    : request?.parentRuntime ?? record.sessionFinalization?.owner ?? registeredOwner ?? recoveryOwner;
   const runtime = owner?.runtime;
   const executable = owner?.workerExecutable ?? owner?.worker?.executable;
   if (!['cmux','orca'].includes(runtime) || !owner?.sessionId || !owner.incarnationId || !path.isAbsolute(owner.cwd ?? '')

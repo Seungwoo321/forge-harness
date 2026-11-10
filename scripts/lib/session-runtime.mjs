@@ -437,7 +437,34 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
   return Object.freeze({
     contractVersion: 'harness.session-adapter/1',
     capabilities: ['fix-forward', 'failure-classification-five-way', 'retry-limit', 'ops-e0-only', 'policy-review'],
-    async observe({ cwd, targetCwd = cwd, recipient, nativeOwner = false, previousOwner }) {
+    async observe({ cwd, targetCwd = cwd, recipient, nativeOwner = false, previousOwner, closedOwner }) {
+      if (closedOwner) {
+        if (closedOwner.runtime !== runtime || !closedOwner.sessionId || !closedOwner.incarnationId
+          || !path.isAbsolute(closedOwner.cwd ?? '') || !Number.isSafeInteger(closedOwner.worker?.pid) || closedOwner.worker.pid < 1
+          || !closedOwner.worker.incarnationId || !closedOwner.worker.executable || !closedOwner.worker.threadId)
+          throw invalid('exact closed owner identity is required');
+        const absent = async () => {
+          let inventory;
+          if (runtime === 'cmux') {
+            const tree = await cmux(['tree','--all'],closedOwner.cwd);
+            if (!Array.isArray(tree.windows) || tree.windows.some(window => !Array.isArray(window.workspaces)
+              || window.workspaces.some(workspace => !Array.isArray(workspace.panes) || workspace.panes.some(pane => !Array.isArray(pane.surfaces)))))
+              throw invalid('closed owner inventory is incomplete');
+            inventory = terminals(tree);
+          } else inventory = (await orca(['terminal','list','--worktree',`path:${closedOwner.cwd}`],closedOwner.cwd)).terminals;
+          const ids = inventory?.map(item => runtime === 'cmux' ? item.id : item.handle);
+          if (!Array.isArray(inventory) || ids.some(id => typeof id !== 'string' || !id) || new Set(ids).size !== ids.length
+            || ids.includes(closedOwner.sessionId))
+            throw invalid('closed owner surface is present or ambiguous');
+          const rows = (await invoke('ps',['-axo','pid='],closedOwner.cwd)).trim().split(/\s+/);
+          if (!rows.length || rows.some(value => !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < 1)
+            || new Set(rows).size !== rows.length || rows.some(value => Number(value) === closedOwner.worker.pid))
+            throw invalid('closed owner process is present or absence is unproven');
+        };
+        await absent();
+        await absent();
+        return {closed:true,owner:structuredClone(closedOwner)};
+      }
       if (recipient) {
         if (recipient.sessionId === parent.sessionId || !recipient.executable || !recipient.incarnationId) throw invalid('invalid return recipient');
         const observed = await inspect(recipient.sessionId, recipient.cwd, recipient.executable);

@@ -155,8 +155,8 @@ test('upgrading a legacy full-packet delivery observes its receipt or queue with
   assert.equal(submissions, 0);
 });
 
-const screen = (text, hint = 'tab to queue message') => `busy output\n› ${text}\n\n  Model · /work · Working · Context 30% left\n  ${hint}\n`;
-test('busy composer settles before separate Return; a prefilled retry never pastes again', async () => {
+const screen = (text, hint = 'tab to queue message') => `busy output\n› ${text}\n\n  Model · /work · Ready · Context 30% left\n  ${hint}\n`;
+test('ready composer settles before separate Return; a prefilled retry never pastes again', async () => {
   let text = 'Ask Codex to do anything'; const events = [];
   const options = { prompt: 'Read /packet (sha256:digest)',
     read: async () => screen(text), verify: async () => events.push('verify'),
@@ -379,4 +379,30 @@ test('only a fresh launch may use missing Claude startup history; positive pendi
    submit:async(_request,mark)=>{await mark();submits++;}}));
   assert.equal(submits,state==='absent'&&!recovery?1:0);
  }
+});
+
+const expandedFooterScreen = text => `› ${text.replaceAll('\n','\n  ')}\n\n  GPT-6.1-Sol high · ~/work/product · fix/change · Ready ·…  ⚠ 1 warning · f2 to view\n`;
+
+test('the observed expanded Ready footer needs no hint row and preserves the complete wrapped draft',async()=>{
+  const prompt='Read /work/result (sha256:exact); follow its referenced handoffs.';
+  assert.equal(codexComposerMatches(expandedFooterScreen(prompt),prompt),true);
+  assert.equal(codexComposerMatches(expandedFooterScreen(prompt.replace('result','res\nult')),prompt),true);
+  let draft='Ask Codex to do anything',pastes=0,enters=0;
+  await submitCodexComposer({prompt,read:async()=>expandedFooterScreen(draft),verify:async()=>{},paste:async text=>{draft=text;pastes++;},enter:async()=>{enters++;}});
+  assert.equal(pastes,1);assert.equal(enters,1);
+});
+
+test('expanded footer rejects Working, unknown status/footer, modal and hidden or foreign drafts before input',async()=>{
+  const prompt='Read /work/result (sha256:exact)';
+  for(const view of [expandedFooterScreen('human draft'),expandedFooterScreen('Ask Codex to do anything').replace('Ready','Working'),
+    expandedFooterScreen('Ask Codex to do anything').replace('Ready','Unknown'),expandedFooterScreen('Ask Codex to do anything').replace('GPT-6.1-Sol high','unrecognized'),
+    expandedFooterScreen('Ask Codex to do anything')+'foreign footer', 'Review plugin hooks\n› 1. Approve',
+    expandedFooterScreen(prompt+'\nmodel · Ready · context\nforeign tail'),
+    ...['Ready','Unknown'].map(status=>expandedFooterScreen(prompt+'\nModel · /foreign\n? for shortcuts\nforeign tail').replace('Ready ·…',status+' ·…')),
+    expandedFooterScreen(prompt+'\nModel · /foreign\n? for shortcuts\nforeign tail')+'unsupported trailing footer',expandedFooterScreen('foreign prefix\n› '+prompt),
+    screen('Ask Codex to do anything').replace('Ready','Working')]){
+    let mutations=0;
+    await assert.rejects(submitCodexComposer({prompt,read:async()=>view,verify:async()=>{},paste:async()=>{mutations++;},enter:async()=>{mutations++;}}));
+    assert.equal(mutations,0);
+  }
 });

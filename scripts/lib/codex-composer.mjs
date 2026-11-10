@@ -7,7 +7,14 @@ const placeholders = new Set(['Ask Codex to do anything', 'Explain this codebase
 function composer(screen) {
   const lines = screen.split('\n').map(line => line.trimEnd());
   const start = lines.findLastIndex(line => /^ ?› /.test(line));
-  if (start < 0 || !lines.slice(start + 1).some(line => line.includes('? for shortcuts') || line.includes('tab to queue message'))) throw taskError('supported Codex composer is unavailable');
+  if (start < 0 || lines.slice(start+1).some(line=>/· Working ·/.test(line))) throw taskError('supported Codex composer is unavailable');
+  const end = lines.findLastIndex(line=>line.trim().length > 0);
+  // Codex 0.167.0 can omit the hint row when its configured status line fills the viewport.
+  const footer = /^ {2}GPT-[A-Za-z0-9.-]+ (?:low|medium|high|xhigh|max) · (?:~\/|\/)[^·\n]+ · (?:[A-Za-z0-9._/-]+ · )?Ready ·…(?:  ⚠ [1-9]\d* warnings? · f2 to view)?$/u;
+  if (end > start && footer.test(lines[end])) {
+    return [lines[start].replace(/^ ?› /,''),...lines.slice(start+1,end).map(line=>line.replace(/^ {2}/,''))].join('\n').replace(/\n+$/,'');
+  }
+  if (end <= start || !(lines[end].includes('? for shortcuts') || lines[end].includes('tab to queue message'))) throw taskError('supported Codex composer is unavailable');
   return nativeComposerContents(screen, 'codex');
 }
 

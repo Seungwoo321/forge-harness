@@ -16,13 +16,13 @@ const hash = value => `sha256:${createHash('sha256').update(value).digest('hex')
 const parse = value => JSON.parse(value.slice(value.lastIndexOf('RESULT ')+7));
 const packet = ['목표: goal','수용 기준: done','작업관리: change','결정: approved','변경: source','검증: checks','남은 일·위험: review','다음 단위 첫 행동: inspect'].join('\n');
 const fields = {title:'Completed change',objective:'goal',acceptance:'done',tracking:'none',decision:'approved',changed:'source',verification:'checks',remainingRisk:'none',nextFirstAction:'resume'};
-async function fixture(t,state = 'InReview') {
+async function fixture(t,state = 'InReview',runtime = 'cmux') {
   const cwd = await realpath(await mkdtemp(path.join(tmpdir(),'custody-'))); t.after(()=>rm(cwd,{recursive:true,force:true}));
   const stateRoot = path.join(cwd,'state'), store = createUnitStateStore(stateRoot), goals = createContinuityStore(stateRoot);
   const source = path.join(cwd,'goal.md'); await writeFile(source,'goal');
-  const execution = {runtime:'cmux',provider:'codex',account:'/personal-account',model:'model',effort:'high',argv:['codex']};
+  const execution = {runtime,provider:'codex',account:'/personal-account',model:'model',effort:'high',argv:['codex']};
   await goals.create({goal:{id:'goal',objective:'goal',criteria:['done'],remaining:['change'],status:'active'},policy:execution,source:{path:source,digest:hash('goal')}});
-  const owner = {runtime:'cmux',sessionId:'user-session',incarnationId:'user-v1',cwd,
+  const owner = {runtime,sessionId:'user-session',incarnationId:'user-v1',cwd,
     worker:{executable:'/bin/codex',pid:42,incarnationId:'worker-v1',threadId:'native-user'}};
   const reviewer = {...owner,sessionId:'review-session',incarnationId:'review-v1',closable:true,
     worker:{...owner.worker,pid:43,threadId:'native-review',incarnationId:'review-worker-v1'}};
@@ -265,4 +265,102 @@ test('recipient-free stop rejects native drift and records only a verified adopt
   f.setLive({...f.owner,worker:{...f.owner.worker,threadId:'different'}});assert.notEqual((await f.run(['session-stop','change','--request',file])).code,0);
   assert.equal((await f.store.read('change')).stopReport,undefined);f.setLive(f.owner);
   assert.equal((await f.run(['session-stop','change','--request',file])).code,0);assert.deepEqual(f.effects,[]);
+});
+
+async function restarted(t,runtime = 'cmux') {
+  const f=await fixture(t,'Accepted',runtime);assert.equal((await f.adopt(await f.request())).code,0);
+  const {goalOwner}=await import('./lib/continuity-custody.mjs');
+  const previous=goalOwner(await f.goals.read('goal'),'change');
+  const owner={...f.owner,incarnationId:runtime === 'orca' ? f.owner.incarnationId : 'tty:new-process',
+    worker:{...f.owner.worker,pid:84,incarnationId:runtime === 'orca' ? f.owner.worker.incarnationId : 'tty:new-process'}};
+  f.setLive(owner);let absent=true,authorized=true,hook=async()=>{};
+  const authority=path.join(f.cwd,'rebind-permission.json'),permission=JSON.stringify({operation:'rebind',unit:'change',goalId:'goal',previousCustodyDigest:effectArgsDigest(previous),owner});
+  await writeFile(authority,permission);
+  const observe=f.adapters.session.observe;
+  f.adapters.session.observe=async input=>({...await observe(input),...(input.previousOwner ? {previousOwnerAbsent:absent&&effectArgsDigest(input.previousOwner)===effectArgsDigest(previous.owner)} : {})});
+  f.adapters.provider.verifyUserInput=async input=>({...input,verified:authorized&&input.effect==='unit.session.rebind'&&input.userInputRef==='native-rebind-message'});
+  f.adapters.provider.verifySessionRebind=async input=>{
+    const {request,record,goal,target,previousCustody,...binding}=input;
+    const verified=authorized&&request.provenance.ref===authority&&hash(await readFile(authority))===request.provenance.digest
+      &&await readFile(authority,'utf8')===permission&&effectArgsDigest(previousCustody)===request.previousCustodyDigest
+      &&input.ownerDigest===effectArgsDigest(owner)&&input.unitDigest===effectArgsDigest(record)&&input.targetDigest===effectArgsDigest(target)
+      &&input.policyDigest===effectArgsDigest(goal.policy);
+    await hook();return {...binding,verified};
+  };
+  const request=async extra=>({...await f.request(),id:'rebind-1',owner,previousCustodyDigest:effectArgsDigest(previous),provenance:{ref:authority,digest:hash(permission)},...extra});
+  const rebind=async body=>{const file=path.join(f.cwd,`${body.id}.json`);await writeFile(file,JSON.stringify(body));return f.run(['session-rebind','change','--request',file,'--user-input','native-rebind-message']);};
+  return {...f,owner,previous,request,rebind,goalOwner,deny:()=>{authorized=false;},setAbsent:value=>{absent=value;},onVerify:value=>{hook=value;}};
+}
+
+test('same-thread restart appends custody without changing Accepted unit bytes, replays exactly, and ordinary finish retains the process',async t=>{
+  const f=await restarted(t),before=await readFile(f.unitFile),goal=await f.goals.read('goal'),request=await f.request();
+  const result=await f.rebind(request);assert.equal(result.code,0,JSON.stringify(result));
+  assert.deepEqual(await readFile(f.unitFile),before);const rebound=await f.goals.read('goal');
+  assert.deepEqual(rebound.adoptions,goal.adoptions);assert.equal(rebound.rebindings.length,1);assert.equal(rebound.revision,goal.revision+1);
+  assert.deepEqual(f.goalOwner(rebound,'change').owner,f.owner);assert.equal((await f.rebind(request)).receipt.duplicate,true);
+  assert.equal((await f.rebind({...request,reason:'changed'})).error,'CUSTODY_CONFLICT');
+  assert.equal((await f.rebind({...await f.request(),id:'another'})).error,'CUSTODY_CONFLICT');
+  const file=path.join(f.cwd,'finish-rebound.json');await writeFile(file,JSON.stringify({parentRuntime:f.owner,goalComplete:true,goalProof:[{criterion:'done',unit:'change',acceptance:'AC-1'}],resultFields:fields}));
+  const done=await f.run(['finish','change','--request',file]);assert.equal(done.code,0,JSON.stringify(done));
+  assert.equal((await f.store.read('change')).state,'Closed');assert.equal((await f.goals.read('goal')).goal.status,'complete');assert.deepEqual(f.effects,[]);
+});
+
+test('rebind refuses live or unknown old owner, foreign identity, stale bindings, unresolved effects and observation races without any record write',async t=>{
+  for(const mode of ['old-live','old-unknown','thread','surface','cwd','runtime','provider','same-pid','same-incarnation','previous-digest','unit','goal','target','source','policy','permission','provenance','missing-verifier','unresolved','native-race','death-race','target-race','source-race','permission-revoked-replay','stale-goal-replay','active-review'])await t.test(mode,async t=>{
+    const f=await restarted(t),request=await f.request();
+    if(mode==='old-live')f.setAbsent(false);
+    if(mode==='old-unknown')f.adapters.session.observe=async()=>({...f.owner});
+    if(mode==='thread')request.owner.worker.threadId='foreign';
+    if(mode==='surface')request.owner={...request.owner,sessionId:'foreign'};
+    if(mode==='cwd')request.owner={...request.owner,cwd:path.dirname(f.cwd)};
+    if(mode==='runtime')request.owner={...request.owner,runtime:'orca'};
+    if(mode==='provider')request.owner.worker.executable='claude';
+    if(mode==='same-pid')request.owner.worker.pid=f.previous.owner.worker.pid;
+    if(mode==='same-incarnation')request.owner.worker.incarnationId=f.previous.owner.worker.incarnationId;
+    if(mode==='previous-digest')request.previousCustodyDigest=hash('foreign');
+    if(mode==='unit')request.expectedRevision++;
+    if(mode==='goal')request.expectedGoalRevision++;
+    if(mode==='target')f.target.head='foreign';
+    if(mode==='source')await writeFile(f.source,'different');
+    if(mode==='policy')await f.goals.transaction('goal',g=>({...g,revision:g.revision+1,policy:{...g.policy,account:'/foreign-account'}}));
+    if(mode==='permission')f.deny();
+    if(mode==='provenance')request.provenance.digest=hash('forged');
+    if(mode==='missing-verifier')delete f.adapters.provider.verifySessionRebind;
+    if(mode==='unresolved')await createLedgerStore(f.stateRoot).withLock('change',l=>l.append({event:'intent',seq:2,key:'unknown',effect:'session.deliver'}));
+    if(mode==='native-race')f.onVerify(()=>{f.setLive({...f.owner,worker:{...f.owner.worker,threadId:'foreign'}});});
+    if(mode==='death-race')f.onVerify(()=>{f.setAbsent(false);});
+    if(mode==='target-race')f.onVerify(()=>{f.target.head='foreign';});
+    if(mode==='source-race')f.onVerify(()=>writeFile(f.source,'changed'));
+    if(mode==='active-review')await f.goals.transaction('goal',g=>({...g,revision:g.revision+1,reviews:[{unit:'active-review',targetUnit:'change'}]}));
+    if(mode.endsWith('-replay')){assert.equal((await f.rebind(request)).code,0);if(mode==='permission-revoked-replay')f.deny();else await f.goals.transaction('goal',g=>({...g,revision:g.revision+1}));}
+    const unit=await readFile(f.unitFile),goal=await f.goals.read('goal');const result=await f.rebind(request);
+    assert.notEqual(result.code,0,JSON.stringify(result));assert.deepEqual(await readFile(f.unitFile),unit);assert.deepEqual(await f.goals.read('goal'),goal);assert.deepEqual(f.effects,[]);
+  });
+});
+
+test('concurrent exact recovery commits once; conflicting recovery remains stale',async t=>{
+  const f=await restarted(t),request=await f.request();
+  const results=await Promise.all([f.rebind(request),f.rebind(request)]);
+  assert.ok(results.every(r=>r.code===0),JSON.stringify(results));assert.equal((await f.goals.read('goal')).rebindings.length,1);
+  assert.equal((await f.rebind({...request,id:'conflict'})).error,'CUSTODY_CONFLICT');
+});
+
+test('Orca rebind retains the live terminal incarnation while replacing its independently verified dead worker PID',async t=>{
+  const f=await restarted(t,'orca'),before=await readFile(f.unitFile);const result=await f.rebind(await f.request());
+  assert.equal(result.code,0,JSON.stringify(result));assert.equal(result.receipt.incarnationId,f.previous.incarnationId);
+  assert.equal(result.receipt.worker.incarnationId,f.previous.worker.incarnationId);assert.notEqual(result.receipt.worker.pid,f.previous.worker.pid);
+  assert.deepEqual(await readFile(f.unitFile),before);
+});
+
+test('an unregistered reviewer with an uncertain start fences rebind, including one created during verification',async t=>{
+  for(const boundary of ['before','during'])await t.test(boundary,async t=>{
+    const f=await restarted(t),request=await f.request(),before=await readFile(f.unitFile),goal=await f.goals.read('goal');
+    const pending=async()=>{
+      await f.store.create({schema:'harness.unit/1',unit:'pending-review',kind:'review',state:'InReview',targetUnit:'change',continuity:{goalId:'goal'}});
+      await createLedgerStore(f.stateRoot).withLock('pending-review',l=>l.append({event:'intent',seq:1,key:'original-start',effect:'session.start'}));
+    };
+    if(boundary==='before')await pending();else f.onVerify(pending);
+    assert.equal((await f.rebind(request)).error,'CUSTODY_CONFLICT');
+    assert.deepEqual(await readFile(f.unitFile),before);assert.deepEqual(await f.goals.read('goal'),goal);
+  });
 });

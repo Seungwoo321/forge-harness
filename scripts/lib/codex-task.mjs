@@ -6,12 +6,13 @@ import { taskDigest, taskError } from './session-task.mjs';
 const queryScript = fileURLToPath(new URL('../codex-task-query.mjs', import.meta.url));
 const textOf = item => Array.isArray(item.content) && item.content.length > 0 && item.content.every(part => part.type === 'text' && typeof part.text === 'string')
   ? item.content.map(part => part.text).join('') : null;
-const readPacket = (packet, value, verification = []) => {
+const readPacket = (packet, value, verification = [], exactOutput = false) => {
   if (value.type !== 'commandExecution' || value.status !== 'completed' || value.exitCode !== 0) return false;
   const output = value.aggregatedOutput ?? '';
   const read = value.commandActions?.some(action => action.type === 'read'
     && (action.path === packet.path || path.resolve(value.cwd, action.path ?? '') === packet.path));
   if (read && taskDigest(output) === packet.digest) return true;
+  if (exactOutput) return false;
   const outputs = read ? [value, ...verification] : [value];
   return Boolean(packet.content && output.includes(packet.content) && outputs.some(item => item.type === 'commandExecution'
     && item.status === 'completed' && item.exitCode === 0 && item.aggregatedOutput?.split('\n').some(line => {
@@ -105,6 +106,23 @@ export function createCodexTaskTransport({ command, executable = 'codex', submit
         const { turn, item } = matches[0];
         const following = turn.items.slice(turn.items.indexOf(item) + 1);
         const activity = following.find(value => ['agentMessage', 'commandExecution', 'mcpToolCall', 'dynamicToolCall'].includes(value.type));
+        // A native user command can receive a delivery even when the model request failed.
+        // Keep that read provenance separate from the original accepted request.
+        if (request.input.effect === 'session.deliver' && ['completed', 'interrupted', 'failed'].includes(turn.status) && !following.length && request.packets.length) {
+          const reads = new Map();
+          for (const later of data.turns.slice(data.turns.indexOf(turn) + 1)) {
+            if (!later.id || later.status !== 'completed' || !later.items.length || !later.items.every(value => value.type === 'commandExecution' && value.id)) break;
+            for (const value of later.items) for (const packet of request.packets) {
+              if (readPacket(packet, value, [], true)) reads.set(packet.path, { path: packet.path, digest: packet.digest, activityTurnId: later.id, activityId: value.id });
+            }
+            if (request.packets.every(packet => reads.get(packet.path)?.digest === packet.digest)) {
+              const read = [...reads.values()].at(-1);
+              return { state: 'started', active, promptDigest: taskDigest(request.prompt), threadId: data.threadId, requestId: item.id,
+                turnId: turn.id, requestTurnId: turn.id, turnStatus: turn.status, activityTurnId: read.activityTurnId, activityId: read.activityId,
+                receiptSource: 'native-user-command-read', packets: [...reads.values()] };
+            }
+          }
+        }
         if (!activity || !['inProgress', 'completed', 'interrupted', 'failed'].includes(turn.status)) return { state: 'accepted', active };
         const packets = request.packets.filter(packet => request.prompt.includes(packet.digest) && request.prompt.includes(packet.content)
           || following.some(value => readPacket(packet, value)));

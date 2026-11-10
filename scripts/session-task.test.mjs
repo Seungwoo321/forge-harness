@@ -385,6 +385,46 @@ test('native worker lock must belong to the selected account', async () => {
   await assert.rejects(transport.identity(observed),/ownership is missing/);
 });
 
+test('delivery binds a later completed native command-only read to the original request without claiming model work', async () => {
+  const threadId='00000000-0000-0000-0000-000000000001';
+  const requestTurn={id:'request-turn',status:'failed',items:[{type:'userMessage',id:'request',content:[{type:'text',text:'prompt'}]}]};
+  const readTurn={id:'read-turn',status:'completed',items:[{type:'commandExecution',id:'native-read',cwd:'/work',status:'completed',exitCode:0,
+    commandActions:[{type:'read',path:packets[0].path}],aggregatedOutput:packets[0].content}]};
+  let turns=[requestTurn,readTurn];
+  const transport=createCodexTaskTransport({command:async binary=> binary==='lsof'
+    ? {exitCode:0,stdout:`n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${threadId}.lock\n`}
+    : {exitCode:0,stdout:JSON.stringify({thread:{id:threadId,cwd:observed.cwd},turns,queued:[]})}});
+  const delivery={...input,effect:'session.deliver',args:{cwd:observed.cwd,resultPath:packets[0].path,resultDigest:packets[0].digest}};
+  const options={transport,observed,input:delivery,prompt:'prompt',packets};
+  const receipt=(await observeTask(options)).task;
+  assert.equal(receipt.requestId,'request');assert.equal(receipt.turnId,'request-turn');assert.equal(receipt.requestTurnId,'request-turn');
+  assert.equal(receipt.activityId,'native-read');assert.equal(receipt.activityTurnId,'read-turn');assert.equal(receipt.turnStatus,'failed');
+  assert.equal(receipt.receiptSource,'native-user-command-read');assert.equal(receipt.packets[0].activityTurnId,'read-turn');
+  const read=readTurn.items[0];
+  for (const bad of [
+    [readTurn,requestTurn], [requestTurn,{...readTurn,status:'failed'}], [requestTurn,{...readTurn,status:'inProgress'}],
+    [requestTurn,{...readTurn,items:[{...read,status:'failed'}]}], [requestTurn,{...readTurn,items:[{...read,exitCode:1}]}],
+    [requestTurn,{...readTurn,items:[{...read,aggregatedOutput:packets[0].content+'trailing'}]}],
+    [requestTurn,{...readTurn,items:[{...read,commandActions:[{type:'read',path:'/foreign/packet'}]}]}],
+    [requestTurn,{...readTurn,items:[{...read,commandActions:[]}]}],
+    [requestTurn,{...readTurn,items:[{type:'agentMessage',id:'response',text:packets[0].content}]}],
+    [requestTurn,{...readTurn,items:[{type:'userMessage',id:'intervening',content:[{type:'text',text:'other'}]},read]}],
+    [requestTurn,{id:'other-turn',status:'completed',items:[{type:'userMessage',id:'intervening',content:[{type:'text',text:'other'}]}]},readTurn],
+    [requestTurn,readTurn,requestTurn], [requestTurn,{...readTurn,items:[{...read,id:''}]}]
+  ]) {
+    turns=bad;
+    await assert.rejects(observeTask(options),{code:'SESSION_TASK_UNVERIFIED'});
+  }
+  turns=[requestTurn,readTurn];
+  await assert.rejects(observeTask({...options,input}),{code:'SESSION_TASK_UNVERIFIED'});
+  await assert.rejects(observeTask({...options,packets:[...packets,{path:'/work/missing',content:'missing',digest:taskDigest('missing')}]}),{code:'SESSION_TASK_UNVERIFIED'});
+  const extra={path:'/work/second',content:'second\n',digest:taskDigest('second\n')};
+  turns=[requestTurn,readTurn,{...readTurn,id:'second-read-turn',items:[{...read,id:'second-read',commandActions:[{type:'read',path:extra.path}],aggregatedOutput:extra.content}]}];
+  const complete=(await observeTask({...options,packets:[...packets,extra]})).task;
+  assert.equal(complete.packets.length,2);assert.equal(complete.activityTurnId,'second-read-turn');
+  assert.equal(complete.packets[0].activityTurnId,'read-turn');assert.equal(complete.packets[1].activityTurnId,'second-read-turn');
+});
+
 test('completed native goals retain post-goal reads verified by a later checksum command',async()=>{
  const threadId='00000000-0000-0000-0000-000000000001';
  let checksumStatus='completed';

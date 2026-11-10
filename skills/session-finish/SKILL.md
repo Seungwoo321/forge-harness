@@ -30,3 +30,5 @@ Finish is the step that starts the fresh successor context. Do not defer it to "
 For the final goal session, also pass `returnTo` with the exact identity (`sessionId`, `incarnationId`, `cwd`, `executable`) of the existing session that receives the result, usually the orchestrator that launched the goal. The control plane delivers the result there, verifies receipt, closes this worker and then records the goal as complete. Finishing a managed worker without `returnTo` is rejected with `RETURN_RECIPIENT_REQUIRED`, because the worker would otherwise stay open after the goal is complete.
 
 An existing-owner adoption retains the user session through completion, return and same-session continuation; it never grants automatic close authority. Follow `docs/session-custody-recovery.md` for the public recovery contract.
+
+If a target changes after goal completion is reserved, follow `docs/completion-recovery.md`. Recovery requires verified non-application and a trusted fence for the old executor; an absent PID or an empty-looking queue is not sufficient.

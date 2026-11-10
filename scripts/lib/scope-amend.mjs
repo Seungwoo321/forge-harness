@@ -1,5 +1,5 @@
 import { effectArgsDigest, verifyApprovalInput } from './approvals.mjs';
-import { createLedgerStore, sessionStartRetired } from './ledger.mjs';
+import { createLedgerStore, sessionEffectRetired } from './ledger.mjs';
 
 const invalid = message => Object.assign(new Error(message), { code: 'SCOPE_AMEND_INVALID' });
 
@@ -62,7 +62,7 @@ export async function correctScopeApproval({ stateRoot, store, unit, request, us
         if (!original || effectArgsDigest(original) !== request.amendment.digest || original.userInputRef === userInputRef
           || (record.scopeApprovalCorrections ?? []).some(item => item.request.amendment.index === request.amendment.index)
           || !original.added?.every(file => record.scopePaths?.includes(file))) throw invalid('original amendment or approval changed');
-        if (rows.some(row => row.event === 'intent' && !sessionStartRetired(rows,row)
+        if (rows.some(row => row.event === 'intent' && !sessionEffectRetired(rows,row)
           && !rows.some(done => done.event === 'result' && done.seq === row.seq && done.key === row.key
             && !['unknown','uncertain'].includes(done.result?.status)))) throw Object.assign(new Error('reconcile uncertain effects first'),{code:'EFFECT_UNCERTAIN'});
         const target = await adapters.git.inspectUnit({unit,record});

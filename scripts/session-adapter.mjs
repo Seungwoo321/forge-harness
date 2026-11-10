@@ -18,7 +18,7 @@ export async function createRuntimeAdapters({ cwd, adapters, options, argv }) {
   const stateRoot = path.resolve(cwd, options['state-root']);
   const request = options.request ? JSON.parse(await readFile(path.resolve(cwd, options.request),'utf8')) : null;
   const record = JSON.parse(await readFile(path.join(stateRoot,'units',unit,'unit.json'),'utf8'));
-  const adopting = ['session-adopt','session-rebind'].includes(positional[1]);
+  const adopting = ['session-adopt','session-rebind','delivered-continue'].includes(positional[1]);
   const goal = record.continuity?.goalId ? await createContinuityStore(stateRoot).read(record.continuity.goalId) : null;
   let observationPolicy = goal?.policy;
   if (positional[1] === 'session-start' && goal) {

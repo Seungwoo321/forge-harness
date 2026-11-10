@@ -1,5 +1,5 @@
 import { effectArgsDigest, verifyApprovalInput } from './approvals.mjs';
-import { createLedgerStore, sessionStartRetired } from './ledger.mjs';
+import { createLedgerStore, sessionEffectRetired } from './ledger.mjs';
 import { attemptsFor } from './stage-attempts.mjs';
 import { resolvePolicy } from './policy.mjs';
 import { bindDeliveryCommit, validateAcceptedContent } from './delivery.mjs';
@@ -40,7 +40,15 @@ export function productAcceptance(record) {
   return (record.acceptance ?? []).filter(item => item.status !== 'dropped' && !corrected.has(item.id));
 }
 
-export function assertDeliveryObligations(record, delivery) {
+export function assertDeliveryObligations(record, delivery, {allowIncomplete = false} = {}) {
+  for (const request of record.inheritedDeliveryObligations ?? []) {
+    if (request.owner === 'engine' && (!levels.includes(delivery) || levels.indexOf(delivery) < levels.indexOf(request.level)))
+      fail(`delivery must satisfy ${request.acceptanceRef}: ${request.level}`, 'DELIVERY_OBLIGATION_REQUIRED');
+    if (!allowIncomplete && request.owner === 'external' && !currentCorrections(record).some(({request: current}) =>
+      current.acceptanceRef === request.acceptanceRef && current.kind === 'delivery' && current.owner === 'external'
+      && levels.indexOf(current.level) >= levels.indexOf(request.level)))
+      fail(`external delivery obligation ${request.acceptanceRef} requires renewed verification`, 'DELIVERY_OBLIGATION_REQUIRED');
+  }
   for (const { request } of currentCorrections(record)) {
     if (request.kind === 'delivery' && request.owner === 'engine' && (!levels.includes(delivery) || levels.indexOf(delivery) < levels.indexOf(request.level))) {
       fail(`delivery must satisfy ${request.acceptanceRef}: ${request.level}`, 'DELIVERY_OBLIGATION_REQUIRED');
@@ -169,11 +177,14 @@ export async function correctAcceptance({ stateRoot, store, unit, request, userI
           fail('correction requires a submitted, unaccepted SelfGated change unit', 'INVALID_TRANSITION');
         }
         if (entries.some(entry => {
-          if (entry.event !== 'intent' || sessionStartRetired(entries,entry)) return false;
+          if (entry.event !== 'intent' || sessionEffectRetired(entries,entry)) return false;
           const latest = entries.findLast(row => row.event === 'result' && row.seq === entry.seq && row.key === entry.key);
           return !latest || ['unknown', 'uncertain'].includes(latest.result?.status);
         })) fail('reconcile uncertain effects before correction', 'EFFECT_UNCERTAIN');
         const previous = currentCorrections(record).find(item => item.request.acceptanceRef === request.acceptanceRef);
+        if ((record.inheritedDeliveryObligations ?? []).some(inherited => inherited.acceptanceRef === request.acceptanceRef
+          && (request.kind !== 'delivery' || request.owner !== inherited.owner || levels.indexOf(request.level) < levels.indexOf(inherited.level))))
+          fail('a correction cannot weaken an inherited delivery obligation');
         if (previous && (previous.request.kind !== request.kind || previous.request.owner !== request.owner
           || request.kind === 'delivery' && levels.indexOf(request.level) < levels.indexOf(previous.request.level))) {
           fail('a correction cannot change a classification or weaken a delivery obligation');
@@ -186,7 +197,7 @@ export async function correctAcceptance({ stateRoot, store, unit, request, userI
         const updated = { ...record, acceptanceCorrections: [...(record.acceptanceCorrections ?? []), receipt],
           reviewDecision: null, reviewedHead: null, verdict: null, diff: null, handoff: null };
         const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
-        assertDeliveryObligations(updated, policy.delivery);
+        if (!(record.inheritedDeliveryObligations?.length)) assertDeliveryObligations(updated, policy.delivery);
         const checked = await adapters.git.inspectUnit({ unit, record });
         if (effectArgsDigest(checked ?? null) !== effectArgsDigest(target)) fail('target changed during correction', 'ACCEPTANCE_CORRECTION_STALE');
         return updated;

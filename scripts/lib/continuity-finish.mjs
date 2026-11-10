@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { createContinuityStore } from './continuity-store.mjs';
 import { decideContinuity } from './continuity-decision.mjs';
 import { validateGoalCompletion } from './continuity-completion.mjs';
+import { effectArgsDigest } from './approvals.mjs';
 
 export async function prepareGoalFinish({stateRoot,store,record,unit,parentRuntime,successor,goalComplete,goalProof}) {
   let continuity;
@@ -13,6 +14,10 @@ export async function prepareGoalFinish({stateRoot,store,record,unit,parentRunti
   if (record.continuity?.goalId) {
     continuity = await createContinuityStore(stateRoot).read(record.continuity.goalId);
     if (!continuity) throw Object.assign(new Error('overall goal is missing'), { code: 'CONTINUITY_REQUIRED' });
+    if (continuity.completionReservation && (!goalComplete || continuity.completionReservation.unit !== unit
+      || continuity.completionReservation.completionDigest !== effectArgsDigest(record.goalCompletion ?? null)
+      || effectArgsDigest(record.goalCompletion?.proof ?? null) !== effectArgsDigest(goalProof ?? null)))
+      throw Object.assign(new Error('goal completion is reserved by another finalization'), {code:'GOAL_COMPLETING'});
     const source = await readFile(continuity.source.path);
     if (`sha256:${createHash('sha256').update(source).digest('hex')}` !== continuity.source.digest)
       throw Object.assign(new Error('overall goal source changed'), { code: 'CONTINUITY_STALE' });

@@ -17,9 +17,10 @@ export async function runPublicUnitCli(argv, { cwd = process.cwd(), contractsDir
       if (typeof module.createRuntimeAdapters !== 'function') throw new TypeError('adapter module must export createRuntimeAdapters');
       providers = await module.createRuntimeAdapters({ cwd, adapters: core, options, argv });
       if (!providers || typeof providers !== 'object' || Array.isArray(providers)
-        || Object.keys(providers).some(key => !['git', 'gates', 'tracker', 'sessionRunner', 'repository', 'provider', 'effect', 'effectContext'].includes(key))) {
-        throw new TypeError('runtime providers may register only git, gates, tracker, sessionRunner, repository, provider, effect, and effectContext');
+        || Object.keys(providers).some(key => !['git', 'gates', 'tracker', 'sessionRunner', 'repository', 'provider', 'effect', 'effectContext', 'processIdentity'].includes(key))) {
+        throw new TypeError('runtime providers may register only git, gates, tracker, sessionRunner, repository, provider, effect, effectContext, and processIdentity');
       }
+      if(providers.processIdentity!==undefined&&typeof providers.processIdentity!=='function')throw new TypeError('runtime processIdentity provider must be a function');
       if ((providers.effect !== undefined || providers.effectContext !== undefined)
         && (!providers.effect || typeof providers.effectContext !== 'function')) {
         throw new TypeError('runtime effect and effectContext must be registered together');

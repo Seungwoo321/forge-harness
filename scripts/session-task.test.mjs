@@ -186,6 +186,7 @@ test('upgrading a legacy full-packet delivery observes its receipt or queue with
   const prompt = `Receive the completed work result and continue its authorized next action.\n${resultPath}\n${digest}\n${content}`;
   const threadId = '00000000-0000-0000-0000-000000000001';
   let state = 'started'; let submissions = 0;
+  let nativePrompt = prompt, duplicate = false;
   const command = async (binary, args) => {
     let stdout;
     if (binary === 'cmux' && args.includes('tree')) stdout = JSON.stringify({ windows: [{ workspaces: [{ id: 'workspace', panes: [{ surfaces: [{ id: 'receiver', type: 'terminal', tty: 'tty2' }] }] }] }] });
@@ -193,7 +194,8 @@ test('upgrading a legacy full-packet delivery observes its receipt or queue with
     else if (binary === 'lsof') stdout = args.includes('-d') ? `p22\nn${root}\n` : `n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${threadId}.lock\n`;
     else if (binary === process.execPath) stdout = JSON.stringify({ thread: { id: threadId, cwd: root },
       queued: state === 'queued' ? [{ clientUserMessageId: 'key' }] : [], turns: state === 'queued' ? [] : [{ id: 'turn', status: 'completed', items: [
-        { type: 'userMessage', id: 'request', content: [{ type: 'text', text: prompt }] },
+        { type: 'userMessage', id: 'request', content: [{ type: 'text', text: nativePrompt }] },
+        ...(duplicate ? [{ type: 'userMessage', id: 'duplicate', content: [{ type: 'text', text: nativePrompt }] }] : []),
         ...(state === 'started' ? [{ type: 'agentMessage', id: 'response' }] : []),
       ] }] });
     else { submissions += 1; throw Error('unexpected mutation'); }
@@ -203,7 +205,23 @@ test('upgrading a legacy full-packet delivery observes its receipt or queue with
   const request = { effect: 'session.deliver', key: 'key', args: { cwd: root, resultPath, resultDigest: digest,
     recipient: { sessionId: 'receiver', incarnationId: 'tty2:22:START', cwd: root, executable: 'codex' } } };
   assert.equal((await runner.execute(request)).task.promptDigest, taskDigest(prompt));
+  const binding = {runtime:'cmux',sessionId:'receiver',incarnationId:'tty2:22:START',cwd:root,executable:'codex',pid:22,
+    threadId,promptDigest:taskDigest(prompt),packets:[{path:resultPath,digest}]};
+  request.submission = {attempted:true,confirmed:true,readOnly:true,binding};
+  const original = JSON.stringify(request.submission);
+  for (const result of await Promise.all([runner.verify(request),runner.verify(request)])) {
+    assert.equal(result.status,'completed');assert.equal(result.result.task.promptDigest,binding.promptDigest);
+  }
+  for (const patch of [{sessionId:'other'},{incarnationId:'other'},{cwd:'/other'},{pid:23},{executable:'other'},
+    {threadId:'other'},{promptDigest:taskDigest('other')},{goalDigest:taskDigest('other')},{packets:[{path:resultPath,digest:taskDigest('other')}]},{route:'unknown'}]) {
+    request.submission={...request.submission,binding:{...binding,...patch}};
+    assert.equal((await runner.verify(request)).status,'unknown',JSON.stringify(patch));
+  }
+  request.submission=JSON.parse(original);nativePrompt='changed native prompt';assert.equal((await runner.verify(request)).status,'unknown');
+  nativePrompt=prompt;duplicate=true;assert.equal((await runner.verify(request)).status,'unknown');duplicate=false;
+  await writeFile(resultPath,'changed packet');assert.equal((await runner.verify(request)).status,'unknown');await writeFile(resultPath,content);
   for (state of ['accepted', 'queued']) assert.equal((await runner.verify(request)).status, 'unknown');
+  assert.equal(JSON.stringify(request.submission),original);
   assert.equal(submissions, 0);
 });
 

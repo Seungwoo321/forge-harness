@@ -4,7 +4,7 @@ import {createHash} from 'node:crypto';
 import {effectArgsDigest,verifyApprovalInput} from './approvals.mjs';
 import {createContinuityStore} from './continuity-store.mjs';
 import {acquireContinuityLock} from './continuity-lock.mjs';
-import {createLedgerStore,sessionStartRetired} from './ledger.mjs';
+import {createLedgerStore,sessionEffectRetired} from './ledger.mjs';
 import {goalOwner} from './continuity-custody.mjs';
 import {validateAcceptedContent} from './delivery.mjs';
 import {evaluateAcceptance} from './evidence.mjs';
@@ -43,7 +43,7 @@ export async function recoverMissingGoalBinding({stateRoot,store,unit,request,us
           || typeof record.request?.text!=='string' || typeof record.request?.userInputRef!=='string'
           || record.request?.overallGoal || record.deliveryPlan || record.deliveryResult || record.sessionFinalization || record.sessionHistory?.length
           || (record.stages??[]).some(stage=>(stage.attempts??[]).some(attempt=>!attempt.endedAt)))fail('an unbound, submitted, undelivered Accepted change unit is required');
-        if(rows.some(row=>row.event==='intent' && (row.effect?.startsWith('session.') || !sessionStartRetired(rows,row)
+        if(rows.some(row=>row.event==='intent' && (row.effect?.startsWith('session.') || !sessionEffectRetired(rows,row)
           && !rows.some(done=>done.event==='result' && done.seq===row.seq && done.key===row.key && !['unknown','uncertain'].includes(done.result?.status)))))
           fail('existing native activity or uncertain effects require investigation','EFFECT_UNCERTAIN');
         const target=await adapters.git.inspectUnit({unit,record});

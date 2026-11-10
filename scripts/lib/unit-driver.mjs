@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, open, readFile, readdir, rename, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createLedgerStore, executeEffect } from './ledger.mjs';
+import { createLedgerStore, executeEffect, sessionEffectRetired } from './ledger.mjs';
 import { effectDefinition, prepareEffect, resolvePolicy } from './policy.mjs';
 import { resolveStoredPolicy } from './policy-store.mjs';
 import { formatCliResult } from './report.mjs';
@@ -32,6 +32,11 @@ import { commitGoalContinuation } from './continuity-finish.mjs';
 import { adoptGoalSession } from './continuity-custody.mjs';
 import { startGoalSession } from './continuity-start.mjs';
 import { recoverGoalSession } from './continuity-recover.mjs';
+import { reopenDelivered } from './delivered-rework.mjs';
+import { recoverGoalCompletion } from './completion-recover.mjs';
+import { establishCompoundLegacyFence, preflightCompoundLegacyFence } from './compound-legacy-fence.mjs';
+import { reconcileLegacyDelivery } from './legacy-delivery-reconcile.mjs';
+import { continueDeliveredGoal } from './delivered-continuation.mjs';
 import { recoverMissingGoalBinding } from './goal-bind-recovery.mjs';
 import { prepareSessionReturn } from './continuity-return.mjs';
 import { stopGoalSession } from './continuity-stop.mjs';
@@ -1373,7 +1378,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const goal = await store.create({goal:request.goal,source:request.source,policy:resolved.policy.session});
       return formatCliResult({ code: 0, summary: `Goal ${id} registered`, details: { goal } });
     }
-    if (noun !== 'unit' || !['start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'session-recover', 'session-adopt', 'session-rebind', 'goal-bind', 'session-stop', 'session-return', 'policy', 'reopen'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct|drop <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit session-recover <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
+    if (noun !== 'unit' || !['start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'session-recover', 'session-adopt', 'session-rebind', 'goal-bind', 'session-stop', 'session-return', 'policy', 'reopen', 'rework', 'completion-recover', 'delivered-preflight', 'delivered-fence', 'delivered-reconcile', 'delivered-continue'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen|rework|completion-recover|delivered-preflight|delivered-fence|delivered-reconcile|delivered-continue <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct|drop <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit session-recover <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
     const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
     if (subcommand === 'acceptance') {
       const [action, unit] = rest;
@@ -1429,6 +1434,40 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       if (!unit) usageError('unit start requires <unit>');
       return formatCliResult(await runUnitStart({ stateRoot: effectiveRoot, unit, options: parsed.options, cwd }));
     }
+    if (subcommand === 'completion-recover') {
+      const [unit] = rest;
+      if (!unit || rest.length !== 1 || !parsed.options.request || !parsed.options['user-input']) usageError('unit completion-recover requires <unit> --request <file> --user-input <ref>');
+      const request=await readJsonFile(path.resolve(cwd,parsed.options.request),'completion recovery request','CLI_USAGE');
+      const receipt=await recoverGoalCompletion({stateRoot:effectiveRoot,store:createUnitStateStore(effectiveRoot),unit,request,userInputRef:parsed.options['user-input'],adapters});
+      return formatCliResult({code:0,summary:'Goal completion recovery recorded',details:{unit,receipt}});
+    }
+    if (['delivered-preflight','delivered-fence','delivered-reconcile','delivered-continue'].includes(subcommand)) {
+      const [unit]=rest;
+      if(!unit||rest.length!==1||!parsed.options.request||!parsed.options['user-input'])usageError(`unit ${subcommand} requires <unit> --request <file> --user-input <ref>`);
+      const request=await readJsonFile(path.resolve(cwd,parsed.options.request),'delivered continuation request','CLI_USAGE');
+      if(subcommand==='delivered-preflight'){
+        const proof=await preflightCompoundLegacyFence({stateRoot:effectiveRoot,unit,request,userInputRef:parsed.options['user-input'],adapters});
+        return formatCliResult({code:0,summary:'Delivered continuation preflight verified',details:{unit,proof}});
+      }
+      if(subcommand==='delivered-fence'){
+        const receipt=await establishCompoundLegacyFence({stateRoot:effectiveRoot,unit,request,userInputRef:parsed.options['user-input'],adapters});
+        return formatCliResult({code:0,summary:'Delivered unit fence verified',details:{unit,receipt}});
+      }
+      if(subcommand==='delivered-reconcile'){
+        if(Object.keys(request).join(',')!=='fenceDigest')usageError('delivered reconcile requires an exact fenceDigest');
+        const result=await reconcileLegacyDelivery({stateRoot:effectiveRoot,unit,fenceDigest:request.fenceDigest,userInputRef:parsed.options['user-input'],adapters});
+        return formatCliResult({code:['reconciled','duplicate'].includes(result.status)?0:3,summary:'Original delivery reconciliation',details:{unit,result}});
+      }
+      const result=await continueDeliveredGoal({stateRoot:effectiveRoot,store:createUnitStateStore(effectiveRoot),unit,request,userInputRef:parsed.options['user-input'],adapters});
+      return formatCliResult({code:0,summary:'Delivered goal continuation recorded',details:{unit,result}});
+    }
+    if (subcommand === 'rework') {
+      const [unit] = rest;
+      if (!unit || rest.length !== 1 || !parsed.options.request || !parsed.options['user-input']) usageError('unit rework requires <unit> --request <file> --user-input <ref>');
+      const request=await readJsonFile(path.resolve(cwd,parsed.options.request),'delivered rework request','CLI_USAGE');
+      const receipt=await reopenDelivered({stateRoot:effectiveRoot,store:createUnitStateStore(effectiveRoot),unit,request,userInputRef:parsed.options['user-input'],adapters});
+      return formatCliResult({code:0,summary:'Delivered unit reopened for verified rework',details:{unit,receipt}});
+    }
     if (subcommand === 'reopen') {
       // A check outside the harness (remote CI, a deployment gate) failed after acceptance. Return the unit to
       // implementation so the fix goes through gates and independent review instead of being committed outside the unit.
@@ -1441,7 +1480,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const store = createUnitStateStore(effectiveRoot);
       const entries = await createLedgerStore(effectiveRoot).withLock(unit, ledger => ledger.read());
       const completed = new Set(entries.filter(row => row.event === 'result').map(row => row.seq));
-      if (entries.some(row => row.event === 'intent' && !completed.has(row.seq) && row.effect !== 'session.start'))
+      if (entries.some(row => row.event === 'intent' && !completed.has(row.seq) && row.effect !== 'session.start' && !sessionEffectRetired(entries,row)))
         throw Object.assign(new Error('reconcile pending effects before reopening'), { code: 'EFFECT_UNCERTAIN' });
       const record = await store.update(unit, current => {
         if (!current) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });

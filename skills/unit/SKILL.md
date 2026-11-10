@@ -39,3 +39,5 @@ When a check outside the harness (remote CI, a deployment gate) fails after the 
 ## Explicit user scope reduction
 
 When the user explicitly removes a behavior, use `unit acceptance drop <unit> --request <file> --user-input <ref>` on the same submitted, unaccepted SelfGated unit. Follow the packaged `docs/criteria-changes.md` and require the trusted read-only `verifyAcceptanceChange` provider to verify the actual instruction. Keep original text/history, invalidate old gate evidence and review, align any goal through its separately authorized amendment, refresh remaining source-bound corrections, then reaccept and review under the existing policy. Do not simulate exclusion through a decision answer, evidence-kind correction, fake coverage, new unit or manual record edit.
+
+For an explicitly approved correction after delivery, follow `docs/completion-recovery.md`; preserve the original delivery and evidence, and require the trusted host's finalizer and queue proof before re-entry.

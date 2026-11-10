@@ -324,8 +324,8 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     const keyed = queueRoute || durable?.binding?.route === keyedComposer || Boolean(initial?.state === 'started' && !durable.recovery);
     const selectedRoute = queueRoute ? route : keyed ? keyedComposer : undefined;
     const prompt = interactive ? keyed ? `${shortPrompt} [delivery ${input.key}]` : shortPrompt : legacyPrompt;
-    const binding = threadId => ({runtime:observed.runtime,sessionId:observed.sessionId,incarnationId:observed.incarnationId,cwd:observed.cwd,
-      executable:observed.executable,pid:observed.pid,threadId,promptDigest:taskDigest(prompt),goalDigest:input.args.goalDigest,
+    const binding = (threadId, promptDigest = taskDigest(prompt)) => ({runtime:observed.runtime,sessionId:observed.sessionId,incarnationId:observed.incarnationId,cwd:observed.cwd,
+      executable:observed.executable,pid:observed.pid,threadId,promptDigest,goalDigest:input.args.goalDigest,
       packets:packets.map(({path,digest})=>({path,digest})), ...(selectedRoute ? {route:selectedRoute} : {})});
     const transport = workerTransport && { ...workerTransport, async submit(request) {
       if (interactive && path.basename(observed.executable) === 'codex') {
@@ -373,7 +373,7 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       throw error;
     }
     if (recipient.worker?.threadId && result.task.threadId !== recipient.worker.threadId
-      || durable?.attempted && (effectArgsDigest(binding(result.task.threadId)) !== effectArgsDigest(durable.binding)
+      || durable?.attempted && (effectArgsDigest(binding(result.task.threadId, result.task.promptDigest)) !== effectArgsDigest(durable.binding)
         || result.task.promptDigest !== durable.binding.promptDigest)) throw invalid('result submission owner or packets changed');
     if (JSON.stringify(await inspect(recipient.sessionId, recipient.cwd, recipient.executable)) !== JSON.stringify(observed)) throw invalid('recipient changed during delivery');
     return result;

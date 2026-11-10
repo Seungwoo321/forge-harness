@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createContinuityStore } from './continuity-store.mjs';
 import { snapshotGoal, snapshotText } from './continuity-snapshot.mjs';
-import { createLedgerStore, sessionStartRetired } from './ledger.mjs';
+import { createLedgerStore, sessionEffectRetired } from './ledger.mjs';
 import { formatUnitResult, validateHandoffPacket } from './report.mjs';
 import { effectArgsDigest } from './approvals.mjs';
 
@@ -20,7 +20,7 @@ export async function prepareSessionReturn({ stateRoot, unit, request, store, ad
   if (`sha256:${createHash('sha256').update(source).digest('hex')}` !== goal.source.digest) throw invalid('goal source changed');
   const entries = await createLedgerStore(stateRoot).withLock(unit, ledger => ledger.read());
   const completed = new Set(entries.filter(row=>row.event === 'result').map(row=>row.seq));
-  if (entries.some(row=>row.event === 'intent' && !completed.has(row.seq) && !sessionStartRetired(entries,row))) throw Object.assign(new Error('unresolved effects must be reconciled before session return'),{code:'EFFECT_UNCERTAIN'});
+  if (entries.some(row=>row.event === 'intent' && !completed.has(row.seq) && !sessionEffectRetired(entries,row))) throw Object.assign(new Error('unresolved effects must be reconciled before session return'),{code:'EFFECT_UNCERTAIN'});
   const ownerRef = request.parentRuntime, recipientRef = request.returnTo;
   const custody = review ? goal.reviews?.findLast(item=>item.unit === unit)
     : goalOwner(goal, unit);

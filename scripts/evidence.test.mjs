@@ -220,3 +220,25 @@ test('an absent project check is recorded honestly and needs a matching independ
   await assert.rejects(runGate({gate:{...gate,files:[{path:'package.json',content:'{"scripts":{"typecheck":"tsc"}}'}]},fingerprint,adapter}),/configured gate/);
   await assert.rejects(runGate({gate:{...gate,files:[]},fingerprint,adapter}),/project configuration/);
 });
+
+test('AC-2 repair observations retain nested test identity and exclude skipped or todo scopes', () => {
+  const report = [
+    'TAP version 13',
+    '    not ok 1 - same name',
+    '    1..1',
+    'not ok 1 - first suite',
+    '    ok 1 - same name',
+    '    1..1',
+    'ok 2 - second suite',
+    '    ok 1 - previously failed',
+    '    1..1',
+    'ok 3 - skipped suite # SKIP',
+    'ok 4 - future case # TODO',
+    '1..4',
+  ].join('\n');
+  const parsed = parseGateReport({ format: 'tap', report, reportPath: 'tests.tap', acPattern: 'AC-\\d+', result: { exit: 1 } });
+  assert.deepEqual(parsed.cases, [
+    { name: 'same name', path: ['first suite', 'same name'], passed: false },
+    { name: 'same name', path: ['second suite', 'same name'], passed: true },
+  ]);
+});

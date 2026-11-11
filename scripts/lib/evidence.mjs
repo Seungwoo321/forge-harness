@@ -70,17 +70,18 @@ function hasPendingJudge(result) {
 
 function testCasesFromTap(report, acPattern) {
   const regex = new RegExp(acPattern, 'g');
+  let cases = [];
   let tests = [];
-  const scopes = [{ indent: 0, points: 0, plan: null, tests: [], pending: [] }];
+  const scopes = [{ indent: 0, points: 0, plan: null, tests: [], cases: [], pending: [] }];
   let incomplete = false;
   const closeScope = () => {
     const scope = scopes.pop();
     if (scope.plan === null || !scope.points || scope.points !== scope.plan || scope.pending.length) incomplete = true;
     if (scopes.length) {
       if (scopes.at(-1).pending.length) incomplete = true;
-      scopes.at(-1).pending.push(scope.tests);
+      scopes.at(-1).pending.push({ tests: scope.tests, cases: scope.cases });
     }
-    else tests = scope.tests;
+    else { tests = scope.tests; cases = scope.cases; }
   };
   let lineNo = 0;
   for (const line of report.split(/\r?\n/)) {
@@ -91,13 +92,13 @@ function testCasesFromTap(report, acPattern) {
     const indent = (plan ?? point)[1].length;
     while (scopes.length > 1 && scopes.at(-1).indent > indent) {
       if (scopes.at(-2).indent < indent) {
-        scopes.splice(scopes.length - 1, 0, { indent, points: 0, plan: null, tests: [], pending: [] });
+        scopes.splice(scopes.length - 1, 0, { indent, points: 0, plan: null, tests: [], cases: [], pending: [] });
       }
       closeScope();
     }
     if (indent > scopes.at(-1).indent) {
       if (scopes.at(-1).pending.length) incomplete = true;
-      scopes.push({ indent, points: 0, plan: null, tests: [], pending: [] });
+      scopes.push({ indent, points: 0, plan: null, tests: [], cases: [], pending: [] });
     }
     const scope = scopes.at(-1);
     if (plan) {
@@ -108,15 +109,21 @@ function testCasesFromTap(report, acPattern) {
     scope.points += 1;
     const nameAndDirective = point[4].match(/^(.*?)(?:\s+#\s*(SKIP|TODO)\b.*)?$/i);
     const name = nameAndDirective[1].trim();
+    const passed = point[2].toLowerCase() === 'ok';
+    if (!nameAndDirective[2]) {
+      const nested = scope.pending.flatMap(item => item.cases.map(test => ({ ...test, path: [name, ...test.path] })));
+      scope.cases.push(...nested);
+      if (!nested.length || !passed && nested.every(item => item.passed)) scope.cases.push({ name, path: [name], passed });
+    }
     if (point[2].toLowerCase() === 'ok' && !nameAndDirective[2]) {
-      scope.tests.push(...scope.pending.flat());
+      scope.tests.push(...scope.pending.flatMap(item => item.tests));
       const covers = [...name.matchAll(regex)].map(result => result[0]);
       scope.tests.push({ id: String(lineNo), name, covers: [...new Set(covers)] });
     }
     scope.pending = [];
   }
   while (scopes.length) closeScope();
-  return { tests, incomplete };
+  return { tests, cases, incomplete };
 }
 
 export function parseGateReport({ format, report, reportPath, acPattern, result }) {
@@ -146,6 +153,7 @@ export function parseGateReport({ format, report, reportPath, acPattern, result 
       report: reportPath,
       digest: reportDigest,
       tests: parsedTap.tests,
+      cases: parsedTap.cases,
       covers: result.exit === 0 ? [...new Set(parsedTap.tests.flatMap(test => test.covers))] : [],
       failureClass: result.exit === 0 ? null : normalizeFailureClass(result.failureClass),
     };
@@ -216,7 +224,7 @@ export function acceptanceCoverage(acceptance, evidence) {
   return { ok: uncovered.length === 0, covered: [...covered].sort(), uncovered };
 }
 
-export async function runGate({ gate, fingerprint, adapter, independent = false, enforceSnapshot = false }) {
+export async function runGate({ gate, fingerprint, adapter, independent = false, enforceSnapshot = false, trackCases = false }) {
   if (!gate || typeof gate.id !== 'string' || !gate.id) throw new TypeError('gate id is required');
   if (!fingerprint) throw new TypeError('a verifiable gate fingerprint is required');
   if (!adapter || typeof adapter.latest !== 'function' || typeof adapter.run !== 'function' || typeof adapter.persist !== 'function') {
@@ -244,6 +252,7 @@ export async function runGate({ gate, fingerprint, adapter, independent = false,
     ...(result?.execution !== undefined ? { execution: result.execution } : {}),
     covers: parsed.ok && !applicability ? parsed.covers : [],
     tests: parsed.tests ?? [],
+    ...(trackCases && parsed.cases ? { testCases: parsed.cases } : {}),
     failureClass: parsed.failureClass ?? (parsed.ok || parsed.pending ? null : 'unknown'),
     status: parsed.pending ? 'pending' : parsed.ok ? applicability ? 'not-applicable' : 'passed' : 'failed',
     ...(parsed.ok && applicability ? {applicability} : {}),

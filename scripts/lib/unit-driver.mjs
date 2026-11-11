@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, open, readFile, readdir, rename, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createLedgerStore, executeEffect, sessionEffectRetired } from './ledger.mjs';
+import { createLedgerStore, executeEffect, sessionEffectRetired, unresolvedEffect } from './ledger.mjs';
 import { effectDefinition, prepareEffect, resolvePolicy } from './policy.mjs';
 import { resolveStoredPolicy } from './policy-store.mjs';
 import { formatCliResult } from './report.mjs';
@@ -47,6 +47,8 @@ import { changeUnitPolicy } from './unit-policy-change.mjs';
 import { attemptsFor } from './stage-attempts.mjs';
 import { withGitHeadLock } from './git-head-lock.mjs';
 import { capturedGateReport, executeCapturedGate, persistCapturedReport } from './gate-execution.mjs';
+import { beginGateRepair, continuationError, gateRepairPassed, gateTarget, measuredGateProgress, productGateFailure, sameGateTarget } from './gate-continuation.mjs';
+import { resolveExhaustedFailure, verifyRetryResolution } from './retry-resolution.mjs';
 
 const controlPlaneFields = new Set([
   'request', 'unit', 'kind', 'goal', 'policy', 'policySources', 'canon', 'tracker', 'isolation',
@@ -601,6 +603,18 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
   });
   let diagnosisConfirmed = null;
   let resolverCauseKey = null;
+  let gateDiagnosis;
+  let failureDiagnosis;
+  let repairTarget;
+  if (stage === 'implement' && output.status === 'done' && current.gateRecovery?.status === 'repair') {
+    if (!guard.ok || !attributed.attemptPaths.length) {
+      throw continuationError('RETRY_NO_PROGRESS', 'submit an in-scope correction before revalidation');
+    }
+    repairTarget = gateTarget(await adapters.git?.inspectUnit({ unit, record: current }));
+    if (sameGateTarget(repairTarget, current.gateRecovery.baseline.target)) {
+      throw continuationError('RETRY_NO_PROGRESS', 'repair did not change the failed target');
+    }
+  }
   if (stage === 'root-cause' && output.status === 'done') {
     const classifications = [...new Set(output.findings
       .filter(finding => finding.kind === 'diagnosis' && ['product', 'harness', 'environment', 'user-domain'].includes(finding.classification))
@@ -620,6 +634,29 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
     const recovery = createRecoveryStore(stateRoot);
     const failureId = path.basename(latestFailure.path, '.json');
     const failure = await recovery.readFailure(unit, failureId);
+    if (current.policy?.retry?.onExhaustion === 'root-cause' || current.policyOverrides?.retry?.onExhaustion === 'root-cause') {
+      const { inputDigest, ...envelope } = input;
+      if (inputDigest !== digest(envelope) || input.data.failures.at(-1)?.id !== failureId
+        || !(await validCapturedReport({ report: path.join(stateRoot, latestFailure.path), digest: latestFailure.digest }))) {
+        throw continuationError('EVIDENCE_STALE', 'the diagnosis input or original failure changed');
+      }
+    }
+    if (classifications.length === 1) failureDiagnosis = { failureId, classification: classifications[0],
+      attempt: active.n, inputDigest: input.inputDigest, submissionId: output.submissionId,
+      outputDigest: digest(output), findings: output.findings };
+    if (['diagnose', 'ordinary-diagnosis'].includes(current.gateRecovery?.status)) {
+      const { inputDigest, ...envelope } = input;
+      const finding = output.findings.find(item => item.kind === 'diagnosis' && item.classification === 'product'
+        && [item.site, item.case, item.claim, item.fix].every(value => value.trim()));
+      if (inputDigest !== digest(envelope) || input.data.failures.at(-1)?.id !== failureId
+        || current.gateRecovery.failureId !== failureId || classifications[0] !== 'product' || !finding
+        || attributed.attemptPaths.length || !sameGateTarget(current.gateRecovery.baseline.target,
+          gateTarget(await adapters.git?.inspectUnit({ unit, record: current })))) {
+        throw continuationError('DIAGNOSIS_REQUIRED', 'diagnosis must explain the current captured product failure before any repair');
+      }
+      gateDiagnosis = { failureId, attempt: active.n, inputDigest, submissionId: output.submissionId,
+        outputDigest: digest(output), findings: output.findings };
+    }
     if (failure.class === 'unknown') {
       if (classifications.length !== 1) {
         const error = new Error('root-cause output must confirm the active unknown failure class');
@@ -682,6 +719,8 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
         ...(output.status === 'needs-decision' ? {} : { endedAt: adapters.now() }),
         result: output.status, summary: output.summary, outputDigest: digest(output), submissionId: output.submissionId,
         changedPaths: attributed.attemptPaths,
+        ...(gateDiagnosis ? { gateDiagnosis } : {}),
+        ...(failureDiagnosis ? { failureDiagnosis } : {}),
       } : attempt),
     });
     const writes = Object.fromEntries(contract.writes.filter(field => Object.hasOwn(output, field)).map(field => [field, output[field]]));
@@ -694,6 +733,7 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
     if (Array.isArray(writes.openDecisions)) writes.openDecisions = writes.openDecisions.map(item => ({ ...item, notifiedAt: null, answer: null }));
     const findings = [...(writes.findings ?? next.findings ?? []), ...attributed.findings, ...(guard.finding ? [guard.finding] : [])];
     const candidate = { ...next, ...writes, ...(stage === 'implement' ? { diff: null, handoff: null } : {}),
+      ...(repairTarget ? { gateRecovery: { ...next.gateRecovery, repairTarget } } : {}),
       stages, changedPaths: attributed.changedPaths, findings };
     return to === next.state ? candidate : transitionRecord(candidate, to);
   });
@@ -726,7 +766,9 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
     ? await projectUnit(updated, adapters.tracker, createProjectionQueue(stateRoot, adapters))
     : null;
   const decisionRequired = output.status === 'needs-decision';
-  return { code: output.status === 'blocked' || decisionRequired || updated.state === 'Stopped' ? 3 : 0, summary: decisionRequired ? `Decision required before ${stage} can continue` : `Submitted ${stage} stage for ${unit}`, details: { unit, stage, state: updated.state, ...(decisionRequired ? { status: 'needs-decision', stageFinished: false } : {}), submissionId: output.submissionId, ...(diagnosisConfirmed ? { diagnosis: { class: diagnosisConfirmed.class, causeKey: diagnosisConfirmed.causeKey } } : {}), ...(resolverCompleted ? { resolver: { causeKey: resolverCompleted.causeKey, active: false } } : {}), ...(reviewTarget ? { targetUnit: reviewTarget.unit, targetState: targetUpdated?.state ?? reviewTarget.state } : {}), ...(targetProjection ? { targetTracker: targetProjection.status } : {}), ...(notifications.length ? { notifications } : {}), ...(escalations.length ? { escalations } : {}), ...(projection ? { tracker: projection.status } : {}) } };
+  const exhaustionPolicy = current.policyOverrides?.retry?.onExhaustion ?? current.policy?.retry?.onExhaustion;
+  const stopped = updated.state === 'Stopped' && !(failureDiagnosis && exhaustionPolicy === 'root-cause');
+  return { code: output.status === 'blocked' || decisionRequired || stopped ? 3 : 0, summary: decisionRequired ? `Decision required before ${stage} can continue` : `Submitted ${stage} stage for ${unit}`, details: { unit, stage, state: updated.state, ...(decisionRequired ? { status: 'needs-decision', stageFinished: false } : {}), submissionId: output.submissionId, ...(diagnosisConfirmed ? { diagnosis: { class: diagnosisConfirmed.class, causeKey: diagnosisConfirmed.causeKey } } : {}), ...(resolverCompleted ? { resolver: { causeKey: resolverCompleted.causeKey, active: false } } : {}), ...(reviewTarget ? { targetUnit: reviewTarget.unit, targetState: targetUpdated?.state ?? reviewTarget.state } : {}), ...(targetProjection ? { targetTracker: targetProjection.status } : {}), ...(notifications.length ? { notifications } : {}), ...(escalations.length ? { escalations } : {}), ...(projection ? { tracker: projection.status } : {}) } };
 }
 
 async function runEffect({ stateRoot, unit, options, adapters, cwd }) {
@@ -778,6 +820,9 @@ async function runEffect({ stateRoot, unit, options, adapters, cwd }) {
         || (irreversible ? !['Accepted', 'Delivering'].includes(current.state) : current.state !== 'Implementing')) {
         throw Object.assign(new Error('effect state or policy changed before execution'), { code: irreversible ? 'EFFECT_APPROVAL_REQUIRED' : 'EFFECT_DENIED' });
       }
+      if (current.gateRecovery?.status === 'repair') {
+        throw continuationError('EFFECT_DENIED', 'gate repair allows local correction and verification only');
+      }
       if (irreversible) {
         await validateTarget(current);
         await resolveEffectApproval({ record: current, effect: options.effect, args, approvalRef: options.approval, provider: adapters.provider });
@@ -801,9 +846,9 @@ async function runFailure({ stateRoot, unit, options, adapters }) {
     throw error;
   }
   const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
-  const result = await createRecoveryStore(stateRoot).record({
+  const recordFailure = gateRecovery => createRecoveryStore(stateRoot).record({
     store, unit, failure: {
-      ...failure,
+      ...failure, ...(gateRecovery ? { evidence: gateRecovery.baseline } : {}),
       snapshot: {
         evidence: record.evidence ?? [],
         changedPaths: record.changedPaths ?? [],
@@ -812,15 +857,29 @@ async function runFailure({ stateRoot, unit, options, adapters }) {
     },
     retryLimit: policy.retry.maxPerSignature, resolverLimit: policy.retry.maxResolver,
     needsDiagnosis: failure.needsDiagnosis === true, resolverDepth: failure.resolverDepth ?? 0, adapters,
+    ...(gateRecovery ? { gateRecovery, expectedRevision: record.revision } : {}),
   });
+  const result = options.gate ? await createLedgerStore(stateRoot).withLock(unit, async ledger => {
+    if (unresolvedEffect(await ledger.read())) throw continuationError('EFFECT_UNCERTAIN', 'reconcile the unresolved effect before recording a gate for repair');
+    const evidence = record.evidence?.findLast(item => item.gate === options.gate);
+    if (policy.retry.onExhaustion !== 'root-cause' || record.state !== 'SelfGated' || record.gateRecovery
+      || record.deliveryPlan || record.deliveryResult || record.sessionFinalization
+      || failure.class !== 'product' || !selectProfile(record.kind).gates.includes(options.gate)
+      || !productGateFailure(evidence) || !evidence.target || !(await validCapturedReport(evidence))
+      || !sameGateTarget(evidence.target, gateTarget(await adapters.git?.inspectUnit({ unit, record })))) {
+      throw continuationError('RETRY_NOT_ALLOWED', 'gate repair requires explicit policy and a current captured product gate failure');
+    }
+    return recordFailure({ baseline: gateFailureProof(evidence), status: 'diagnose' });
+  }) : await recordFailure();
   return {
     code: ['stop', 'defer'].includes(result.decision.action) ? 3 : 0,
     summary: `Failure ${result.decision.action}: ${unit}`,
-    details: { unit, failureId: result.failure.id, action: result.decision.action, class: result.failure.class, causeKey: result.failure.causeKey, state: result.record.state, failureRef: result.reference },
+    details: { unit, failureId: result.failure.id, action: result.decision.action, class: result.failure.class, causeKey: result.failure.causeKey, state: result.record.state, failureRef: result.reference,
+      ...(result.record.gateRecovery?.failureId === result.failure.id ? { next: 'Submit root-cause for the recorded failure, then run unit retry with its cause key.' } : {}) },
   };
 }
 
-async function runRetry({ stateRoot, unit, options }) {
+async function runRetry({ stateRoot, unit, options, adapters }) {
   if (!options['cause-key']) usageError('unit retry requires --cause-key <key>');
   const store = createUnitStateStore(stateRoot);
   const record = await store.read(unit);
@@ -830,6 +889,50 @@ async function runRetry({ stateRoot, unit, options }) {
     throw error;
   }
   const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
+  if (options.request) {
+    const request = await readJsonFile(path.resolve(options.request), 'retry resolution request', 'CLI_USAGE');
+    const receipt = await createLedgerStore(stateRoot).withLock(unit, async ledger => {
+      if (unresolvedEffect(await ledger.read())) throw continuationError('EFFECT_UNCERTAIN', 'reconcile unresolved effects before verifying the correction');
+      return resolveExhaustedFailure({ stateRoot, store, unit, request, causeKey: options['cause-key'], policy: policy.retry, adapters });
+    });
+    return { code: 0, summary: 'Exhausted cause correction verified', details: { unit, action: 'resolved', receipt,
+      next: 'Run unit resume with the current Git, evidence and tracker snapshot.' } };
+  }
+  if (record.gateRecovery) {
+    const repaired = await createLedgerStore(stateRoot).withLock(unit, async ledger => {
+      if (unresolvedEffect(await ledger.read())) throw continuationError('EFFECT_UNCERTAIN', 'reconcile the unresolved effect before gate repair');
+      if (record.continuity?.goalId) {
+        const goal = await createContinuityStore(stateRoot).read(record.continuity.goalId);
+        if (goal?.goal.status !== 'active' || !goal.goal.remaining.includes(unit)) {
+          throw continuationError('GOAL_BLOCKED', 'resume the goal before continuing its gate repair');
+        }
+      }
+      const prepare = async current => {
+        if (current.revision !== record.revision) throw continuationError('STAGE_STALE', 'unit changed before gate repair');
+        if (!(await validCapturedReport(current.gateRecovery.baseline))) throw continuationError('EVIDENCE_STALE', 'failed gate report is missing or changed');
+        return beginGateRepair(current, { causeKey: options['cause-key'], policy: policy.retry,
+          target: gateTarget(await adapters.git?.inspectUnit({ unit, record: current })), startedAt: adapters.now() });
+      };
+      if (record.gateRecovery.status !== 'ordinary-diagnosis') return store.update(unit, prepare);
+      let updated;
+      await createRecoveryStore(stateRoot).reserveRetry({ causeKey: options['cause-key'], retryLimit: policy.retry.maxPerSignature,
+        apply: async decision => {
+          updated = await store.update(unit, async current => {
+            const candidate = await prepare(current);
+            return decision.action === 'stop'
+              ? transitionRecord({ ...current, gateRecovery: { ...current.gateRecovery, status: 'diagnose' } }, 'Stopped')
+              : candidate;
+          });
+        } });
+      return updated;
+    });
+    if (record.gateRecovery.status === 'ordinary-diagnosis') {
+      return { code: repaired.state === 'Stopped' ? 3 : 0, summary: repaired.state === 'Stopped' ? 'Retry limit reached after diagnosis' : 'Retry reserved',
+        details: { unit, action: repaired.state === 'Stopped' ? 'stop' : 'retry', state: repaired.state } };
+    }
+    return { code: 0, summary: 'Same-unit gate repair opened', details: { unit, action: 'repair',
+      state: repaired.state, stage: 'implement', failureId: repaired.gateRecovery.failureId } };
+  }
   const failure = await createRecoveryStore(stateRoot).reserveRetry({ causeKey: options['cause-key'], retryLimit: policy.retry.maxPerSignature });
   return {
     code: failure.action === 'stop' ? 3 : 0,
@@ -850,7 +953,27 @@ async function runResume({ stateRoot, unit, options, adapters }) {
   const store = createUnitStateStore(stateRoot);
   const result = await createLedgerStore(stateRoot).withLock(unit, async ledger => {
     const rows = await ledger.read();
-    return resumeUnitFailure({store,unit,snapshot:{...snapshot,ledger:rows},validateStopped: async record => {
+    const current = await store.read(unit);
+    if (!current) throw continuationError('UNIT_NOT_FOUND', `unit not found: ${unit}`);
+    const verifiedGateResolution = current?.retryResolutions?.at(-1);
+    if (current?.gateRecovery && current.state === 'Stopped'
+      && verifiedGateResolution?.failure.id !== current.gateRecovery.failureId) {
+      throw continuationError('RETRY_NOT_ALLOWED', 'stopped gate repair requires its recorded diagnosis and unit retry');
+    }
+    const { policy } = resolvePolicy({ unit: current.policyOverrides ?? {}, project: current.policy ?? {} }, { nonInteractive: true });
+    if (current.state === 'Stopped' && (policy.retry.onExhaustion === 'root-cause' || current.retryResolutions?.length)) {
+      const reference = current.failures?.at(-1);
+      const failure = reference?.path ? await createRecoveryStore(stateRoot).readFailure(unit, path.basename(reference.path, '.json')) : null;
+      if (failure?.action === 'stop' && ['product', 'harness'].includes(failure.class)) {
+        const receipt = current.retryResolutions?.findLast(item => item.failure.id === failure.id);
+        if (!receipt) throw continuationError('DIAGNOSIS_REQUIRED', 'verify the exhausted cause correction with unit retry --request before resume');
+        if (unresolvedEffect(rows)) throw continuationError('EFFECT_UNCERTAIN', 'reconcile unresolved effects before correction resume');
+        await verifyRetryResolution({ stateRoot, record: current, receipt, adapters });
+      }
+    }
+    return resumeUnitFailure({store,unit,snapshot:{...snapshot,ledger:rows},
+      validateResolution: (record, receipt) => verifyRetryResolution({ stateRoot, record, receipt, adapters }),
+      validateStopped: async record => {
       let observation;
       await createContinuityStore(stateRoot).transaction(record.continuity.goalId, async goal => {
         observation = await verifyRecoveredStop({stateRoot,store,record,goal,rows,adapters,resumed:true});
@@ -877,7 +1000,7 @@ async function runSessionFinish({ stateRoot, unit, options, adapters }) {
   return { code, summary, details: { ...details, stateRoot } };
 }
 
-function gateEvidenceAdapter(store, unit, adapters, record) {
+function gateEvidenceAdapter(store, unit, binding = null, trial = null) {
   return {
     latest: async gate => {
       const prior=(await store.read(unit)).evidence?.filter(item => item.gate === gate).at(-1) ?? null;
@@ -888,7 +1011,12 @@ function gateEvidenceAdapter(store, unit, adapters, record) {
     persist: async (gate, update) => {
       let evidence;
       await store.update(unit, current => {
-        evidence = update(current.evidence?.filter(item => item.gate === gate).at(-1) ?? null);
+        if (trial && (current.state !== 'SelfGated' || current.gateRecovery?.failureId !== trial.failureId
+          || !sameGateTarget(current.gateRecovery.repairTarget, binding?.target))) {
+          throw continuationError('STAGE_STALE', 'gate repair changed while the gate ran');
+        }
+        evidence = { ...update(current.evidence?.filter(item => item.gate === gate).at(-1) ?? null),
+          ...binding, ...(trial ? { revalidationOf: trial.failureId } : {}) };
         const updated = { ...current, evidence: [...(current.evidence ?? []), evidence] };
         if (!current.accepted || !hasInvalidEvidence(updated.evidence)) return updated;
         Object.assign(updated, { accepted: null, reviewDecision: null, reviewedHead: null, verdict: null, deliveryResult: null, terminalProjection: null });
@@ -908,6 +1036,11 @@ async function validCapturedReport(record) {
   catch { return false; }
 }
 
+function gateFailureProof(evidence) {
+  const { gate, fingerprint, report, digest, target, definition, status, failureClass, testCases } = evidence;
+  return { gate, fingerprint, report, digest, target, definition, status, failureClass, ...(testCases ? { testCases } : {}) };
+}
+
 async function runIsolatedGate({gate,stateRoot,unit,adapters,cwd}) {
   if (typeof adapters.command !== 'function') throw Object.assign(new Error('isolated gate execution requires the core command adapter'),{code:'ADAPTER_MISSING'});
   const directory=await mkdtemp(path.join(os.tmpdir(),'forge-gate-'));
@@ -923,6 +1056,9 @@ async function runEvidenceRerun({ stateRoot, unit, gateId, adapters, cwd }) {
   const store = createUnitStateStore(stateRoot);
   const record = await store.read(unit);
   if (!record) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
+  if (record.gateRecovery?.baseline.gate === gateId) {
+    throw continuationError('RETRY_NOT_ALLOWED', 'use ordinary acceptance to revalidate a submitted gate repair');
+  }
   if (typeof adapters.gates?.describe !== 'function') {
     throw Object.assign(new Error('evidence rerun requires a gate adapter'), { code: 'ADAPTER_MISSING' });
   }
@@ -936,7 +1072,7 @@ async function runEvidenceRerun({ stateRoot, unit, gateId, adapters, cwd }) {
     if (described?.length !== 1 || !applicabilityBytes.equals(Buffer.from(described[0].content))) throw Object.assign(new Error(`gate ${gateId} applicability does not match project package.json`), { code: 'ADAPTER_INVALID' });
   }
   const fingerprint = gateFingerprint(gate);
-  const adapter = gateEvidenceAdapter(store, unit, adapters, record);
+  const adapter = gateEvidenceAdapter(store, unit);
   const prior = await adapter.latest(gateId);
   if (!fingerprint || !prior || prior.fingerprint !== fingerprint) {
     throw Object.assign(new Error('independent rerun requires existing evidence with the same inputs'), { code: 'EVIDENCE_STALE' });
@@ -957,7 +1093,7 @@ async function runEvidenceRerun({ stateRoot, unit, gateId, adapters, cwd }) {
     summary: `Evidence ${gateId}: ${outcome.record.status}`, details: { unit, ...outcome } });
 }
 
-async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
+async function runAcceptance({ stateRoot, unit, adapters, cwd, ledger }) {
   const store = createUnitStateStore(stateRoot);
   let record = await store.read(unit);
   if (!record) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
@@ -969,6 +1105,15 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
   }
   const profile = selectProfile(record.kind);
   const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
+  const trial = record.gateRecovery;
+  if ((trial || policy.retry.onExhaustion === 'root-cause') && !ledger) return createLedgerStore(stateRoot).withLock(unit, locked =>
+    runAcceptance({ stateRoot, unit, adapters, cwd, ledger: locked }));
+  if (trial && (trial.status !== 'repair' || policy.retry.onExhaustion !== 'root-cause' || !trial.repairTarget)) {
+    throw continuationError('RETRY_NOT_ALLOWED', 'gate continuation requires a diagnosed and submitted repair');
+  }
+  if (trial && unresolvedEffect(await ledger.read())) {
+    throw continuationError('EFFECT_UNCERTAIN', 'reconcile the unresolved effect before gate revalidation');
+  }
   const policyDigest = digest({ policy, epoch: record.policyChanges?.at(-1)?.revision ?? 0, corrections: record.acceptanceCorrections ?? [], amendments: record.acceptanceAmendments ?? [] });
   const deliveryMetadataRequired = policy.delivery !== 'none' || externalDeliveryObligations(record).length > 0;
   const policyMatches = current => digest({ policy: resolvePolicy({ unit: current.policyOverrides ?? {}, project: current.policy ?? {} }, { nonInteractive: true }).policy,
@@ -978,8 +1123,12 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
     throw Object.assign(new Error('Git adapter must return the unit head and content fingerprint'), { code: 'ADAPTER_INVALID' });
   }
   const gateFingerprints = new Map();
+  if (trial && (!sameGateTarget(trial.repairTarget, target) || !(await validCapturedReport(trial.baseline)))) {
+    throw continuationError('EVIDENCE_STALE', 'submitted repair target or captured failure changed');
+  }
   await verifyAcceptanceCorrections(record, adapters, target);
-  for (const gateId of profile.gates) {
+  const gateOrder = trial ? [trial.baseline.gate, ...profile.gates.filter(id => id !== trial.baseline.gate)] : profile.gates;
+  for (const gateId of gateOrder) {
     const gate = await describeAcceptanceGate(adapters, gateId, unit, record);
     if (!gate || gate.id !== gateId) throw Object.assign(new Error(`gate adapter did not describe ${gateId}`), { code: 'ADAPTER_INVALID' });
     let applicabilityBytes;
@@ -992,7 +1141,17 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
     const fingerprint = gateFingerprint(gate);
     if (!fingerprint) throw Object.assign(new Error(`gate ${gateId} has no fingerprint inputs`), { code: 'ADAPTER_INVALID' });
     gateFingerprints.set(gateId, fingerprint);
-    const gateAdapter = gateEvidenceAdapter(store, unit, adapters, record);
+    const gateTrial = trial?.baseline.gate === gateId ? trial : null;
+    const definition = digest({ command: gate.command, format: gate.format, resultFormat: gate.resultFormat, acPattern: gate.acPattern });
+    if (gateTrial && (gate.applicability || definition !== trial.baseline.definition
+      || record.retryContinuations.some(item => item.gate === gateId
+        && (item.baseline.fingerprint === fingerprint || item.result?.evidence.fingerprint === fingerprint
+          || item.baseline.target.contentFingerprint === target.contentFingerprint
+          || item.result?.evidence.target.contentFingerprint === target.contentFingerprint)))) {
+      throw continuationError('RETRY_NO_PROGRESS', 'the failed gate requires new inputs under its original verification command');
+    }
+    const binding = policy.retry.onExhaustion === 'root-cause' ? { target: gateTarget(target), definition } : null;
+    const gateAdapter = gateEvidenceAdapter(store, unit, binding, gateTrial);
     const executeGate = gate.applicability
       ? async () => ({ exit: 0, ok: true, report: applicabilityBytes.toString('utf8'), reportPath: 'package.json', covers: [] })
       : async () => runIsolatedGate({gate,stateRoot,unit,adapters,cwd});
@@ -1005,7 +1164,11 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
       }
       return result;
     };
-    await runGate({ gate, fingerprint, adapter: gateAdapter, enforceSnapshot: true });
+    const prior = gateTrial ? await gateAdapter.latest(gateId) : null;
+    const observed = prior?.revalidationOf === gateTrial?.failureId && gateTrial && prior.status !== 'stale'
+      && prior.fingerprint === fingerprint && sameGateTarget(prior.target, target)
+      ? prior : (await runGate({ gate, fingerprint, adapter: gateAdapter, independent: Boolean(gateTrial), enforceSnapshot: true,
+        trackCases: policy.retry.onExhaustion === 'root-cause' })).record;
     const checkedGate = await describeAcceptanceGate(adapters, gateId, unit, record);
     if (!checkedGate || checkedGate.id !== gateId || gateFingerprint(checkedGate) !== fingerprint
       || gate.applicability && !(await readFile(path.join(cwd, 'package.json'))).equals(applicabilityBytes)) {
@@ -1018,6 +1181,34 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd }) {
       throw Object.assign(new Error(`gate ${gateId} inputs changed during execution`), { code: 'EVIDENCE_STALE' });
     }
     record = await store.read(unit);
+    if (gateTrial) {
+      if (!sameGateTarget(target, await adapters.git.inspectUnit({ unit, record })) || !(await validCapturedReport(observed))) {
+        throw continuationError('EVIDENCE_STALE', 'gate revalidation target or report changed');
+      }
+      if (observed.status === 'pending') {
+        return formatCliResult({ code: 3, summary: 'Gate repair judgment is pending', details: { unit, state: record.state, gate: gateId } });
+      }
+      const evidence = gateFailureProof(observed);
+      const diagnosedFailures = record.retryContinuations.filter(item => item.causeKey === trial.causeKey)
+        .flatMap(item => item.baseline.testCases ?? []);
+      if (!gateRepairPassed(diagnosedFailures, observed)) {
+        const progress = measuredGateProgress(trial.baseline, observed);
+        const recovery = createRecoveryStore(stateRoot);
+        const failure = await recovery.readFailure(unit, trial.failureId);
+        const next = await recovery.record({ store, unit, adapters, expectedRevision: record.revision,
+          failure: { class: failure.class, failurePoint: failure.failurePoint, reason: failure.reason, evidence,
+            snapshot: { evidence: record.evidence, changedPaths: record.changedPaths ?? [], diff: record.diff ?? {} } },
+          retryLimit: policy.retry.maxPerSignature, resolverLimit: policy.retry.maxResolver, revalidation: trial,
+          gateRecovery: { baseline: evidence, status: progress ? 'diagnose' : 'no-progress' } });
+        return formatCliResult({ code: 3, summary: progress ? 'Gate repair advanced; diagnose the remaining failure' : 'Gate repair stopped without verified progress',
+          details: { unit, state: next.record.state, gate: gateId, causeKey: next.failure.causeKey, failureRef: next.reference, progress } });
+      }
+      record = await store.update(unit, current => {
+        if (current.revision !== record.revision) throw continuationError('STAGE_STALE', 'unit changed before recording gate repair result');
+        return { ...current, gateRecovery: null, retryContinuations: current.retryContinuations.map(item =>
+          item.failureId !== trial.failureId ? item : { ...item, result: { evidence, progress: true, passed: true } }) };
+      });
+    }
   }
   const checkedTarget = await adapters.git.inspectUnit({ unit, record });
   const reviewResolution = resolveReview({
@@ -1613,7 +1804,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
     if (subcommand === 'retry') {
       const [unit] = rest;
       if (!unit) usageError('unit retry requires <unit>');
-      const result = await runRetry({ stateRoot: effectiveRoot, unit, options: parsed.options });
+      const result = await runRetry({ stateRoot: effectiveRoot, unit, options: parsed.options, adapters });
       return formatCliResult(result);
     }
     if (subcommand === 'finalize') {

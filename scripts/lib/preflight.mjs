@@ -16,7 +16,7 @@ const policyFields = new Set(['schema', 'scope', 'goal', 'authority', 'retry', '
 const nestedPolicyFields = {
   goal: new Set(['class', 'defaults']),
   authority: new Set(['allow', 'deny']),
-  retry: new Set(['maxPerSignature', 'maxResolver']),
+  retry: new Set(['maxPerSignature', 'maxResolver', 'onExhaustion']),
   review: new Set(['mode', 'by', 'triggers']),
   checkpoint: new Set(['retain', 'exclude']),
   escalation: new Set(['canonReviewAt']),

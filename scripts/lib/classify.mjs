@@ -32,6 +32,7 @@ function causeWithDefaults(cause, causeKey, failureClass) {
     retries: cause?.retries ?? 0,
     resolverAttempts: cause?.resolverAttempts ?? 0,
     activeResolver: cause?.activeResolver ?? false,
+    ...(cause?.continuations ? { continuations: cause.continuations } : {}),
   };
 }
 

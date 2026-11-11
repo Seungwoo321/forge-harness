@@ -76,7 +76,7 @@ function defaultReview(goalClass) {
 export function validatePolicy(policy) {
   const known = new Set([
     'goal.class', 'goal.defaults', 'authority.allow', 'authority.deny', 'retry.maxPerSignature',
-    'retry.maxResolver', 'review.mode', 'review.by', 'review.triggers', 'delivery',
+    'retry.maxResolver', 'retry.onExhaustion', 'review.mode', 'review.by', 'review.triggers', 'delivery',
     'checkpoint.retain', 'checkpoint.exclude', 'escalation.canonReviewAt', 'isolation',
     'session.runtime', 'session.provider', 'session.account', 'session.model', 'session.effort', 'session.argv', 'session.roles',
   ]);
@@ -84,8 +84,11 @@ export function validatePolicy(policy) {
     const value = get(policy, dotted);
     if (value === undefined) continue;
     if (dotted === 'goal.class' && !classes.has(value)) throw new TypeError(`invalid goal.class: ${value}`);
-    if (dotted.startsWith('retry.') && (!Number.isInteger(value) || value < 1 || value > 5)) {
+    if (['retry.maxPerSignature', 'retry.maxResolver'].includes(dotted) && (!Number.isInteger(value) || value < 1 || value > 5)) {
       throw new TypeError(`${dotted} must be an integer from 1 to 5`);
+    }
+    if (dotted === 'retry.onExhaustion' && !['stop', 'root-cause'].includes(value)) {
+      throw new TypeError('retry.onExhaustion must be stop or root-cause');
     }
     if (dotted === 'delivery' && !(value in deliveryRank)) throw new TypeError(`invalid delivery: ${value}`);
     if (dotted === 'review.mode' && !['none', 'conditional', 'required'].includes(value)) {
@@ -127,7 +130,7 @@ export function validatePolicy(policy) {
   if (!policy || typeof policy !== 'object' || Array.isArray(policy)
     || Object.keys(policy).some(key => !allowedTop.has(key))) throw new TypeError('policy contains unsupported fields');
   const allowedChildren = {
-    goal: new Set(['class', 'defaults']), authority: new Set(['allow', 'deny']), retry: new Set(['maxPerSignature', 'maxResolver']),
+    goal: new Set(['class', 'defaults']), authority: new Set(['allow', 'deny']), retry: new Set(['maxPerSignature', 'maxResolver', 'onExhaustion']),
     review: new Set(['mode', 'by', 'triggers']), session: new Set(['runtime', 'provider', 'account', 'model', 'effort', 'argv', 'roles']), checkpoint: new Set(['retain', 'exclude']), escalation: new Set(['canonReviewAt']),
   };
   for (const [key, fields] of Object.entries(allowedChildren)) {
@@ -152,7 +155,7 @@ export function resolvePolicy({ global = {}, workspace = {}, project = {}, unit 
   const resolved = {};
   const policySources = {};
   const fields = [
-    'goal.class', 'authority.allow', 'authority.deny', 'retry.maxPerSignature', 'retry.maxResolver',
+    'goal.class', 'authority.allow', 'authority.deny', 'retry.maxPerSignature', 'retry.maxResolver', 'retry.onExhaustion',
     'review.mode', 'review.by', 'review.triggers', 'delivery', 'checkpoint.retain',
     'checkpoint.exclude', 'escalation.canonReviewAt', 'isolation',
     'session.runtime', 'session.provider', 'session.account', 'session.model', 'session.effort', 'session.argv', 'session.roles',

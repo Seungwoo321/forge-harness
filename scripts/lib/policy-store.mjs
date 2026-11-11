@@ -25,7 +25,7 @@ async function readPolicy(file, expectedScope) {
     if (expectedScope === 'workspace' && data.scope !== 'workspace') return {};
     if (expectedScope === 'project' && data.scope !== undefined && data.scope !== 'project') return {};
     const policy = { ...data };
-    for (const field of ['schema', 'scope', 'confirmedBy', 'confirmedAt', 'source', 'goal.defaults']) delete policy[field];
+    for (const field of ['schema', 'scope', 'confirmedBy', 'confirmedAt', 'userInputRef', 'source', 'goal.defaults']) delete policy[field];
     if (data.goal?.defaults !== undefined) policy.goal = { ...data.goal, defaults: data.goal.defaults };
     validatePolicy(policy);
     return policy;
@@ -107,6 +107,9 @@ export async function setPolicy({ level, draft, stateRoot, projectRoot, workspac
   }
   const policy = draft.policy ?? draft;
   validatePolicy(policy);
+  if (policy.retry?.onExhaustion === 'root-cause' && (typeof userInputRef !== 'string' || !userInputRef.trim())) {
+    throw new TypeError('root-cause continuation requires the explicit policy confirmation reference');
+  }
   if (policy.goal?.class === undefined && !(level !== 'project' && policy.goal?.defaults)) {
     throw new TypeError('policy draft must set goal.class or goal.defaults');
   }
@@ -119,12 +122,13 @@ export async function setPolicy({ level, draft, stateRoot, projectRoot, workspac
   const before = await readPolicy(file, level);
   const confirmedAt = adapters.now();
   const confirmedBy = 'user';
-  const saved = { schema: 'harness.policy/1', ...(level === 'workspace' ? { scope: 'workspace' } : {}), ...policy, confirmedBy, confirmedAt };
+  const saved = { schema: 'harness.policy/1', ...(level === 'workspace' ? { scope: 'workspace' } : {}), ...policy, confirmedBy, confirmedAt,
+    ...(policy.retry?.onExhaustion === 'root-cause' ? { userInputRef: userInputRef.trim() } : {}) };
   await atomicJson(file, saved);
-  if (change) {
+  if (change || policy.retry?.onExhaustion === 'root-cause') {
     await mkdir(stateRoot, { recursive: true });
     await appendFile(path.join(stateRoot, 'policy-changes.ndjson'), `${JSON.stringify({
-      id: adapters.id(), level, path: file, before, after: policy, reason: reason.trim(),
+      id: adapters.id(), level, path: file, before, after: policy, reason: reason?.trim() || 'Root-cause continuation enabled',
       userInputRef: userInputRef.trim(), confirmedBy, confirmedAt,
     })}\n`, { encoding: 'utf8', mode: 0o600, flag: 'a' });
   }

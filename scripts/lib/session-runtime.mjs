@@ -273,7 +273,7 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
         await beforeInput?.();
         return runtime === 'cmux' ? invoke('cmux',['rpc','surface.send_text',JSON.stringify({workspace_id:observed.workspaceId,surface_id:observed.sessionId,text})],observed.cwd) : orcaSend(text);
       };
-      await submitNativeGoal({provider:path.basename(observed.executable),objective:prompt,read,write,beforeWrite,resumeDraft:Boolean(request.resumeDraft),recovery:input.submission?.recovery === true,preTurn:Boolean(request.preTurn),
+      await submitNativeGoal({provider:path.basename(observed.executable),objective:prompt,read,write,beforeWrite,resumeDraft:Boolean(request.resumeDraft),recovery:input.submission?.recovery === true,preTurn:request.preTurn,
         beforeEnter:async () => {
           if (typeof submission?.confirm !== 'function') throw invalid('durable native Return fence is unavailable');
           await submission.confirm(request.binding);

@@ -45,7 +45,7 @@ async function startLocked({stateRoot,unit,request,store,adapters,record,goal,le
   const rows = await ledger.read();
   const reservation = rows.findLast(row => row.event === 'session-start-recovery');
   const historyLength = record.sessionHistory?.length ?? 0;
-  const attempt = Math.max(historyLength + 1, reservation ? reservation.nextArgs.attempt + historyLength - reservation.sessionHistoryLength : 1);
+  const attempt = Math.max(historyLength + 1, reservation ? (reservation.nextArgs?.attempt ?? reservation.nextAttempt) + historyLength - reservation.sessionHistoryLength : 1);
   const currentOwner = goalOwner(goal,unit);
   if (!review && (currentOwner?.ownership === 'existing' || attempt === 1 && currentOwner?.successor === unit)) throw failure('successor already has a recorded owner');
   const source = await readFile(goal.source.path);
@@ -58,7 +58,7 @@ async function startLocked({stateRoot,unit,request,store,adapters,record,goal,le
   const targetCustody = review ? goalOwner(goal, record.targetUnit) : null;
   if (targetCustody?.ownership === 'existing' && (!targetRecord || targetRecord.state !== 'InReview')) throw failure('adopted review target must be InReview');
   const priorIntent = rows.findLast(row => row.event === 'intent' && row.effect === 'session.start' && row.args?.unit === unit && row.args?.attempt === attempt);
-  const boundArgs = priorIntent?.args ?? (reservation?.nextArgs.attempt === attempt ? reservation.nextArgs : null);
+  const boundArgs = priorIntent?.args ?? (reservation?.nextArgs?.attempt === attempt ? reservation.nextArgs : null);
   const {policy} = resolvePolicy({unit:record.policyOverrides ?? {},project:record.policy ?? {}},{nonInteractive:true});
   if (review && targetCustody?.ownership === 'existing' && !boundArgs && !executionPoliciesEqual(policy.session, goal.policy))
     throw Object.assign(new Error('fresh review execution policy differs from the current goal'), {code:'CONTINUITY_STALE'});

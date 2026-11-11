@@ -2,11 +2,12 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { readCodexNativeGoal } from './codex-native-goal.mjs';
 
-// Codex rust-v0.167.0 (086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a) defers fresh
-// rollouts; queue/list resolves the thread before reading the independent queue store.
+// The pinned 0.167.0/0.167.1 contracts defer fresh rollouts; see ADR 0038.
+// queue/list resolves the thread before reading the independent queue store.
 export async function observeUnmaterializedThread({rpc, initialization, threadId, account, sqliteRoot, cwd, readError}) {
+  const version = /^session_transport\/(0\.167\.[01])(?: |$)/.exec(initialization?.userAgent ?? '')?.[1];
   if (!sqliteRoot || initialization?.codexHome !== account
-    || !/^session_transport\/0\.167\.0(?: |$)/.test(initialization?.userAgent ?? '')
+    || !version
     || readError.rpcCode !== -32600 || readError.message !== `thread not loaded: ${threadId}`) throw readError;
   for (const [method, code, message] of [
     ['thread/turns/list', -32600, `thread not loaded: ${threadId}`],
@@ -32,6 +33,6 @@ export async function observeUnmaterializedThread({rpc, initialization, threadId
     if (columns.length !== expected.length || columns.some((column,index) => JSON.stringify([column.name,column.type,column.notnull,column.pk]) !== JSON.stringify(expected[index]))) throw new Error('unsupported native queue schema');
     const count = database.prepare('SELECT COUNT(*) AS count FROM queued_items WHERE thread_id = ?').get(threadId).count;
     if (count !== 0 || readCodexNativeGoal(threadId, sqliteRoot) !== null) throw new Error('native goal or queued input is present');
-    return {observation:'unmaterialized', proof:{platform:'codex/0.167.0',threadId,account,sqliteRoot,queueCount:count,defaultLineEditing},goal:null};
+    return {observation:'unmaterialized', proof:{platform:`codex/${version}`,threadId,account,sqliteRoot,queueCount:count,defaultLineEditing},goal:null};
   } finally { database.close(); }
 }

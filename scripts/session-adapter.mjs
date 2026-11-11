@@ -25,16 +25,16 @@ export async function createRuntimeAdapters({ cwd, adapters, options, argv }) {
     const rows = await createLedgerStore(stateRoot).withLock(unit,ledger=>ledger.read());
     const recovery = rows.findLast(row=>row.event === 'session-start-recovery');
     const historyLength = record.sessionHistory?.length ?? 0;
-    const attempt = Math.max(historyLength+1,recovery ? recovery.nextArgs.attempt+historyLength-recovery.sessionHistoryLength : 1);
+    const attempt = Math.max(historyLength+1,recovery ? (recovery.nextArgs?.attempt ?? recovery.nextAttempt)+historyLength-recovery.sessionHistoryLength : 1);
     const args = rows.findLast(row=>row.event === 'intent' && row.effect === 'session.start' && row.args?.attempt === attempt)?.args
-      ?? (recovery?.nextArgs.attempt === attempt ? recovery.nextArgs : null);
+      ?? (recovery?.nextArgs?.attempt === attempt ? recovery.nextArgs : null);
     if (args) {
       await loadManagedLaunch(args);
       observationPolicy = JSON.parse(await readFile(args.goalPath,'utf8')).policy;
     }
   }
   const role = record.kind === 'review' && positional[1] !== 'session-start' ? 'review' : 'implementation';
-  const custody = record.kind === 'review' ? (positional[1] === 'session-start' ? goalOwner(goal,record.targetUnit) : goal?.reviews?.findLast(item=>item.unit === unit)) : goalOwner(goal,unit);
+  const custody = record.kind === 'review' ? (['session-start','session-recover'].includes(positional[1]) ? goalOwner(goal,record.targetUnit) : goal?.reviews?.findLast(item=>item.unit === unit)) : goalOwner(goal,unit);
   const custodyPolicy = async custody => {
     if (custody?.policyDigest) {
       const policy = [goal?.policy,...(goal?.policyChanges ?? []).map(change=>change.previous)].find(policy=>policy && effectArgsDigest(policy) === custody.policyDigest);

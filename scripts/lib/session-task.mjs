@@ -53,7 +53,7 @@ export async function observeGoalTask({ transport, observed, input, prompt, pack
   if (['absent','unmaterialized'].includes(evidence.state) && submission && (!submission.attempted || resumeDraft)) {
     if (submission.readOnly) throw taskError('completed native start is observation-only');
     const preTurn = evidence.state === 'unmaterialized';
-    if (!threadId || (preTurn ? evidence.proof?.platform !== 'codex/0.167.0' || evidence.proof.threadId !== threadId
+    if (!threadId || (preTurn ? !/^codex\/0\.167\.[01]$/.test(evidence.proof?.platform ?? '') || evidence.proof.threadId !== threadId
       || !evidence.proof.sqliteRoot || evidence.proof.queueCount !== 0
       : evidence.notApplied !== true && (submission.recovery || evidence.freshOnly !== true))) throw taskError('native input absence is unverified');
     if (typeof submission.mark !== 'function') throw taskError('durable native submission fence is unavailable');

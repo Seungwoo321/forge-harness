@@ -53,7 +53,7 @@ export function createCodexTaskTransport({ command, executable = 'codex', submit
     if (result.exitCode !== 0 || result.signal) throw taskError('native worker history is unavailable');
     const data = JSON.parse(result.stdout);
     const current = await binding(request.observed);
-    const unmaterialized = data.observation === 'unmaterialized' && data.proof?.platform === 'codex/0.167.0'
+    const unmaterialized = data.observation === 'unmaterialized' && /^codex\/0\.167\.[01]$/.test(data.proof?.platform ?? '')
       && data.proof.threadId === threadId && data.proof.account === account && data.proof.sqliteRoot === sqliteRoot
       && sqliteRoot && current.sqliteRoot === sqliteRoot && data.proof.queueCount === 0 && data.goal === null;
     if (current.threadId !== threadId || (data.observation === 'unmaterialized' ? !unmaterialized

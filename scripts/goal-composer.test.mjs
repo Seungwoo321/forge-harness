@@ -35,7 +35,7 @@ test('first argument must flush visibly before a Korean objective can reach slas
 test('first-input proof rejects clipped, prior-input, pending and startup views before recording submission',async()=>{
  const fresh=' >_ OpenAI Codex (v0.167.0)\n';
  const ready='› Ask Codex to do anything\n model · Ready · context\n ? for shortcuts';
- for(const screen of [ready, fresh+'› prior user input\n'+ready,...['Messages to be submitted after next tool call','Messages to be submitted at end of turn','Queued follow-up inputs','edit last queued message','Waiting for startup','Preparing images','pending approval','Review plugin hooks'].map(line=>fresh+line+'\n'+ready),fresh+'› foreign draft\n model · Ready · context']) {
+ for(const screen of [ready, fresh.replace('0.167.0','0.167.1')+ready, fresh+'› prior user input\n'+ready,...['Messages to be submitted after next tool call','Messages to be submitted at end of turn','Queued follow-up inputs','edit last queued message','Waiting for startup','Preparing images','pending approval','Review plugin hooks'].map(line=>fresh+line+'\n'+ready),fresh+'› foreign draft\n model · Ready · context']) {
   let marks=0,writes=0;
   await assert.rejects(submitNativeGoal({provider:'codex',objective:'finish',preTurn:true,read:async()=>screen,verify:async()=>{},beforeWrite:async()=>{marks++;},write:async()=>{writes++;},enter:async()=>{}}));
   assert.equal(marks,0);assert.equal(writes,0);

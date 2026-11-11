@@ -11,4 +11,6 @@ Read the supplied StageInput and this directory's `contract.json`. The input con
 2. Classify each finding as `product`, `harness`, `environment`, or `user-domain`. Compare fixes at the local, shared-code, and design boundaries; recommend a fix that preserves the canon and addresses callers.
 3. Return a separate StageOutput matching `contract.json`, copying `inputDigest` and `attempt` and assigning a stable `submissionId`. Supply `status`, `summary`, `findings`, and `assumptions`. A finding includes `id`, `kind: diagnosis`, `severity`, `site`, `claim`, `case`, `fix`, and its classification.
 
+For a captured product gate at the retry limit, cite the specific failing evidence in the diagnosis and submit before editing. Use a `should-fix` diagnosis when the gate is the measure of repair. A `must-fix` remains subject to the usual independent finding resolution. On a successful submission, run `unit retry <unit> --cause-key <recorded-key>` to open the authorized correction, then use the normal implement and acceptance stages.
+
 Do not patch code as part of diagnosis, change retry budgets, reset failure signatures, or write state/ledger/evidence files. The driver records the diagnosis and authorizes the bounded fix-forward path.

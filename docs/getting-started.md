@@ -62,6 +62,16 @@ implement 스킬이 계약에 맞는 출력을 반환하면 같은 `stage submit
 
 수용 후 `unit finish <unit> --request finish.json --adapters <module>`가 전달과 후속 처리를 수행한다. finish 요청·세션 identity 계약은 [명세 §7](spec.md#7-스킬-구성과-계약)에 있다. 결과만 쓰고 종료·전달을 가장하지 않는다. `unit fail`, `unit retry`, `unit resume`는 저장된 실패와 시도 상한을 사용하며 상태 파일을 수동 수정하지 않는다.
 
+### 게이트 재시도 상한 이후 복구
+
+작업 시작 전에 승인된 정책에 `"retry": {"onExhaustion": "root-cause"}`를 설정한다. `policy set`에 실제 승인 참조를 `--user-input-ref`로 전달한다. 일반 재시도와 해결 세션의 기본값은 각각 2다.
+
+1. `unit accept`가 제품 게이트 실패를 기록하면 `unit fail <unit> --failure failure.json --gate <id>`로 해당 실패를 등록한다. 실패 JSON은 `class: "product"`, `failurePoint`, `reason`을 포함한다. 같은 원인이 반복되면 실패 지점과 요지를 유지한다.
+2. 재시도가 바로 열리면 구현을 이어간다. 진단이나 상한 중단이 반환되면 `unit stage open <unit> root-cause`에서 실패 시점의 입력을 읽고 진단을 제출한다. `unit retry <unit> --cause-key <key>`로 같은 단위의 구현을 다시 연다.
+3. 수정 사항을 implement 단계로 제출하고 `unit accept`로 재검증한다. 실패 게이트가 통과하면 전체 필수 게이트와 리뷰를 확인한다. 일부 실패 사례가 실제로 해결되었다는 증거가 있으면 진단부터 한 번 더 진행한다. 실행 불명 원장은 먼저 해당 효과의 공개 절차로 확정한다.
+
+현재 격리 보고서에 제품 실패 증거가 있어야 한다. 일반 실행형 게이트는 명시적으로 제품 실패를 보고해야 하며, 같은 게이트가 계속 실패할 때는 비교 가능한 사례 결과가 없으면 추가 복구를 중단한다.
+
 열린 구현 단계에서 승인된 상위 변경을 통합해 HEAD가 바뀌어 `CHECKPOINT_STALE`이 발생하면 `unit stage restart <unit> implement --request <file>`을 사용한다. 요청 JSON에는 기존 시도의 `attempt`, `inputDigest`, `checkpointHead`와 현재 `newHead`를 정확히 담는다. 제어면은 Git HEAD와 참조 잠금 아래에서 현재 HEAD가 기존 HEAD의 후손인지 확인하고 기존 시도를 보존한 채 종료한다. 파일 기반 Git 참조 저장소만 지원하며 잠금을 얻지 못하면 재개하지 않는다. 이어 `unit stage open <unit> implement`로 확인한 HEAD에 묶인 같은 단위의 다음 시도를 연다. 그 전에 HEAD가 다시 전진하면 같은 시도의 요청에서 `newHead`를 갱신해 restart를 다시 호출한다. 이전 결속과 미완료 입력은 보존하며 같은 결속의 재호출은 기록을 중복 생성하지 않는다. 작업 파일과 이전 증거는 그대로 두며 새 수용과 리뷰는 현재 내용에 대해 수행한다.
 
 완료된 구현 시도 뒤에 공개 `unit reopen`으로 구현을 재개한 경우에도 같은 `stage restart` 요청으로 현재 관측한 후손 HEAD를 다음 체크포인트에 결속한다. 완료 결과는 그대로 두고 더 최신인 reopen revision을 restart 감사 기록에 남긴다. 실패한 open이 이미 쓴 StageInput은 검증 후 보존하고 그 번호를 건너뛴다. 더 최신의 reopen이 없는 완료 시도는 이 경로를 사용할 수 없으며, scope recheck는 HEAD를 재결속하지 않는다. [ADR 0024](adr/0024-rebind-reopened-implementation.md)를 따른다.

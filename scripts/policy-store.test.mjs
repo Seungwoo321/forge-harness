@@ -71,3 +71,20 @@ test('registered SessionStart hook emits one notice without prompting or writing
   assert.equal(output, 'Work policy is not configured; run policy-setup before starting a unit.\n');
   await assert.rejects(() => readFile(path.join(projectRoot, '.git', 'work-state', 'policy.json')));
 });
+
+test('AC-1 AC-2 root-cause continuation is confirmed explicitly and retains numeric limits and policy source', async t => {
+  const { projectRoot, stateRoot, adapters } = await fixture(t);
+  const options = { level: 'project', projectRoot, stateRoot, adapters };
+  const draft = { goal: { class: 'task' }, retry: { onExhaustion: 'root-cause' } };
+  await assert.rejects(setPolicy({ ...options, draft }), /explicit policy confirmation/);
+  await assert.rejects(setPolicy({ ...options, draft: { ...draft, retry: { onExhaustion: 'unlimited' } } }), /stop or root-cause/);
+  await setPolicy({ ...options, draft, userInputRef: 'conversation:confirmed' });
+  const result = await resolveStoredPolicy({ stateRoot, projectRoot });
+  assert.deepEqual(result.policy.retry, { onExhaustion: 'root-cause', maxPerSignature: 2, maxResolver: 2 });
+  assert.equal(result.policySources['retry.onExhaustion'], 'project');
+  const history = JSON.parse(await readFile(path.join(stateRoot, 'policy-changes.ndjson'), 'utf8'));
+  assert.equal(history.userInputRef, 'conversation:confirmed');
+  const override = await resolveStoredPolicy({ stateRoot, projectRoot, user: { retry: { onExhaustion: 'stop' } } });
+  assert.equal(override.policySources['retry.onExhaustion'], 'user');
+  assert.equal(override.policy.retry.onExhaustion, 'stop');
+});

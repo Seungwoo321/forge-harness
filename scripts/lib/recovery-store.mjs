@@ -86,16 +86,26 @@ export function createRecoveryStore(stateRoot) {
   }
 
   return Object.freeze({
-    async record({ store, unit, failure, retryLimit = 2, resolverLimit = 2, needsDiagnosis = false, resolverDepth = 0, adapters }) {
+    async record({ store, unit, failure, retryLimit = 2, resolverLimit = 2, needsDiagnosis = false, resolverDepth = 0,
+      gateRecovery, revalidation, expectedRevision, adapters }) {
       unitName(unit);
       if (!store || typeof store.read !== 'function' || typeof store.update !== 'function') throw new TypeError('Unit Record store is required');
       if (!adapters || typeof adapters.id !== 'function' || typeof adapters.now !== 'function') throw new TypeError('recovery adapters are required');
       return withRegistry(async causes => {
         const current = await store.read(unit);
         if (!current) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
+        const assertRevision = record => {
+          if (expectedRevision !== undefined && expectedRevision !== record.revision) {
+            throw Object.assign(new Error('unit changed before failure could be recorded'), { code: 'STAGE_STALE' });
+          }
+        };
+        assertRevision(current);
         const key = createCauseKey(failure ?? {});
         const prior = causes[key];
         const decision = decideFailure({ failure, cause: prior, retryLimit, resolverLimit, needsDiagnosis, resolverDepth });
+        if (gateRecovery && decision.cause.class !== 'product') {
+          throw Object.assign(new Error('captured gate repair cannot change the confirmed cause classification'), { code: 'RETRY_NOT_ALLOWED' });
+        }
         const record = {
           id: adapters.id(), unit, class: decision.cause.class, failurePoint: failure.failurePoint,
           causeKey: decision.cause.causeKey, signature: decision.signature, occurrence: decision.cause.occurrences,
@@ -109,19 +119,30 @@ export function createRecoveryStore(stateRoot) {
           lastAction: decision.action === 'diagnose' && decision.cause.class === 'unknown' ? 'awaiting-diagnosis' : decision.action,
         };
         const updated = await store.update(unit, next => {
+          assertRevision(next);
           const failed = { ...next, failures: [...(next.failures ?? []), reference] };
+          if (gateRecovery) failed.feedback = [...(next.feedback ?? []), { kind: 'gate-failure', failure: reference, evidence: gateRecovery.baseline }];
+          if (gateRecovery && ['stop', 'diagnose'].includes(decision.action)) {
+            failed.gateRecovery = { ...gateRecovery, failure: reference, failureId: record.id, causeKey: record.causeKey,
+              status: decision.action === 'diagnose' ? 'ordinary-diagnosis' : gateRecovery.status };
+          }
+          if (revalidation) {
+            failed.retryContinuations = next.retryContinuations.map(receipt => receipt.failureId !== revalidation.failureId ? receipt
+              : { ...receipt, result: { evidence: gateRecovery.baseline, failure: reference, progress: gateRecovery.status === 'diagnose' } });
+          }
           return transitionForFailure(failed, decision);
         });
         return { failure: record, reference, decision, record: updated };
       });
     },
-    async reserveRetry({ causeKey, retryLimit = 2 }) {
+    async reserveRetry({ causeKey, retryLimit = 2, apply }) {
       if (typeof causeKey !== 'string' || !causeKey) throw new TypeError('causeKey is required');
       return withRegistry(async causes => {
         const prior = causes[causeKey];
         if (!prior || prior.lastAction !== 'diagnose' || prior.class === 'unknown') throw Object.assign(new Error('retry reservation requires completed diagnosis'), { code: 'DIAGNOSIS_REQUIRED' });
         if (prior.class !== 'product') throw Object.assign(new Error(`retry is not allowed for ${prior.class} failures`), { code: 'RETRY_NOT_ALLOWED' });
         const decision = reserveRetry(prior, retryLimit);
+        if (apply) await apply(decision);
         if (decision.action === 'retry') causes[causeKey] = { ...decision.cause, lastAction: 'retry' };
         return decision;
       });
@@ -156,6 +177,19 @@ export function createRecoveryStore(stateRoot) {
     async causes() {
       return parseCauses(await readFile(registryFile, 'utf8').catch(error => error.code === 'ENOENT' ? '' : Promise.reject(error)));
     },
+    async continueResolved({ causeKey, expected, receipt, apply }) {
+      return withRegistry(async causes => {
+        const prior = causes[causeKey];
+        if (!prior || digest(JSON.stringify(prior)) !== digest(JSON.stringify(expected)) || prior.activeResolver) {
+          throw Object.assign(new Error('cause or resolver reservation changed'), { code: 'RETRY_NOT_ALLOWED' });
+        }
+        if (prior.continuations?.some(item => item.proof.progressDigest === receipt.proof.progressDigest)) {
+          throw Object.assign(new Error('the correction observation was already used'), { code: 'RETRY_NO_PROGRESS' });
+        }
+        await apply();
+        causes[causeKey] = { ...prior, continuations: [...(prior.continuations ?? []), receipt] };
+      });
+    },
     async readFailure(unit, id) {
       unitName(unit);
       if (typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) throw new TypeError('failure id is invalid');
@@ -165,12 +199,18 @@ export function createRecoveryStore(stateRoot) {
   });
 }
 
-export async function resumeUnitFailure({ store, unit, snapshot, validateStopped }) {
+export async function resumeUnitFailure({ store, unit, snapshot, validateStopped, validateResolution }) {
   if (!store || typeof store.read !== 'function' || typeof store.update !== 'function') throw new TypeError('Unit Record store is required');
   const record = await store.read(unit);
   if (!record) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
   if (!snapshot || typeof snapshot !== 'object') throw new TypeError('resume snapshot is required');
-  const recovery = decideResume({ ...snapshot, record, evidence: record.evidence ?? [] });
+  let recovery = decideResume({ ...snapshot, record, evidence: record.evidence ?? [] });
+  const resolution = record.retryResolutions?.at(-1);
+  const pendingResolution = record.state === 'Stopped' && resolution && !record.retryResumptions?.some(item => item.requestDigest === resolution.requestDigest)
+    && record.failures?.at(-1)?.digest === resolution.failureRef.digest;
+  if (pendingResolution && recovery.action === 'resume') {
+    recovery = { ...recovery, action: 'revalidate', resumeState: recovery.state, nextStage: 'gates', reason: 'verified correction of exhausted cause' };
+  }
   const revalidate = ['rerun-gate', 'revalidate'].includes(recovery.action);
   if (recovery.action !== 'resume' && !revalidate) return { record, recovery };
   const beforeGates = ['Scoped', 'Implementing'].includes(recovery.resumeState) && !record.accepted;
@@ -180,6 +220,10 @@ export async function resumeUnitFailure({ store, unit, snapshot, validateStopped
   const updated = revalidate || ['Blocked', 'Stopped'].includes(record.state)
     ? await store.update(unit, async current => {
       if (current.revision !== record.revision) throw Object.assign(new Error('unit changed before resume'), {code:'CONTINUITY_STALE'});
+      if (pendingResolution) {
+        if (!validateResolution) throw Object.assign(new Error('correction resume requires current trusted verification'), { code: 'RETRY_RESOLUTION_UNPROVEN' });
+        await validateResolution(current, resolution);
+      }
       let observation;
       if (current.state === 'Stopped' && current.stopReport && !current.sessionFinalization) {
         if (!validateStopped) throw Object.assign(new Error('retained stopped owner closure is not verified'), {code:'SESSION_CLOSE_PENDING'});
@@ -194,6 +238,12 @@ export async function resumeUnitFailure({ store, unit, snapshot, validateStopped
         resumed.sessionFinalization = null;
       }
       if (observation) resumed.sessionHistory = [...(current.sessionHistory ?? []), observation];
+      if (pendingResolution) resumed.retryResumptions = [...(current.retryResumptions ?? []),
+        { requestDigest: resolution.requestDigest, revision: current.revision + 1 }];
+      if (pendingResolution && current.gateRecovery) {
+        resumed.gateRecoveryHistory = [...(current.gateRecoveryHistory ?? []), current.gateRecovery];
+        resumed.gateRecovery = null;
+      }
       if (revalidate) {
         const latest = new Map((current.evidence ?? []).map(item => [item.gate, item]));
         const invalidated = [...latest.values()].filter(item => recovery.action === 'revalidate' || item.gate === recovery.gate)

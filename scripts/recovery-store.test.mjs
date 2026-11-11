@@ -216,3 +216,94 @@ test('AC-2 stale evidence still requires exact stopped finalization and rejects 
   }
  });
 });
+
+test('AC-1 AC-2 verified external harness correction resumes the original exhausted unit and preserves resolver history', async t => {
+  const { stateRoot, store, root, adapters, recovery } = await fixture(t, 'external-repair');
+  const { createHash } = await import('node:crypto');
+  const hash = bytes => 'sha256:' + createHash('sha256').update(bytes).digest('hex');
+  let target = 'broken-release';
+  await store.update('external-repair', record => ({ ...record, scopePaths: [],
+    policy: { goal: { class: 'task' }, retry: { maxResolver: 1, onExhaustion: 'root-cause' } } }));
+  adapters.git = { inspectUnit: async () => ({ head: 'head', contentFingerprint: target }) };
+  adapters.checkpoint = {
+    createCheckpoint: async () => ({ commit: 'checkpoint', worktreeChanged: false, indexChanged: false }),
+    inspectChanges: async () => ({ firstCheckpointDiff: [], attemptDiff: [] }),
+  };
+  adapters.provider = { async verifyRetryResolution(input) {
+    const bytes = await readFile(input.request.evidence.ref);
+    const observed = JSON.parse(bytes);
+    const verified = hash(bytes) === input.request.evidence.digest && observed.resolved === true
+      && observed.original === input.failure.reason && observed.current === target && target !== 'broken-release';
+    return { unit: input.unit, failureId: input.failureId, causeKey: input.causeKey, requestDigest: input.requestDigest,
+      targetDigest: input.targetDigest, diagnosisDigest: input.diagnosisDigest, policyDigest: input.policyDigest,
+      resolved: verified, verified, progressDigest: hash(bytes) };
+  } };
+  const run = async args => JSON.parse((await runUnitCli(args, {
+    cwd: root, stateRoot, contractsDir: path.join(repo, 'skills'), adapters,
+  })).split('\n').at(-1).slice(7));
+  const failureFile = path.join(root, 'failure.json');
+  await writeFile(failureFile, JSON.stringify({ class: 'harness', failurePoint: 'runner', reason: 'broken-release' }));
+  const first = await run(['unit', 'fail', 'external-repair', '--failure', failureFile]);
+  assert.equal(first.action, 'resolver');
+  await recovery.finishResolver({ causeKey: first.causeKey });
+  await resumeUnitFailure({ store, unit: 'external-repair', snapshot: { git: { head: 'head', checkpoints: {}, worktreeDiff: [], indexDiff: [] } } });
+  const stopped = await run(['unit', 'fail', 'external-repair', '--failure', failureFile]);
+  assert.equal(stopped.action, 'stop');
+  const snapshot = path.join(root, 'snapshot.json');
+  await writeFile(snapshot, JSON.stringify({ git: { head: 'head', checkpoints: {}, worktreeDiff: [], indexDiff: [] } }));
+  assert.equal((await run(['unit', 'resume', 'external-repair', '--snapshot', snapshot])).error, 'DIAGNOSIS_REQUIRED');
+
+  const opened = await run(['unit', 'stage', 'open', 'external-repair', 'root-cause']);
+  assert.equal(opened.code, 0, JSON.stringify(opened));
+  const { inputDigest, attempt } = JSON.parse(await readFile(opened.input));
+  const diagnosis = path.join(root, 'diagnosis.json');
+  await writeFile(diagnosis, JSON.stringify({ inputDigest, attempt, submissionId: 'diagnosis', status: 'done', summary: 'Shared runtime defect',
+    assumptions: [], findings: [{ id: 'D-1', kind: 'diagnosis', severity: 'should-fix', site: 'runner',
+      classification: 'harness', claim: 'The released runtime violates its contract', case: 'The original launch fails',
+      fix: 'Repair and independently verify the release before resuming' }] }));
+  assert.equal((await run(['unit', 'stage', 'submit', 'external-repair', 'root-cause', '--output', diagnosis])).code, 0);
+
+  const proof = path.join(root, 'correction.json');
+  const proofBytes = JSON.stringify({ resolved: true, original: 'broken-release', current: 'fixed-release' });
+  await writeFile(proof, proofBytes);
+  const requestFile = path.join(root, 'resolution.json');
+  const before = await store.read('external-repair');
+  const request = { id: 'verified-correction', expectedRevision: before.revision, failureId: stopped.failureId,
+    evidence: { ref: proof, digest: hash(proofBytes) }, reason: 'Published correction and successful original reproduction verified' };
+  await writeFile(requestFile, JSON.stringify(request));
+  const args = ['unit', 'retry', 'external-repair', '--cause-key', stopped.causeKey, '--request', requestFile];
+  assert.equal((await run(args)).error, 'RETRY_RESOLUTION_UNPROVEN');
+  assert.deepEqual(await store.read('external-repair'), before);
+  target = 'fixed-release';
+  const { resolveExhaustedFailure } = await import('./lib/retry-resolution.mjs');
+  const update = store.update;
+  await assert.rejects(resolveExhaustedFailure({ stateRoot, unit: 'external-repair',
+    store: { ...store, async update(unit, action) {
+      await update(unit, action);
+      throw new Error('interrupted after durable unit receipt');
+    } },
+    request, causeKey: stopped.causeKey, policy: { maxPerSignature: 2, maxResolver: 1, onExhaustion: 'root-cause' }, adapters,
+  }), /interrupted after durable/);
+  assert.equal((await recovery.causes())[stopped.causeKey].continuations, undefined);
+  assert.equal((await run(args)).receipt.duplicate, true);
+  const verified = await store.read('external-repair');
+  assert.equal(verified.state, 'Stopped');
+  assert.deepEqual(verified.failures, before.failures);
+  const cause = (await recovery.causes())[stopped.causeKey];
+  assert.equal(cause.resolverAttempts, 1);
+  assert.equal(cause.activeResolver, false);
+  assert.equal(cause.continuations.length, 1);
+
+  await writeFile(snapshot, JSON.stringify({ git: { head: 'head', checkpoints: { [opened.checkpoint]: true }, worktreeDiff: [], indexDiff: [] } }));
+  target = 'stale-correction';
+  assert.equal((await run(['unit', 'resume', 'external-repair', '--snapshot', snapshot])).error, 'EVIDENCE_STALE');
+  target = 'fixed-release';
+  const resumed = await run(['unit', 'resume', 'external-repair', '--snapshot', snapshot]);
+  assert.equal(resumed.stage, 'implement', JSON.stringify(resumed));
+  assert.equal(resumed.recovery.action, 'revalidate');
+  const after = await store.read('external-repair');
+  assert.equal(after.retryResumptions.length, 1);
+  assert.equal(after.resumeRevalidations.length, 1);
+  assert.deepEqual(after.failures, before.failures);
+  assert.deepEqual((await recovery.causes())[stopped.causeKey], cause);
+});

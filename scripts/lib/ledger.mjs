@@ -100,6 +100,14 @@ export function sessionEffectRetired(records, intent) {
     && row.seq === intent.seq && row.key === intent.key && row.intentDigest === effectArgsDigest(intent));
 }
 
+export function unresolvedEffect(records) {
+  return records.find(intent => {
+    if (intent.event !== 'intent' || sessionEffectRetired(records, intent)) return false;
+    const result = records.findLast(row => row.event === 'result' && row.seq === intent.seq && row.key === intent.key);
+    return result?.result == null || ['unknown', 'uncertain', 'pending', 'running'].includes(result.result.status);
+  });
+}
+
 export async function executeEffect({
   unit,
   effect,

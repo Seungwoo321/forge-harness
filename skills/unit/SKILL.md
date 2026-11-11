@@ -24,6 +24,8 @@ When acceptance returns exit 20 (the unit is `InReview`), start the independent 
 
 ## Resume
 
+For a captured product gate under explicit `retry.onExhaustion: root-cause`, use the `unit fail ... --gate <id>`, root-cause submission, and `unit retry ... --cause-key <key>` path described in the gates skill. An exhausted gate marked for diagnosis remains in the original unit and owner. Resolve uncertain effects through their ledger contract before repair. After a no-progress stop, preserve the recorded evidence and report the blocker. For an externally verified product or harness correction, follow `docs/retry-recovery.md`: submit the original root-cause, verify the correction through `unit retry --request`, then use ordinary resume and mandatory revalidation. A fresh verified observation is required for each correction.
+
 For a current goal-bound unit executed in an existing user session without managed custody, use public `unit session-adopt <unit> --request <file> --user-input <ref>` before starting required review. Follow packaged `docs/session-custody-recovery.md` and its trusted source/native verification contracts. Preserve the original InReview/SelfGated unit and its history; never simulate session-start, reset gates or rewrite records.
 
 Use the Unit Record and effect ledger through the unit CLI. Do not recreate a unit with a different request under the same ID.

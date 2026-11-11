@@ -100,3 +100,20 @@ test('legacy open stages block changes and a later definitive effect result perm
   });
   request=await f.request(); assert.equal((await f.run(request)).code,0);
 });
+
+test('AC-1 AC-2 exhaustion policy can be explicitly enabled on the same stopped unit without resetting budgets or evidence', async t => {
+  const f = await fixture(t);
+  await f.store.update(f.unit, record => ({ ...record, state: 'Stopped', stoppedFrom: 'SelfGated', accepted: null }));
+  const before = await f.read();
+  const request = { id: 'root-cause', expectedRevision: before.revision, retry: { onExhaustion: 'root-cause' }, reason: 'Continue verified root-cause repair' };
+  assert.equal((await f.run(request)).code, 0);
+  const after = await f.read();
+  assert.equal(after.state, 'Stopped');
+  assert.deepEqual(after.policyOverrides.retry, { onExhaustion: 'root-cause' });
+  assert.deepEqual(after.evidence, before.evidence);
+  assert.deepEqual(after.failures, before.failures);
+  assert.equal(after.policySources['retry.onExhaustion'], 'unit');
+  assert.equal(after.policyChanges[0].userInputRef, 'user-request');
+  assert.equal((await f.run(request)).change.duplicate, true);
+  assert.equal((await f.run({ ...request, id: 'unbounded', expectedRevision: after.revision, retry: { maxResolver: 99, onExhaustion: 'root-cause' } })).error, 'POLICY_CHANGE_INVALID');
+});

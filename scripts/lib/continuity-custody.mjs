@@ -37,6 +37,7 @@ async function verifySource(source) {
     fail('canonical source changed', 'CUSTODY_STALE');
 }
 export async function assertReviewsSettled({stateRoot,store,goal,unit}) {
+  const target = await store.read(unit);
   const reviews = new Set((goal.reviews ?? []).filter(item=>item.targetUnit === unit).map(item=>item.unit));
   for (const entry of await readdir(path.join(stateRoot,'units'),{withFileTypes:true})) {
     if (!entry.isDirectory()) continue;
@@ -45,9 +46,26 @@ export async function assertReviewsSettled({stateRoot,store,goal,unit}) {
   }
   for (const id of reviews) {
     const reviewer = await store.read(id);
-    if (reviewer?.state !== 'Closed' || !reviewer.sessionFinalization?.closeReceipt?.result?.closed)
+    let rows;
+    try {
+      // Startup holds the reviewer ledger before requesting this target; never wait in the opposite order.
+      rows = await createLedgerStore(stateRoot).withLock(id,ledger=>ledger.read(),{wait:false});
+    } catch (error) {
+      if (error.code !== 'LEDGER_LOCKED') throw error;
+      fail('reviewer operation is still in progress; reobserve after it settles','EFFECT_UNCERTAIN');
+    }
+    const retired = rows.findLast(row=>row.event === 'session-start-recovery' && row.settled === true);
+    const nonStarted = reviewer?.state === 'InReview' && !reviewer.sessionFinalization
+      && !(goal.reviews ?? []).some(item=>item.unit === id) && retired?.goalId === goal.goal.id && retired.targetUnit === unit
+      && retired.proof?.unitDigest === effectArgsDigest(reviewer) && effectArgsDigest(retired.source) === effectArgsDigest(goal.source)
+      && (target?.state !== 'Stopped' || retired.proof.targetDigest === effectArgsDigest(target))
+      && rows.findLast(row=>row.event === 'intent' && row.effect === 'session.start')?.key === retired.key
+      && rows.some(row=>row.event === 'intent' && row.effect === 'session.start' && row.seq === retired.seq
+        && row.key === retired.key && effectArgsDigest(row) === retired.intentDigest && sessionEffectRetired(rows,row));
+    if (!nonStarted && (reviewer?.state !== 'Closed' || !reviewer.sessionFinalization?.closeReceipt?.result?.closed))
       fail('reviewer must return and close before rebind','CUSTODY_CONFLICT');
-    if (unresolved(await createLedgerStore(stateRoot).withLock(id,ledger=>ledger.read())))
+    if (nonStarted) await verifySource(goal.source);
+    if (unresolved(rows))
       fail('reconcile uncertain reviewer effects before rebind','EFFECT_UNCERTAIN');
   }
 }

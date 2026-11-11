@@ -39,6 +39,16 @@ node "$PLUGIN_ROOT/scripts/unit.mjs" unit session-start change --request origina
 
 ## 신뢰된 제공자 계약
 
+### Blocked goal의 미착수 리뷰 정리
+
+같은 공개 `unit session-recover` 요청은 현재 blocked goal의 Stopped 대상에 결속된 미등록 InReview reviewer를 정리한다. 원 intent·source·현재 revision과 전체 대상 record를 잠금 안에서 검증하고, 신뢰된 제공자가 원 계정의 실제 미착수·정확한 수신자 종료·대기 작업 취소 및 이 복구에 대한 출처 있는 권한을 증명한다. 이 경로는 실행 정책 변경을 요구하지 않는다. 새 실행을 예약하거나 기동하지 않기 때문이다.
+
+제공자 binding에는 현재 전체 Stopped 대상의 `targetDigest`가 추가된다. `verifySessionStartRecovery`에는 `settleOnly:true`, 전체 `target`, `nextArgs:null`이 전달되며 `nextArgsDigest`는 null의 객체 digest다. 제공자는 일반 복구와 동일한 실제 native·권한 검증을 수행한다. 현재의 source·goal·target·policy에 결속되지 않은 boolean이나 조회 실패는 증명이 아니다.
+
+성공한 원장의 `session-start-recovery`는 `settled:true`, 원 reviewer/goal/target/source 결속과 `nextAttempt`를 보존하며 `nextArgs`와 `nextKey`는 null이다. Unit/Goal Record와 원 intent·실패·submission은 유지하고 result·리뷰 판정·close 영수증을 만들지 않는다. 같은 요청의 재호출은 현재 revision·출처·native 증명을 다시 검증한다. 다른 효과가 불확실하거나 이미 소유자가 등록된 리뷰는 정리하지 않는다.
+
+소유자 복구의 리뷰 정리 검사는 이 관찰이 결속한 동일한 미등록 reviewer record와 실제로 폐기된 원 intent, 출처 및 미해결 효과 부재를 확인한다. 대상/goal 잠금 아래에서는 reviewer 원장을 기다리지 않고 획득하며, 다른 reviewer 작업이 점유하면 `EFFECT_UNCERTAIN`으로 변경 없이 거부한다. reviewer 기동/복구의 원장→대상 잠금과 역순으로 대기하지 않는다. 이후 ordinary stopped-owner/goal/unit 복구를 수행한다. 대상이 다시 InReview가 되면 같은 reviewer 단위의 정상 `session-start`가 현재 goal snapshot·대상으로 다음 attempt를 시작한다. 원 실패를 삭제하거나 새 단위로 대체하지 않는다. 다음 attempt가 시작되면 그 리뷰는 다시 미정리 상태다. 근거: [ADR 0038](adr/0038-fresh-thread-and-terminal-review-recovery.md).
+
 런타임 모듈의 `provider.verifyUserInput`은 아래 scalar binding 전체와 `effect: 'unit.session.recover'`, `reason`을 받아 같은 값과 `verified:true`를 반환한다. 실제 사용자 입력이 해당 원 시도·새 정책·단위·증명에 대한 재개를 승인했는지 확인한다. 요청 파일의 주장을 승인으로 반사하지 않는다.
 
 `provider.verifySessionStartRecovery`는 같은 binding과 `request`, 원 `intent`, 원 `submission`(미제출이면 null), 원 snapshot `original`, 현재 `goal`, 예약할 `nextArgs`를 받는다.

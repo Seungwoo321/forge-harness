@@ -74,6 +74,8 @@ export async function createRuntimeAdapters(input){
   assert.equal((await (await createRuntimeAdapters(args)).sessionRunner.observe({cwd:root,targetCwd:root})).closable,false);
   // Stage submission has a nested verb and obtains its managed reviewer from goal custody without a new request file.
   await store.create({schema:'harness.unit/1',unit:'review',kind:'review',state:'InReview',targetUnit:'u',continuity:{goalId:'g'}});
+  const unregistered=await createRuntimeAdapters({...args,options:{'state-root':stateRoot},argv:['unit','session-recover','review']});
+  assert.equal((await unregistered.sessionRunner.observe({cwd:root,targetCwd:root})).worker.threadId,owner.worker.threadId);
   await goals.transaction('g',g=>({...g,revision:g.revision+1,reviews:[{unit:'review',sessionId:'surface',incarnationId:owner.incarnationId,cwd:root}]}));
   const stage=await createRuntimeAdapters({...args,options:{'state-root':stateRoot},argv:['unit','stage','submit','review','review']});
   assert.equal((await stage.sessionRunner.observe({cwd:root,targetCwd:root})).closable,true);

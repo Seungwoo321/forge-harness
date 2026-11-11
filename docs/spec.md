@@ -785,7 +785,7 @@ fingerprint 가 달라진 증거는 무효이고 해당 게이트부터 다시 �
 
 관리 native 목표의 불확실한 기동은 [동일 수신자 복구](native-goal-recovery.md)를 따른다. 제어면은 최초 native 입력 전 같은 intent에 제출 경계를 동기화하고 재검증·crash 후 중복 입력하지 않는다. native 목표 부재와 실제 빈 이력·대기열 부재를 구분하며, 확인할 수 없는 상태는 성공이나 재제출 근거가 아니다.
 
-실행 정책 변경 후에도 기존 session.start는 원 intent의 전체 인자·snapshot·계정으로 재관찰한다. [정책 변경 기동 복구](session-policy-recovery.md)의 공개 `unit session-recover`는 정확한 사용자 승인과 신뢰된 원 계정의 terminal non-start 증명으로만 같은 단위의 다음 attempt를 예약한다. 원 수신자 종료·대기 작업 취소·실제 미착수를 모두 확인하며 원 결과를 조작하지 않는다. 원장 폐기 기록은 원 intent와 다음 불변 인자를 결속하고 옛 key 재실행을 막는다. 기동·예약·목표 정책 변경은 같은 목표 잠금으로 직렬화하며 원 실패·제출 경계를 보존한다.
+실행 정책 변경 후에도 기존 session.start는 원 intent의 전체 인자·snapshot·계정으로 재관찰한다. [정책 변경 기동 복구](session-policy-recovery.md)의 공개 `unit session-recover`는 정확한 사용자 승인과 신뢰된 원 계정의 terminal non-start 증명으로만 같은 단위의 다음 attempt를 예약한다. 원 수신자 종료·대기 작업 취소·실제 미착수를 모두 확인하며 원 결과를 조작하지 않는다. 원장 폐기 기록은 원 intent와 다음 불변 인자를 결속하고 옛 key 재실행을 막는다. 기동·예약·목표 정책 변경은 같은 목표 잠금으로 직렬화하며 원 실패·제출 경계를 보존한다. 현재 blocked goal·Stopped 대상의 미등록 리뷰도 같은 공개 복구에서 원 계정의 terminal non-start·출처 있는 권한·전체 대상 결속을 검증한 정리 관찰로 원 intent만 폐기한다. 리뷰/종료 영수증이나 다음 실행 인자를 만들지 않으며 같은 리뷰 단위의 다음 기동은 정상 대상 복구 후 현재 snapshot으로 수행한다.
 
 실행 정책 의미 비교에서 빈 roles map과 생략은 동등하다. 영속 정책·snapshot·custody/effect digest는 원 표현을 유지한다. 잘못 적용된 마지막 정책 갱신은 [실행 정책 감사 복구](policy-refresh-recovery.md)의 공개 `goal policy-recover`로만 정확한 직전 정책을 복원한다. 원 사람 권한·native 계정/설정·현재 goal/단위/대상/출처/기존 custody를 검증하고 원 갱신 행을 보존한 별도 recovery와 supersession을 추가한다. 진행 중 리뷰·효과·전달·종료와 오래되거나 위조된 입력은 거부하며 공유 정책이나 native 소유권을 바꾸지 않는다.
 
@@ -1013,14 +1013,14 @@ CLI 는 사람용 출력의 마지막 줄에 기계용 한 줄 `RESULT {json}` �
 | H-GO-03 | 모델·effort·계정은 현재 정책과 작업 성격으로 세션 시작 시 선택하고 코드에 가용 모델 목록을 고정하지 않는다 | T/L |
 | H-GO-04 | 목표·단위·인계·요청·effect·세션 신원은 결속되고 불확실한 결과는 같은 intent를 재관찰하며 중복 기동하지 않는다 | T/L |
 | H-GO-14 | 실행 정책 변경 뒤 원 snapshot·계정으로 기동 영수증을 검증하며, 공개 복구는 정확한 승인과 원 수신자 종료·대기 작업 취소·실제 미착수 증명에만 같은 단위의 다음 불변 attempt를 예약한다. 원 이력과 실패를 보존하고 폐기 key·동시 기동·정책 변경 경합을 차단한다 | T |
-| H-GO-18 | 명시적으로 외부 종료된 retained Stopped 소유자는 출처 있는 권한·native surface/process 부재·현재 단위/목표/원장/대상/정책/중단 패킷을 반복 검증한 공개 관찰 기록으로 복구한다. 원 이력과 custody를 보존하고 같은 단위의 재개·다음 실제 소유권을 결속하며 무권한·오래된 입력·불확실 효과·살아 있거나 모호한 owner·경합을 거부하고 정확한 재호출은 중복 효과를 내지 않는다 | T |
+| H-GO-18 | 명시적으로 외부 종료된 retained Stopped 소유자는 출처 있는 권한·native surface/process 부재·현재 단위/목표/원장/대상/정책/중단 패킷을 반복 검증한 공개 관찰 기록으로 복구한다. 검증된 terminal non-start 정리 관찰로 미착수 리뷰의 복구 순환을 해소하고, 원 이력과 custody를 보존하고 같은 단위의 재개·다음 실제 소유권을 결속하며 무권한·오래된 입력·불확실 효과·살아 있거나 모호한 owner·경합을 거부하고 정확한 재호출은 중복 효과를 내지 않는다 | T |
 | H-GO-17 | 빈 roles map과 생략을 같은 실행 정책으로 비교하되 실제 설정 차이·원 custody/effect digest를 보존한다. 잘못 적용된 마지막 정책 갱신은 원 권한·현재 목표/단위/대상/출처/native custody가 검증된 공개 추가 전용 복구로만 직전 정책을 복원한다. 원 이력·실패·증거·효과를 보존하고 오래된 입력·위조·무권한·리뷰/기동 경합·모호한 재호출을 거부한다 | T |
 | H-GO-16 | 실행 중인 Codex 수신자에게 결과를 native queue로 전달할 때 원 intent의 영속 submission·confirmation 경계, 동일 수신자·thread·패킷 검증 및 실제 읽기 영수증을 유지한다. Stop 훅은 검증된 delivered continuation의 현재 owner 단위를 추적하며 정확히 결속된 원 수신 대기 리뷰의 native 턴 경계를 허용하되 수신·완료·종료 영수증으로 간주하지 않는다. 불확실한 전송은 반복하지 않는다 | T |
 | H-GO-15 | 잘못된 범위 승인 출처와 수용된 미결속 단위는 원 사람 지시·단위/goal/대상 결속을 검증한 공개 감사 복구만 허용한다. 원 이력을 수정하거나 native 소유권·성공 영수증을 만들어 권한을 얻지 않는다 | T |
 | H-GO-05 | 자동 압축·계획 조정·검증 전환은 세션을 나누지 않고, 실제 책임 경계에서만 검증된 인계를 수행한다 | T/L |
 | H-GO-06 | 완료·차단·리뷰 반환은 각각 단일 목적 스킬과 스크립트로 처리한다. 실제 이전에만 수신을 확인하고 수신자 없는 완료·차단은 사용자 보고와 재개 조건을 보존하며 허용된 worker 종료만 정확히 확인한다 | T/L |
 | H-GO-07 | 호스트의 중단·목표 제어·훅 신뢰를 우회하지 않고 미검증 강제 상태를 성공으로 보고하지 않는다 | T/L |
-| H-GO-10 | startup trust 전 기동이 불확실해진 기존 reviewer는 원 intent·수신자를 보존해 검증된 native 부재·빈 Ready에서만 복구한다. Codex 0.167.0의 첫 입력 전 lazy rollout은 별도 unmaterialized 관찰로 원 managed 기동·동일 native 신원·미제출 원장·실제 queue/goal 부재·전체 fresh Ready 화면을 결합하며 일반 조회 실패를 empty로 취급하지 않는다. 최초 입력 전 원장 제출 경계를 동기화하고 crash·동시 재검증·이력 지연 후 중복 입력하지 않는다 | T |
+| H-GO-10 | startup trust 전 기동이 불확실해진 기존 reviewer는 원 intent·수신자를 보존해 검증된 native 부재·빈 Ready에서만 복구한다. Codex 0.167.0과 0.167.1의 첫 입력 전 lazy rollout은 별도 unmaterialized 관찰로 원 managed 기동·동일 native 신원·미제출 원장·실제 queue/goal 부재·전체 fresh Ready 화면을 결합하며 일반 조회 실패를 empty로 취급하지 않는다. 최초 입력 전 원장 제출 경계를 동기화하고 crash·동시 재검증·이력 지연 후 중복 입력하지 않는다 | T |
 | H-GO-13 | 기존 미전송 Codex 결과 전달은 같은 intent에서 전체 native 이력·queue 내 해당 참조의 부재와 정확한 수신자/composer를 검증하고 paste 전 submission·Return 전 confirmation을 동기 기록한다. 경계 뒤 신원·패킷·전체 draft를 재검사하며 불확실한 paste·소비된 Return을 반복하지 않는다. 실제 활동·결과 패킷 읽기 없이 전달 완료를 만들지 않는다 | T |
 | H-GO-11 | native goal의 첫 인자가 실제 정착한 뒤 나머지를 입력해 slash 메뉴 손실을 막는다. 원 intent의 사전 Return 실패·동일 native/패킷·전체 Ready draft·실제 goal/queue 부재를 검증한 경우에만 정확한 pending 원문을 재입력 없이 진행하거나, 고정된 첫 burst 슬래시 소실 패턴을 별도 영속 정정 경계로 원문 복구한다. Return은 별도 영속 경계 후 한 번만 수행하고 손상·외래·잘린 draft를 정상으로 간주하지 않는다 | T |
 | H-GO-12 | native draft 정정은 실제 키 모드의 바이트 계약과 pinned 전체-buffer 취소 계약을 검증한 입력을 한 번만 전송하고 다중 논리줄·빈 줄 전체 empty를 관찰한다. 구 named-key 실패는 원 edit marker를 보존한 한 번의 별도 recovery-clear 경계로만 진행하며 새 경로의 queued·unknown·실패를 재전송하지 않는다 | T |

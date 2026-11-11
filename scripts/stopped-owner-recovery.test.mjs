@@ -13,6 +13,10 @@ import {goalOwner} from './lib/continuity-custody.mjs';
 import {runUnitCli} from './lib/unit-driver.mjs';
 import {createSessionRunner} from './lib/session-runtime.mjs';
 import {gateFingerprint, canReuseEvidence} from './lib/evidence.mjs';
+import {snapshotGoal} from './lib/continuity-snapshot.mjs';
+import {prepareEffect} from './lib/policy.mjs';
+import {recoverGoalSession} from './lib/continuity-recover.mjs';
+import {recoverStoppedOwner} from './lib/stopped-owner-recovery.mjs';
 
 const packet = ['목표: goal','수용 기준: done','작업관리: change','결정: approved','변경: retained','검증: source','남은 일·위험: access','다음 단위 첫 행동: resume'].join('\n');
 const fields = {title:'Stopped change',objective:'goal',acceptance:'pending',tracking:'change',decision:'blocked',changed:'retained',verification:'source',remainingRisk:'access',nextFirstAction:'resume'};
@@ -87,6 +91,61 @@ test('external closure observation preserves stopped history and public same-uni
   goal=await f.goals.read('goal');assert.equal(goalOwner(goal,'change').sessionId,'fresh');assert.equal(goalOwner(goal,'change').attempt,2);
   assert.notEqual((await f.recover(request)).code,0);assert.equal(goal.stoppedOwnerRecoveries.length,1);
  });
+});
+
+async function pendingReview(f) {
+  const goal=await f.goals.read('goal');
+  await f.store.create({schema:'harness.unit/1',unit:'review',kind:'review',state:'InReview',targetUnit:'change',continuity:{goalId:'goal'},failures:[{id:'original-start-failure'}]});
+  const {blocker,...definition}=goal.goal;
+  const snapshot=await snapshotGoal(f.stateRoot,{...goal,goal:{...definition,status:'active'}});
+  const report=(await f.store.read('change')).stopReport;
+  const args={unit:'review',role:'review',attempt:1,cwd:f.cwd,handoffPath:report.handoffPath,handoffDigest:report.handoffDigest,goalPath:snapshot.path,goalDigest:snapshot.digest};
+  const key=prepareEffect('session.start',args).key,ledger=createLedgerStore(f.stateRoot);
+  await ledger.withLock('review',l=>l.append({event:'intent',effect:'session.start',unit:'review',seq:1,key,args}));
+  const before=await f.store.read('review');
+  const proofPath=path.join(f.cwd,'review-non-start.json');await writeFile(proofPath,'native terminal non-start');
+  const verify=f.adapters.provider.verifyUserInput;
+  f.adapters.provider.verifyUserInput=async b=>b.effect==='unit.session.recover'?{...b,verified:b.userInputRef==='human'}:verify(b);
+  f.adapters.provider.verifySessionStartRecovery=async ({request,intent,submission,original,goal,nextArgs,target,settleOnly,...binding})=>{
+    assert.equal(settleOnly,true);assert.equal(nextArgs,null);assert.equal(original.policy.account,'/account');assert.equal(binding.targetDigest,digest(target));
+    assert.equal(await readFile(request.provenance.path,'utf8'),'native terminal non-start');
+    return {...binding,verified:true,taskNeverStarted:true,receiverStopped:true,queueCancelled:true,evidenceDigest:taskDigest(await readFile(proofPath)),
+      receiver:{runtime:'cmux',sessionId:'never-started-review',incarnationId:'review-v1',cwd:f.cwd,threadId:'review-thread',pid:43,executable:'/bin/codex'}};
+  };
+  const recovery={id:'settle-review',expectedRevision:before.revision,expectedGoalRevision:goal.revision,intent:{key,seq:1,argsDigest:digest(args)},
+    provenance:{path:proofPath,digest:taskDigest(await readFile(proofPath))},reason:'Authorized original review terminal non-start settlement'};
+  return {before,recovery,ledger};
+}
+
+test('public terminal review settlement unlocks stopped owner recovery and normal goal/unit resume without a review close receipt',async t=>{
+  const f=await fixture(t,false,'InReview'),{before,recovery,ledger}=await pendingReview(f),request=await f.request();
+  assert.equal((await f.recover(request)).error,'CUSTODY_CONFLICT');
+  const settled=await f.command(['unit','session-recover','review','--user-input','human'],recovery);
+  assert.equal(settled.code,0,JSON.stringify(settled));assert.equal(settled.receipt.settled,true);
+  assert.equal((await f.recover(request)).code,0);assert.equal((await f.activate()).code,0);assert.equal((await f.resume()).code,0);
+  assert.deepEqual(await f.store.read('review'),before);assert.equal((await f.store.read('change')).state,'InReview');
+  const rows=await ledger.withLock('review',l=>l.read());assert.deepEqual(rows.map(r=>r.event),['intent','session-start-recovery']);assert.equal(f.launches(),0);
+});
+
+test('concurrent reviewer settlement and stopped-owner recovery fail closed without a cross-operation lock cycle',async t=>{
+  const f=await fixture(t,false,'InReview'),{recovery,ledger}=await pendingReview(f),request=await f.request();
+  let enterOwner,releaseOwner,reviewWaiting;
+  const entered=new Promise(r=>{enterOwner=r;}),ownerGate=new Promise(r=>{releaseOwner=r;}),waiting=new Promise(r=>{reviewWaiting=r;});
+  const inspect=f.adapters.git.inspectUnit;
+  f.adapters.git.inspectUnit=async input=>{enterOwner();await ownerGate;return inspect(input);};
+  const owner=recoverStoppedOwner({stateRoot:f.stateRoot,store:f.store,unit:'change',request,userInputRef:'human',adapters:f.adapters});
+  await entered;
+  const store={...f.store,withLock:async(unit,action)=>{if(unit==='change')reviewWaiting();return f.store.withLock(unit,action);}};
+  const reviewer=recoverGoalSession({stateRoot:f.stateRoot,store,unit:'review',request:recovery,userInputRef:'human',adapters:f.adapters});
+  await waiting;releaseOwner();
+  let timer;
+  try {
+    const results=await Promise.race([Promise.allSettled([owner,reviewer]),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('cross-operation lock cycle')),5000);})]);
+    assert.equal(results[0].status,'rejected');assert.equal(results[0].reason.code,'EFFECT_UNCERTAIN');
+    assert.equal(results[1].status,'fulfilled');assert.equal(results[1].value.settled,true);
+  } finally {clearTimeout(timer);releaseOwner();}
+  assert.equal((await f.recover(request)).code,0);assert.equal(f.launches(),0);
+  assert.deepEqual((await ledger.withLock('review',l=>l.read())).map(r=>r.event),['intent','session-start-recovery']);
 });
 
 test('stale, unauthorized, ambiguous and conflicting attempts preserve canonical records and perform no effects',async t=>{

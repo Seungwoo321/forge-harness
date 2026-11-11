@@ -36,7 +36,7 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
     const previous=rows.find(row=>row.event==='session-start-recovery' && row.id===request.id);
     if (previous) {
       if (previous.requestDigest!==requestDigest) fail('recovery id binds another request','SESSION_RECOVERY_CONFLICT');
-      return {...previous,duplicate:true};
+      if (!previous.settled) return {...previous,duplicate:true};
     }
     const review=record.kind==='review';
     if (!record.continuity?.goalId || !(review ? record.state==='InReview' : ['Scoped','Implementing'].includes(record.state))
@@ -44,7 +44,7 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
     const intent=rows.findLast(row=>row.event==='intent' && row.effect==='session.start');
     if (!intent || intent.seq!==request.intent.seq || intent.key!==request.intent.key || effectArgsDigest(intent.args)!==request.intent.argsDigest
       || intent.args.unit!==unit || intent.args.role!==(review?'review':'implementation') || prepareEffect('session.start',intent.args).key!==intent.key
-      || rows.some(row=>row.event==='session-start-recovery' && row.key===intent.key)
+      || rows.some(row=>row.event==='session-start-recovery' && row.key===intent.key && row!==previous)
       || rows.some(row=>row.event==='result' && row.key===intent.key && row.seq===intent.seq)) fail('only the latest unresolved startup can be recovered','EFFECT_UNCERTAIN');
     if (rows.some(row=>row.event==='intent' && row!==intent && !sessionEffectRetired(rows,row)
       && !rows.some(done=>done.event==='result' && done.seq===row.seq && done.key===row.key))) fail('another effect remains uncertain','EFFECT_UNCERTAIN');
@@ -54,19 +54,23 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
     const target=review && goalOwner(before,record.targetUnit)?.ownership==='existing';
     let receipt;
     const reserve=targetRecord=>goals.transaction(record.continuity.goalId,async goal=>{
-      if (!goal || goal.revision!==request.expectedGoalRevision || goal.goal.status!=='active'
+      const settleOnly=review && goal?.goal.status==='blocked' && targetRecord?.state==='Stopped'
+        && targetRecord.continuity?.goalId===goal.goal.id && goal.goal.blocker?.unit===record.targetUnit
+        && targetRecord.stopReport && !targetRecord.deliveryPlan && !targetRecord.deliveryResult;
+      if (!goal || goal.revision!==request.expectedGoalRevision || !(goal.goal.status==='active' || settleOnly)
         || goal.goal.remaining[0]!== (review?record.targetUnit:unit)
         || original.goal.id!==goal.goal.id || effectArgsDigest(original.source)!==effectArgsDigest(goal.source)) fail('goal changed or is not the current target','CONTINUITY_STALE');
       const owners=review?goal.reviews:goal.bootstraps;
       if (owners?.some(item=>item.unit===unit) || !review && goalOwner(goal,unit)) fail('startup already has a registered owner','SESSION_RECOVERY_CONFLICT');
-      if (executionPoliciesEqual(original.policy,goal.policy)) fail('execution policy must change before recovery');
-      if (intent.args.targetDigest!== (targetRecord?effectArgsDigest(targetRecord):undefined)) fail('review target changed','CONTINUITY_STALE');
+      if (!settleOnly && executionPoliciesEqual(original.policy,goal.policy)) fail('execution policy must change before recovery');
+      if (!settleOnly && intent.args.targetDigest!== (target?effectArgsDigest(targetRecord):undefined)) fail('review target changed','CONTINUITY_STALE');
       await checkFile(goal.source); await checkFile(request.provenance);
       if (typeof adapters.provider?.verifySessionStartRecovery!=='function') fail('trusted terminal non-start verifier is required','ADAPTER_MISSING');
-      const snapshot=await snapshotGoal(stateRoot,goal);
-      const nextArgs={...intent.args,attempt:intent.args.attempt+1,goalPath:snapshot.path,goalDigest:snapshot.digest};
-      if (!Number.isSafeInteger(nextArgs.attempt)) fail('invalid next attempt');
-      await loadManagedLaunch(nextArgs);
+      const nextAttempt=intent.args.attempt+1;
+      if (!Number.isSafeInteger(nextAttempt)) fail('invalid next attempt');
+      const snapshot=settleOnly?null:await snapshotGoal(stateRoot,goal);
+      const nextArgs=settleOnly?null:{...intent.args,attempt:nextAttempt,goalPath:snapshot.path,goalDigest:snapshot.digest};
+      if (nextArgs) await loadManagedLaunch(nextArgs);
       const submission=rows.findLast(row=>row.event==='submission' && row.seq===intent.seq && row.key===intent.key);
       if (typeof adapters.session?.verify === 'function') {
         let observed;
@@ -77,12 +81,16 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
       }
       const binding={unit,goalId:goal.goal.id,userInputRef,argsDigest:requestDigest,intentDigest:effectArgsDigest(intent),
         submissionDigest:effectArgsDigest(submission ?? null),unitDigest:effectArgsDigest(record),goalDigest:effectArgsDigest(goal),
-        nextArgsDigest:effectArgsDigest(nextArgs),provenanceDigest:request.provenance.digest};
+        nextArgsDigest:effectArgsDigest(nextArgs),provenanceDigest:request.provenance.digest,
+        ...(settleOnly?{targetDigest:effectArgsDigest(targetRecord)}:{})};
+      if (previous && ['unitDigest','goalDigest','targetDigest'].some(key=>binding[key]!==previous.proof[key]))
+        fail('settled reviewer or target changed','CONTINUITY_STALE');
       await verifyApprovalInput(adapters.provider,{...binding,effect:'unit.session.recover',reason:request.reason});
       // The provider reads original native history/account and proves irreversible receiver/queue quiescence.
       // It must not submit input, clear a goal, cancel work, terminate a receiver or infer success from the request.
       const proof=await adapters.provider.verifySessionStartRecovery({...binding,request:structuredClone(request),intent:structuredClone(intent),
-        submission:structuredClone(submission ?? null),original:structuredClone(original),goal:structuredClone(goal),nextArgs:structuredClone(nextArgs)});
+        submission:structuredClone(submission ?? null),original:structuredClone(original),goal:structuredClone(goal),nextArgs:structuredClone(nextArgs),
+        ...(settleOnly?{settleOnly:true,target:structuredClone(targetRecord)}:{})});
       if (proof?.verified!==true || Object.entries(binding).some(([key,value])=>proof[key]!==value)
         || proof.taskNeverStarted!==true || proof.receiverStopped!==true || proof.queueCancelled!==true
         || !text(proof.receiver?.sessionId) || !text(proof.receiver?.incarnationId) || !text(proof.receiver?.threadId)
@@ -92,13 +100,15 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
         || proof.receiver.cwd!==intent.args.cwd || proof.evidenceDigest!==request.provenance.digest) fail('terminal native non-start is unproven','SESSION_RECOVERY_UNPROVEN');
       if (submission && ['runtime','sessionId','incarnationId','cwd','threadId','pid','executable'].some(key=>proof.receiver[key]!==submission.binding[key]))
         fail('proof belongs to another original receiver','SESSION_RECOVERY_UNPROVEN');
-      await checkFile(goal.source); await checkFile(request.provenance); await loadManagedLaunch(intent.args); await loadManagedLaunch(nextArgs);
+      await checkFile(goal.source); await checkFile(request.provenance); await loadManagedLaunch(intent.args); if (nextArgs) await loadManagedLaunch(nextArgs);
+      if (previous) {receipt={...previous,duplicate:true};return goal;}
       receipt={event:'session-start-recovery',unit,id:request.id,seq:intent.seq,key:intent.key,request:structuredClone(request),userInputRef,requestDigest,
-        intentDigest:binding.intentDigest,proof:structuredClone(proof),sessionHistoryLength:record.sessionHistory?.length ?? 0,nextArgs,nextKey:prepareEffect('session.start',nextArgs).key};
+        intentDigest:binding.intentDigest,proof:structuredClone(proof),sessionHistoryLength:record.sessionHistory?.length ?? 0,nextArgs,nextKey:nextArgs?prepareEffect('session.start',nextArgs).key:null,
+        ...(settleOnly?{settled:true,nextAttempt,goalId:goal.goal.id,targetUnit:record.targetUnit,source:structuredClone(goal.source)}:{})};
       await ledger.append(receipt);
       return goal;
     });
-    if (target) await store.withLock(record.targetUnit,reserve); else await reserve(null);
+    if (review) await store.withLock(record.targetUnit,reserve); else await reserve(null);
     return receipt;
   }));
 }

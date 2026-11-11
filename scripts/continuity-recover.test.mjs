@@ -14,18 +14,23 @@ import {loadManagedLaunch} from './lib/continuity-launch-io.mjs';
 import {runUnitCli} from './lib/unit-driver.mjs';
 import {decideResume} from './lib/resume.mjs';
 import {taskDigest} from './lib/session-task.mjs';
+import {assertReviewsSettled} from './lib/continuity-custody.mjs';
 
 const hash=value=>`sha256:${createHash('sha256').update(value).digest('hex')}`;
 const result=output=>JSON.parse(output.slice(output.lastIndexOf('RESULT ')+7));
-async function fixture(t,{submitted=true}={}) {
+async function fixture(t,{submitted=true,blockedReview=false}={}) {
   const root=await mkdtemp(path.join(tmpdir(),'start-recovery-'));t.after(()=>rm(root,{recursive:true,force:true}));
   const source=path.join(root,'goal.md'),handoffPath=path.join(root,'handoff.md'),provenancePath=path.join(root,'native-proof.json');
   await writeFile(source,'goal');
   const packet=['목표: goal','수용 기준: done','작업관리: unit','결정: policy','변경: none','검증: none','남은 일·위험: work','다음 단위 첫 행동: begin'].join('\n');await writeFile(handoffPath,packet);
   const goals=createContinuityStore(root),store=createUnitStateStore(root),ledgerStore=createLedgerStore(root);
   const policy={runtime:'orca',provider:'claude',account:'/old-account',model:'model',effort:'high',argv:['claude']};
-  await goals.create({goal:{id:'g',objective:'goal',criteria:['done'],remaining:['u'],status:'active'},policy,source:{path:source,digest:hash('goal')}});
-  await store.create({schema:'harness.unit/1',unit:'u',kind:'impl',state:'Implementing',continuity:{goalId:'g'},policy:{goal:{class:'product-prelaunch'}},failures:[{id:'original-auth-failure'}]});
+  await goals.create({goal:{id:'g',objective:'goal',criteria:['done'],remaining:[blockedReview?'change':'u'],status:'active'},policy,source:{path:source,digest:hash('goal')}});
+  if(blockedReview){
+    await store.create({schema:'harness.unit/1',unit:'change',kind:'impl',state:'InReview',continuity:{goalId:'g'}});
+    await goals.transaction('g',g=>({...g,revision:g.revision+1,bootstraps:[{unit:'change',sessionId:'parent',incarnationId:'parent-1',cwd:root}]}));
+  }
+  await store.create({schema:'harness.unit/1',unit:'u',kind:blockedReview?'review':'impl',state:blockedReview?'InReview':'Implementing',...(blockedReview?{targetUnit:'change'}:{}),continuity:{goalId:'g'},policy:{goal:{class:'product-prelaunch'}},failures:[{id:'original-auth-failure'}]});
   const startRequest={cwd:root,handoffPath,handoffDigest:hash(packet),parentRuntime:{sessionId:'parent',incarnationId:'parent-1',cwd:root},waitSeconds:0};
   const receiver={runtime:'orca',sessionId:'old',incarnationId:'old-1',cwd:root,threadId:'original-thread',pid:42,executable:'claude'};
   const evidence={receiver,taskNeverStarted:true,receiverStopped:true,queueCancelled:true};
@@ -42,7 +47,9 @@ async function fixture(t,{submitted=true}={}) {
   const provider={verifyUserInput:async binding=>({...binding,verified:binding.userInputRef==='actual-instruction'}),
     async verifySessionStartRecovery({request,intent,submission,original,goal,nextArgs,...binding}){
       assert.equal(original.policy.account,'/old-account');assert.equal(intent.args.goalDigest,oldInput.args.goalDigest);
-      assert.equal(goal.policy.account,'/new-account');assert.equal(nextArgs.attempt,intent.args.attempt+1);
+      assert.equal(goal.policy.account,blockedReview?'/old-account':'/new-account');
+      if(blockedReview){assert.equal(nextArgs,null);assert.equal(binding.targetDigest,effectArgsDigest(await store.read('change')));}
+      else assert.equal(nextArgs.attempt,intent.args.attempt+1);
       if(submitted)assert.equal(submission.binding.threadId,'original-thread');
       const bytes=await readFile(request.provenance.path);const evidence=JSON.parse(bytes);
       return {...binding,verified:true,...evidence,evidenceDigest:hash(bytes)};
@@ -52,11 +59,72 @@ async function fixture(t,{submitted=true}={}) {
   assert.equal((await start()).status,'uncertain');
   const rows=()=>ledgerStore.withLock('u',l=>l.read());
   const intent=(await rows()).find(row=>row.event==='intent');
-  await goals.transaction('g',goal=>({...goal,revision:goal.revision+1,policy:{...policy,provider:'codex',account:'/new-account',argv:['codex']},policyChanges:[{previous:policy,reason:'authorized account change',userInputRef:'actual-instruction'}]}));
-  const request={id:'recovery-1',expectedRevision:1,expectedGoalRevision:2,intent:{key:intent.key,seq:intent.seq,argsDigest:effectArgsDigest(intent.args)},provenance:{path:provenancePath,digest:hash(await readFile(provenancePath))},reason:'Authorized same-unit restart with new account'};
+  if(blockedReview){
+    await store.update('change',r=>({...r,state:'Stopped',stoppedFrom:'InReview',stopReport:{owner:{sessionId:'parent'}}}));
+    await goals.transaction('g',g=>({...g,revision:g.revision+1,goal:{...g.goal,status:'blocked',blocker:{unit:'change',reason:'startup blocked',resumeCondition:'verified recovery',evidence:'original failure'}}}));
+  }else await goals.transaction('g',goal=>({...goal,revision:goal.revision+1,policy:{...policy,provider:'codex',account:'/new-account',argv:['codex']},policyChanges:[{previous:policy,reason:'authorized account change',userInputRef:'actual-instruction'}]}));
+  const request={id:'recovery-1',expectedRevision:1,expectedGoalRevision:(await goals.read('g')).revision,intent:{key:intent.key,seq:intent.seq,argsDigest:effectArgsDigest(intent.args)},provenance:{path:provenancePath,digest:hash(await readFile(provenancePath))},reason:'Authorized same-unit startup recovery'};
   const recover=(patch={})=>recoverGoalSession({stateRoot:root,unit:'u',request,userInputRef:'actual-instruction',store,adapters,...patch});
   return {root,goals,store,ledgerStore,adapters,request,startRequest,intent,rows,start,recover,seen,get launches(){return launches;},get checks(){return checks;},set mode(value){mode=value;},set ownerRuntime(value){ownerRuntime=value;}};
 }
+
+test('blocked review settlement preserves records and original intent, then the same reviewer starts only after target recovery',async t=>{
+  const f=await fixture(t,{submitted:false,blockedReview:true});
+  const before=await f.rows(),record=await f.store.read('u'),goal=await f.goals.read('g'),target=await f.store.read('change');
+  const settled=()=>assertReviewsSettled({stateRoot:f.root,store:f.store,goal,unit:'change'});
+  await assert.rejects(settled(),{code:'CUSTODY_CONFLICT'});
+  const requestFile=path.join(f.root,'recover.json');await writeFile(requestFile,JSON.stringify(f.request));
+  const output=result(await runUnitCli(['unit','session-recover','u','--request',requestFile,'--user-input','actual-instruction'],{stateRoot:f.root,adapters:f.adapters}));
+  assert.equal(output.code,0,JSON.stringify(output));assert.equal(output.receipt.settled,true);
+  assert.equal(output.receipt.nextArgs,null);assert.equal(output.receipt.nextKey,null);assert.equal(output.receipt.nextAttempt,2);
+  await settled();assert.equal((await f.recover()).duplicate,true);
+  const concurrent=await Promise.all([f.recover(),f.recover()]);assert.ok(concurrent.every(r=>r.duplicate));
+  assert.deepEqual(await f.store.read('u'),record);assert.deepEqual(await f.store.read('change'),target);assert.deepEqual(await f.goals.read('g'),goal);
+  assert.deepEqual((await f.rows()).slice(0,before.length),before);assert.equal((await f.rows()).filter(r=>r.event==='session-start-recovery').length,1);
+  assert.equal((await f.rows()).filter(r=>['result','submission','confirmation'].includes(r.event)).length,0);assert.equal(f.launches,1);
+  await assert.rejects(f.start());assert.equal(f.launches,1);
+  await f.goals.transaction('g',g=>{const {blocker,...active}=g.goal;return {...g,revision:g.revision+1,goal:{...active,status:'active'}};});
+  await f.store.update('change',r=>({...r,state:'InReview'}));
+  assert.equal((await f.start()).status,'completed');assert.equal((await f.start()).status,'duplicate');assert.equal(f.launches,2);
+  assert.equal((await f.goals.read('g')).reviews[0].attempt,2);
+  assert.equal((await f.rows()).find(r=>r.event==='intent').key,f.intent.key);
+  await assert.rejects(assertReviewsSettled({stateRoot:f.root,store:f.store,goal:await f.goals.read('g'),unit:'change'}),{code:'CUSTODY_CONFLICT'});
+});
+
+test('blocked review settlement rejects live, queued, started, foreign, stale and untrusted evidence',async t=>{
+  const cases={
+    live:f=>{const verify=f.adapters.provider.verifySessionStartRecovery;f.adapters.provider.verifySessionStartRecovery=async b=>({...await verify(b),receiverStopped:false});},
+    queued:f=>{const verify=f.adapters.provider.verifySessionStartRecovery;f.adapters.provider.verifySessionStartRecovery=async b=>({...await verify(b),queueCancelled:false});},
+    started:f=>{f.mode='completed';},
+    foreign:f=>{const verify=f.adapters.provider.verifySessionStartRecovery;f.adapters.provider.verifySessionStartRecovery=async b=>({...await verify(b),receiver:{runtime:'orca',sessionId:'other',incarnationId:'x',cwd:'/foreign',threadId:'x',pid:43,executable:'claude'}});},
+    untrusted:f=>{f.adapters.provider.verifyUserInput=async b=>({...b,verified:false});},
+    'missing verifier':f=>{delete f.adapters.provider.verifySessionStartRecovery;},
+    'stale target':async f=>{await f.store.update('change',r=>({...r,state:'InReview'}));},
+    'stale goal':f=>{f.request.expectedGoalRevision++;},
+    'wrong target binding':f=>{const verify=f.adapters.provider.verifySessionStartRecovery;f.adapters.provider.verifySessionStartRecovery=async b=>({...await verify(b),targetDigest:hash('other')});},
+    'registered review':async f=>{await f.goals.transaction('g',g=>({...g,revision:g.revision+1,reviews:[{unit:'u',targetUnit:'change'}]}));f.request.expectedGoalRevision++;},
+    'changed source':async f=>{await writeFile(path.join(f.root,'goal.md'),'foreign');},
+  };
+  for(const [name,mutate]of Object.entries(cases))await t.test(name,async t=>{
+    const f=await fixture(t,{submitted:false,blockedReview:true});await mutate(f);await assert.rejects(f.recover());
+    assert.equal((await f.rows()).filter(r=>r.event==='session-start-recovery').length,0);assert.equal(f.launches,1);
+  });
+});
+
+test('settled reviewer custody refuses a changed record, source and new uncertain attempt',async t=>{
+  for(const kind of ['record','target','source','effect','completed-start'])await t.test(kind,async t=>{
+    const f=await fixture(t,{submitted:false,blockedReview:true});await f.recover();
+    if(kind==='record')await f.store.update('u',r=>({...r,verdict:'invented'}));
+    if(kind==='target'){
+      await f.store.update('change',r=>({...r,stopReport:{owner:{sessionId:'changed'}}}));
+      await assert.rejects(f.recover(),{code:'CONTINUITY_STALE'});
+    }
+    if(kind==='source')await writeFile(path.join(f.root,'goal.md'),'foreign');
+    if(kind==='effect')await f.ledgerStore.withLock('u',l=>l.append({event:'intent',effect:'session.start',seq:2,key:'new',args:{}}));
+    if(kind==='completed-start')await f.ledgerStore.withLock('u',async l=>{await l.append({event:'intent',effect:'session.start',seq:2,key:'new',args:{}});await l.append({event:'result',seq:2,key:'new',result:{status:'completed'}});});
+    await assert.rejects(assertReviewsSettled({stateRoot:f.root,store:f.store,goal:await f.goals.read('g'),unit:'change'}));
+  });
+});
 
 test('AC-1 policy refresh preserves complete original args for uncertain observation and eventual receipt registration',async t=>{
   const f=await fixture(t);

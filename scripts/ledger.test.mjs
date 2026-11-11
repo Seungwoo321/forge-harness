@@ -23,6 +23,17 @@ async function fixture() {
   };
 }
 
+test('nonblocking ledger inspection rejects a busy writer without releasing or changing its lock', async () => {
+  const f=await fixture();
+  try {
+    await f.store.withLock('review',async ledger=>{
+      await assert.rejects(f.store.withLock('review',()=>assert.fail('busy lock acquired'),{wait:false}),{code:'LEDGER_LOCKED'});
+      await ledger.append({event:'original-writer'});
+    });
+    assert.deepEqual(await f.store.withLock('review',ledger=>ledger.read()),[{event:'original-writer'}]);
+  } finally {await f.cleanup();}
+});
+
 test('authorized effect appends intent before execution and result after', async () => {
   const f = await fixture();
   try {

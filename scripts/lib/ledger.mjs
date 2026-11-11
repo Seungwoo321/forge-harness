@@ -59,7 +59,7 @@ export function createLedgerStore(stateRoot) {
     return { dir, ledger: path.join(dir, 'ledger.ndjson'), lock: path.join(dir, '.ledger.lock') };
   }
 
-  async function withLock(unit, action) {
+  async function withLock(unit, action, {wait = true} = {}) {
     const files = filesFor(unit);
     await mkdir(files.dir, { recursive: true });
     let lock;
@@ -67,6 +67,7 @@ export function createLedgerStore(stateRoot) {
       try { lock = await open(files.lock, 'wx', 0o600); }
       catch (error) {
         if (error.code !== 'EEXIST') throw error;
+        if (!wait) throw errorWithCode('LEDGER_LOCKED', 'ledger is owned by another operation');
         await waitForLock(files.lock);
       }
     }

@@ -38,6 +38,7 @@ process.stdout.write(JSON.stringify({id:r.id,...(error?{error}:{result})})+'\\n'
  const request={observed:{pid:42,cwd:root},input:{effect:'session.start',key:'original'},prompt:'finish',packets:[]};
  const proof=await transport.observeGoal(request);assert.equal(proof.state,'unmaterialized');assert.equal(proof.proof.sqliteRoot,sqliteRoot);assert.equal(proof.proof.defaultLineEditing,true);
  assert.equal(proof.notApplied,undefined);assert.equal(proof.turns,undefined);assert.equal(proof.queued,undefined);
+ await edit({version:'0.167.1'});assert.equal((await transport.observeGoal(request)).proof.platform,'codex/0.167.1');await edit({});
  for(const state of [{keymap:{editor:{kill_line_start:['ctrl+x']}}},{vim:true},{keymap:{editor:[]}}]) {
   await edit(state);assert.equal((await transport.observeGoal(request)).proof.defaultLineEditing,false);
  }
@@ -48,7 +49,7 @@ process.stdout.write(JSON.stringify({id:r.id,...(error?{error}:{result})})+'\\n'
  assert.equal((await transport.observeGoal(request)).state,'unmaterialized');
  queue.prepare('INSERT INTO queued_items VALUES(?,?,?,?,?,?)').run('own',threadId,'{}',0,1,1);
  await assert.rejects(transport.observeGoal(request),/history is unavailable/);queue.exec("DELETE FROM queued_items WHERE id='own'");
- for(const state of [{version:'0.168.0'},{account:'/foreign'},{code:-1},{message:'permission denied'},{message:'thread not loaded: foreign'},{queueSuccess:true}]) {
+ for(const state of [{version:'0.168.0'},{version:'0.167.10'},{version:'0.167.1-custom'},{account:'/foreign'},{code:-1},{message:'permission denied'},{message:'thread not loaded: foreign'},{queueSuccess:true}]) {
   await edit(state);await assert.rejects(transport.observeGoal(request),/history is unavailable/);
  }
  await edit({});ownedRoot=path.join(root,'missing');await assert.rejects(transport.observeGoal(request),/history is unavailable/);ownedRoot=sqliteRoot;

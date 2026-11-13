@@ -132,11 +132,13 @@ test('public trust timeout recovers the same reviewer and seq1 on Ready, with on
 });
 
 test('public first-input recovery keeps the original intent and worker across trust timeout and lazy rollout',async t=>{
- const f=await fixture(t,true,false,false,'0.167.1'),before=await f.store.read('change');assert.equal((await f.run()).code,3);
+ for(const version of ['0.167.1','0.168.0'])await t.test(version,async t=>{
+ const f=await fixture(t,true,false,false,version),before=await f.store.read('change');assert.equal((await f.run()).code,3);
  await f.edit({trust:true});const result=await f.run();assert.equal(result.code,0,JSON.stringify(result));assert.equal(result.result.seq,1);
  assert.equal((await f.run()).code,0);const native=await f.read(),rows=await f.ledger();
  assert.equal(native.launches,1);assert.equal(native.returns,1);assert.equal(rows.filter(r=>r.event==='intent').length,1);assert.equal(rows.filter(r=>r.event==='submission').length,1);
  assert.deepEqual(await f.store.read('change'),before);
+ });
 });
 
 test('unmaterialized recovery remains observation-only after a crash at the durable input boundary',async t=>{

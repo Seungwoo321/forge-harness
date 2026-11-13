@@ -54,6 +54,17 @@ test('fresh queue/goal proof is rechecked after owner probes at first input and 
  }
 });
 
+test('fresh 0.168.0 input requires its exact supported platform and matching native welcome',async()=>{
+ for(const [platform,welcome,allowed] of [['0.168.0','0.168.0',true],['0.168.1','0.168.1',false],['0.168.0','0.167.1',false]]) {
+  let draft='',entered=0,writes=0;
+  const read=async()=>` >_ OpenAI Codex (v${welcome})\n› ${draft||'Ask Codex to do anything'}\n model · Ready · context\n ? for shortcuts`;
+  const run=()=>submitNativeGoal({provider:'codex',objective:'finish',preTurn:{platform:`codex/${platform}`},read,
+   verify:async()=>{},write:async text=>{writes++;draft+=text;},enter:async()=>{entered++;}});
+  if(allowed){await run();assert.equal(draft,'/goal finish');assert.equal(entered,1);}
+  else {await assert.rejects(run(),/fresh native receiver view is unverified/);assert.equal(writes,0);assert.equal(entered,0);}
+ }
+});
+
 test('native goal is typed as a command and separately submitted after the composer settles', async () => {
   for (const provider of ['codex','claude']) {
     let draft = '', entered = 0;

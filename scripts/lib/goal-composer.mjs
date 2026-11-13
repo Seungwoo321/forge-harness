@@ -61,7 +61,7 @@ export async function submitNativeGoal({ provider, objective, read, write, newli
       // The complete fresh view excludes optimistically rendered input and queue/startup
       // previews; Ready alone does not describe those fields in the pinned native versions.
       const platform = preTurn === true ? 'codex/0.167.0' : preTurn.platform;
-      if (provider !== 'codex' || !/^codex\/0\.167\.[01]$/.test(platform ?? '')
+      if (provider !== 'codex' || !/^codex\/(?:0\.167\.[01]|0\.168\.0)$/.test(platform ?? '')
         || lines.filter(line => line.trim() === `>_ OpenAI Codex (v${platform.slice(6)})`).length !== 1
         || lines.filter(line => /^\s*›(?: |$)/.test(line)).length !== 1
         || lines.some(line => /Messages to be submitted|Queued follow-up inputs|edit last queued message|Waiting for startup|Preparing images|pending approval|approve this|request_user_input|Review plugin hooks/i.test(line))) throw taskError('fresh native receiver view is unverified');

@@ -42,7 +42,17 @@ export async function createRuntimeAdapters({ cwd, adapters }) {
 
 실행 중 생성할 디렉터리는 `outputDirectories`에 상대 경로로 선언한다. 제어면은 입력과 겹치지 않는 디렉터리만 쓰기 가능하게 만들고 이 목록을 fingerprint에 포함한다. pnpm이 `node_modules`를 생성해야 한다면 해당 경로를 선언하고 `package.json`과 `pnpm-lock.yaml`을 입력에 포함한다. 이미 캡처한 입력 파일을 산출 디렉터리 아래에 둘 수 없다.
 
-격리 명령은 사본·시스템·실행 도구 경로만 읽는다. 별도로 설치한 pnpm 등의 도구는 `config.runtimePaths`에 절대 경로로 선언하며 이 구성도 fingerprint에 포함한다. 실행 도구 경로는 신뢰하는 설치 위치여야 하고 원본 프로젝트를 포함할 수 없다. 외부 하드링크가 있는 입력은 거부한다. 임시 파일은 사본 안의 예약 디렉터리 `.forge-gate-tmp`를 사용하고 `OPENSSL_CONF`는 `/dev/null`로 고정해 사용자 전역 설정을 입력으로 읽지 않는다. Linux는 호스트 전체를 연결하지 않고 시스템 도구·명시한 실행 도구와 사본만 연결한다.
+격리 명령은 사본·시스템·실행 도구 경로만 읽는다. 별도로 설치한 pnpm 등의 도구는 `config.runtimePaths`에 절대 경로로 선언하며 이 구성도 fingerprint에 포함한다. 실행 도구 경로는 신뢰하는 설치 위치여야 하고 원본 프로젝트를 포함할 수 없다. 외부 하드링크가 있는 입력은 거부한다. 임시 파일과 사용자별 런타임 잠금은 `TMPDIR`·`XDG_RUNTIME_DIR`로 사본 안의 예약 디렉터리 `.forge-gate-tmp`를 사용하고 `OPENSSL_CONF`는 `/dev/null`로 고정해 사용자 전역 설정을 입력으로 읽지 않는다. Linux는 호스트 전체를 연결하지 않고 시스템 도구·명시한 실행 도구와 사본만 연결한다.
+
+### 중첩 격리를 검사하는 저장소 테스트
+
+macOS의 서로 다른 중첩 sandbox profile은 exit 71로 실패한다. 격리 게이트 자체를 검사하는 테스트의 `describe`에 `config.nestedIsolation: "sibling-sandbox"`를 명시한다. 이 설정은 입력 fingerprint에 포함된다. 호스트가 실행별 인증 브로커를 열고, 하위 프로세스의 기본 command adapter가 캡처 게이트 실행만 브로커로 전달한다. 일반 명령은 원래 샌드박스에서 실행한다. 내부 게이트는 자체 캡처·실행 전후 검증을 유지하고 호스트가 생성한 형제 native profile로 실행한다. 내부 요청의 원본은 외부 캡처 트리 안에, 사본·임시는 선언된 출력 안에 있어야 한다. 도구 경로는 부모가 허용한 설치 위치 또는 부모 캡처 트리 안으로 제한하고 외부 원본 접근은 거부한다. 각 하위 실행은 자신의 사본·출력·도구로 더 좁혀진 별도 인증 토큰을 받으며 모든 조상 profile 경계를 상속한다. 토큰은 사본 임시 파일에 저장하고 환경변수에는 그 경로만 전달한다. 하위 profile은 조상 인증 파일의 읽기·쓰기·하드링크를 거부한다. 실제 명령의 환경변수는 native 격리가 적용된 뒤 전달하고 비격리 launcher의 환경이나 프로세스 인자에는 전달하지 않는다. 고정된 외부 읽기·쓰기 경계도 형제 profile에 적용하므로 심볼릭 링크 교체로 경계를 확장할 수 없다. 브로커는 요청에 따라 호스트 파일을 읽거나 쓰지 않으며 수신한 임의 profile을 실행하지 않는다.
+
+브로커는 추가된 모든 실행을 마친 뒤 닫히며 최종 사본 검증과 정리를 수행한다. 실행 영수증의 `backend`는 외부 실행에 `macos-sibling-sandbox-host-v1`, 위임된 실행에 `macos-sibling-sandbox-v1`을 기록한다. 종료 상태·signal·stdout은 실제 실행 값이며 실패 보고서도 같은 경로로 남는다. 브로커 오류는 호스트 재실행으로 대체하지 않는다. Linux는 기존 Bubblewrap 실행을 사용한다.
+
+이 저장소는 pnpm 12.15.0을 사용한다. 12.7.0의 고정 `/tmp` 저장소 잠금은 허용하지 않으며, 사본 안의 `XDG_RUNTIME_DIR`을 지원하는 버전을 사용한다([수정 이력](https://pnpm.io/blog/releases/12.8.2)). `pnpm test:isolated`가 Git의 tracked 및 ignore되지 않은 untracked 입력 전체와 실행 모드, Node/pnpm 버전, 명령·설정을 캡처한다. `.git`과 ignore된 로컬 산출물은 입력이 아니다. 읽기 전용 사본을 선언된 `work` 출력으로 복사해 쓰기 권한을 부여한 뒤 전체 `scripts/**/*.test.mjs`를 실행한다. 테스트 필터는 사용하지 않는다. 임시 home·독립 package scope와 전역 Git 설정 차단으로 사용자 설정·저장소 module scope가 임시 fixture에 섞이지 않게 한다. 선언 버전과 일치하는 pnpm 실행 파일을 임시 runtime 경로에 연결하고 자동 버전 다운로드를 끈다. macOS의 선택된 developer tool 설치 경로도 명시적으로 캡처한다. stdout 보고서는 `.local/verification/units/self-tests/gate-reports/`의 내용 주소형 파일에 보존되며 결과는 입력 fingerprint·실행 backend·종료 상태·보고서 digest를 출력한다. 실패 로그를 덮어쓰거나 기존 단위를 수용 처리하지 않는다. 새 설정으로 원래 단위를 다시 검증할 때는 기존 단위의 공개 수용·복구 절차를 사용한다.
+
+다른 저장소의 런타임도 같은 설정과 자체 부트스트랩 명령을 사용할 수 있다. 이 저장소의 공개 CLI 게이트에는 `scripts/verify-self-tests.mjs`의 `describeRepositorySelfTests({cwd, command: adapters.command})`를 `gates.describe`의 tests 분기에서 반환한다. 브로커를 사용하려면 하위 실행도 패키지의 기본 command adapter를 사용해야 한다. 별도 spawn으로 직접 적용한 중첩 profile은 자동 변경하지 않으며 그 실패를 그대로 보고한다.
 
 `format: "tap"`은 stdout을 TAP으로 해석한다. `format: "exec"` 또는 `"module"`의 기본 텍스트 출력은 종료 상태를 판정하며 수용 기준을 자동으로 주장하지 않는다. `resultFormat: "json"`이면 stdout에 `{ "ok": true, "covers": ["AC-1"] }` 형태의 결과를 출력한다. 종료 상태는 항상 제어면이 관찰한 실제 프로세스 상태를 사용한다. macOS는 시스템 sandbox, Linux는 Bubblewrap을 사용하며 격리 수단이 없거나 사본을 검증할 수 없으면 통과로 기록하지 않는다. 정확한 공개 실행 예는 [격리 수용 테스트](../scripts/gate-acceptance.test.mjs)와 [증거 모듈](../scripts/lib/evidence.mjs)에 있다.
 

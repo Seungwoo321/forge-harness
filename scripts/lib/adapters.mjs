@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn } from 'node:child_process';
+import { gateBrokerEnvironment, requestBrokerGate } from './gate-broker.mjs';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm, open } from 'node:fs/promises';
 import os from 'node:os';
@@ -95,6 +96,9 @@ export function createAdapters({ spawn = nodeSpawn, clock = () => new Date(), id
       if (cwd !== undefined && (typeof cwd !== 'string' || cwd.length === 0)) throw new TypeError('cwd must be a non-empty path');
       if (env !== undefined && (!env || typeof env !== 'object' || Array.isArray(env))) throw new TypeError('env must be an object');
       if (input !== undefined && typeof input !== 'string') throw new TypeError('input must be a string');
+
+      const broker=process.env[gateBrokerEnvironment];
+      if (broker && options.capturedGate) return readFile(broker,'utf8').then(endpoint=>requestBrokerGate(endpoint,{...options.capturedGate,env:{...process.env,...env}}));
 
       return new Promise((resolve, reject) => {
         let child;

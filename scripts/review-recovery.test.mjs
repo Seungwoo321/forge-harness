@@ -305,8 +305,12 @@ test('invalid stage input creates no checkpoint', async t => {
   contract.input.properties.data.properties.verdict = { type: 'string' };
   // The driver API supplies contract roots; its external adapters are the same ones as the CLI.
   const { runUnitCli } = await import('./lib/unit-driver.mjs');
-  const { cp } = await import('node:fs/promises');
+  const { chmod, cp, readdir, stat } = await import('node:fs/promises');
   await cp(new URL('../skills/', import.meta.url), contracts, { recursive: true });
+  for (const entry of await readdir(contracts, { recursive: true, withFileTypes: true })) {
+    const file = path.join(entry.parentPath, entry.name);
+    await chmod(file, (await stat(file)).mode | 0o200);
+  }
   await writeFile(path.join(contracts, 'scope', 'contract.json'), JSON.stringify(contract));
   const result = await runUnitCli(['unit', 'stage', 'open', f.unit, 'scope'], {
     cwd: f.cwd, contractsDir: contracts, adapters: createAdapters({ repositoryRoot: f.cwd }),

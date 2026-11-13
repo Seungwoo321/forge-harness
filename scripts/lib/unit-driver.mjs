@@ -48,7 +48,7 @@ import { attemptsFor } from './stage-attempts.mjs';
 import { withGitHeadLock } from './git-head-lock.mjs';
 import { capturedGateReport, executeCapturedGate, persistCapturedReport } from './gate-execution.mjs';
 import { beginGateRepair, continuationError, gateRepairPassed, gateTarget, measuredGateProgress, productGateFailure, sameGateTarget } from './gate-continuation.mjs';
-import { resolveExhaustedFailure, verifyRetryResolution } from './retry-resolution.mjs';
+import { resolveExhaustedFailure, verifyRetryResolution, verifyRetryEvidence } from './retry-resolution.mjs';
 
 const controlPlaneFields = new Set([
   'request', 'unit', 'kind', 'goal', 'policy', 'policySources', 'canon', 'tracker', 'isolation',
@@ -646,13 +646,13 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
       outputDigest: digest(output), findings: output.findings };
     if (['diagnose', 'ordinary-diagnosis'].includes(current.gateRecovery?.status)) {
       const { inputDigest, ...envelope } = input;
-      const finding = output.findings.find(item => item.kind === 'diagnosis' && item.classification === 'product'
+      const finding = output.findings.find(item => item.kind === 'diagnosis' && item.classification === classifications[0]
         && [item.site, item.case, item.claim, item.fix].every(value => value.trim()));
       if (inputDigest !== digest(envelope) || input.data.failures.at(-1)?.id !== failureId
-        || current.gateRecovery.failureId !== failureId || classifications[0] !== 'product' || !finding
+        || current.gateRecovery.failureId !== failureId || !['product', 'harness', 'environment'].includes(classifications[0]) || !finding
         || attributed.attemptPaths.length || !sameGateTarget(current.gateRecovery.baseline.target,
           gateTarget(await adapters.git?.inspectUnit({ unit, record: current })))) {
-        throw continuationError('DIAGNOSIS_REQUIRED', 'diagnosis must explain the current captured product failure before any repair');
+        throw continuationError('DIAGNOSIS_REQUIRED', 'diagnosis must explain the current captured failure before any correction');
       }
       gateDiagnosis = { failureId, attempt: active.n, inputDigest, submissionId: output.submissionId,
         outputDigest: digest(output), findings: output.findings };
@@ -889,6 +889,12 @@ async function runRetry({ stateRoot, unit, options, adapters }) {
     throw error;
   }
   const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
+  if (record.continuity?.goalId) {
+    const goal = await createContinuityStore(stateRoot).read(record.continuity.goalId);
+    if (goal?.goal.status !== 'active' || !goal.goal.remaining.includes(unit)) {
+      throw continuationError('GOAL_BLOCKED', 'resume the goal before continuing its gate repair');
+    }
+  }
   if (options.request) {
     const request = await readJsonFile(path.resolve(options.request), 'retry resolution request', 'CLI_USAGE');
     const receipt = await createLedgerStore(stateRoot).withLock(unit, async ledger => {
@@ -896,17 +902,13 @@ async function runRetry({ stateRoot, unit, options, adapters }) {
       return resolveExhaustedFailure({ stateRoot, store, unit, request, causeKey: options['cause-key'], policy: policy.retry, adapters });
     });
     return { code: 0, summary: 'Exhausted cause correction verified', details: { unit, action: 'resolved', receipt,
-      next: 'Run unit resume with the current Git, evidence and tracker snapshot.' } };
+      next: receipt.capturedGate?.status === 'ordinary-diagnosis'
+        ? 'Run unit accept on the same unit to revalidate all mandatory gates.'
+        : 'Run unit resume with the current Git, evidence and tracker snapshot.' } };
   }
   if (record.gateRecovery) {
     const repaired = await createLedgerStore(stateRoot).withLock(unit, async ledger => {
       if (unresolvedEffect(await ledger.read())) throw continuationError('EFFECT_UNCERTAIN', 'reconcile the unresolved effect before gate repair');
-      if (record.continuity?.goalId) {
-        const goal = await createContinuityStore(stateRoot).read(record.continuity.goalId);
-        if (goal?.goal.status !== 'active' || !goal.goal.remaining.includes(unit)) {
-          throw continuationError('GOAL_BLOCKED', 'resume the goal before continuing its gate repair');
-        }
-      }
       const prepare = async current => {
         if (current.revision !== record.revision) throw continuationError('STAGE_STALE', 'unit changed before gate repair');
         if (!(await validCapturedReport(current.gateRecovery.baseline))) throw continuationError('EVIDENCE_STALE', 'failed gate report is missing or changed');
@@ -1126,6 +1128,19 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd, ledger }) {
   if (trial && (!sameGateTarget(trial.repairTarget, target) || !(await validCapturedReport(trial.baseline)))) {
     throw continuationError('EVIDENCE_STALE', 'submitted repair target or captured failure changed');
   }
+  for (const receipt of record.retryResolutions ?? []) {
+    if (!receipt.request.classification) continue;
+    await verifyRetryEvidence({ stateRoot, receipt });
+    const cause = (await createRecoveryStore(stateRoot).causes())[receipt.failure.causeKey];
+    if (!cause?.continuations?.some(item => item.requestDigest === receipt.requestDigest && item.failure.unit === unit)) {
+      throw continuationError('RETRY_RESOLUTION_UNPROVEN', 'replay unit retry --request to reconcile the classification correction');
+    }
+  }
+  const classifiedResolution = record.retryResolutions?.findLast(item => item.request.classification
+    && !record.classificationRevalidations?.some(validation => validation.requestDigest === item.requestDigest));
+  const classificationValidation = classifiedResolution ? { requestDigest: classifiedResolution.requestDigest,
+    target: gateTarget(target) } : null;
+  if (classifiedResolution) await verifyRetryResolution({ stateRoot, record, receipt: classifiedResolution, adapters });
   await verifyAcceptanceCorrections(record, adapters, target);
   const gateOrder = trial ? [trial.baseline.gate, ...profile.gates.filter(id => id !== trial.baseline.gate)] : profile.gates;
   for (const gateId of gateOrder) {
@@ -1250,8 +1265,10 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd, ledger }) {
     let policyChanged = false;
     record = await store.update(unit, async current => {
       if (!policyMatches(current)) { policyChanged = true; return current; }
+      if (classifiedResolution) await verifyRetryResolution({ stateRoot, record: current, receipt: classifiedResolution, adapters });
       await verifyAcceptanceCorrections(current, adapters, checkedTarget);
-      const updated = { ...current, head: target.head, contentFingerprint: target.contentFingerprint,
+      const updated = { ...current, ...(classificationValidation ? { classificationRevalidations: [...(current.classificationRevalidations ?? []),
+        { ...classificationValidation, gates: Object.fromEntries(gateFingerprints) }] } : {}), head: target.head, contentFingerprint: target.contentFingerprint,
         ...(current.head !== target.head || current.contentFingerprint !== target.contentFingerprint ? { diff: null, handoff: null } : {}),
         reviewDecision, reviewedHead: null, verdict: null, accepted: null };
       if (current.state === 'InReview') return updated;
@@ -1318,6 +1335,9 @@ async function runAcceptance({ stateRoot, unit, adapters, cwd, ledger }) {
         commitFailure = 'Target changed during correction verification'; return current;
       }
     }
+    if (classifiedResolution) await verifyRetryResolution({ stateRoot, record: current, receipt: classifiedResolution, adapters });
+    if (classificationValidation) current = { ...current, classificationRevalidations: [...(current.classificationRevalidations ?? []),
+      { ...classificationValidation, gates: Object.fromEntries(gateFingerprints) }] };
     acceptedCoverage = currentEvaluation.coverage;
     const accepted = { ...currentEvaluation.accepted, contentFingerprint: target.contentFingerprint, head: target.head,
       ...(deliveryMetadataRequired ? acceptedDeliveryMetadata(target) : {}) };

@@ -48,6 +48,9 @@ export function beginGateRepair(record, { causeKey, target, policy, startedAt })
   if (diagnosis?.failureId !== recovery.failureId) {
     throw continuationError('DIAGNOSIS_REQUIRED', 'submit a product diagnosis for the current exhausted failure');
   }
+  if (diagnosis.findings.some(item => item.kind === 'diagnosis' && item.classification !== 'product')) {
+    throw continuationError('RETRY_NOT_ALLOWED', 'verify the non-product correction with unit retry --request');
+  }
   if (!sameGateTarget(recovery.baseline.target, target)) {
     throw continuationError('STAGE_STALE', 'restore the diagnosed failure target before opening the repair');
   }

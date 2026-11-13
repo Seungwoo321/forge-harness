@@ -5,10 +5,11 @@
   "engines": {
     "node": ">=22"
   },
-  "packageManager": "pnpm@12.7.0",
+  "packageManager": "pnpm@12.15.0",
   "scripts": {
     "test": "node --test 'scripts/**/*.test.mjs'",
-    "check": "node scripts/compliance.mjs"
+    "check": "node scripts/compliance.mjs",
+    "test:isolated": "node scripts/verify-self-tests.mjs"
   },
-  "version": "0.1.60"
+  "version": "0.1.61"
 }

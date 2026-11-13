@@ -11,5 +11,5 @@
     "check": "node scripts/compliance.mjs",
     "test:isolated": "node scripts/verify-self-tests.mjs"
   },
-  "version": "0.1.63"
+  "version": "0.1.64"
 }

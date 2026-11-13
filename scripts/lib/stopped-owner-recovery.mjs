@@ -1,3 +1,4 @@
+import { resumeRetainedClarificationGoal } from './goal-acceptance-resume.mjs';
 import path from 'node:path';
 import {readFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
@@ -133,7 +134,8 @@ export async function verifyRecoveredStop({stateRoot,store,record,goal,rows,adap
   return {mode:'stopped-observation',recovery:receipt,stopReport:record.stopReport};
 }
 
-export async function resumeStoppedGoal({stateRoot,store,id,request,adapters}) {
+export async function resumeStoppedGoal({stateRoot,store,id,request,userInputRef,adapters}) {
+  if (request.clarification) return resumeRetainedClarificationGoal({stateRoot,store,id,request,userInputRef,adapters});
   return createLedgerStore(stateRoot).withLock(request.unit, ledger => store.withLock(request.unit, async record => {
     if (record.continuity?.goalId !== id || record.state !== 'Stopped') fail('goal resume requires its stopped unit');
     const rows = await ledger.read();

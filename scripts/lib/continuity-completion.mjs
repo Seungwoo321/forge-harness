@@ -1,5 +1,6 @@
+import { clarifiedGoalReferences, hasGoalReferenceEvidence } from './goal-acceptance-binding.mjs';
 import { acceptanceCoverage, hasInvalidEvidence } from './evidence.mjs';
-import { currentCorrections, correctionSource, productAcceptance } from './acceptance-correction.mjs';
+import { productAcceptance } from './acceptance-correction.mjs';
 import { effectArgsDigest } from './approvals.mjs';
 
 const invalid = message => Object.assign(new Error(message), { code: 'GOAL_INCOMPLETE' });
@@ -23,15 +24,18 @@ export async function validateGoalCompletion({ continuity, unit, proof, unitStor
     if (!record || record.continuity?.goalId !== continuity.goal.id || !record.accepted
       || (item.unit === unit && !requireClosed ? !['Accepted', 'Delivering', 'Delivered'].includes(record.state) : record.state !== 'Closed' && !retainedDelivery)) throw invalid('goal evidence must come from an accepted goal unit');
     const coverage = acceptanceCoverage(productAcceptance(record), record.evidence ?? []);
-    const correction = currentCorrections(record).find(receipt => receipt.request.acceptanceRef === item.acceptance);
-    const criterion = record.acceptance?.find(entry => entry.id === item.acceptance);
-    const corrected = correction && criterion && effectArgsDigest(correctionSource(record, correction, continuity)) === correction.request.sourceDigest
-      && effectArgsDigest(criterion) === correction.request.criterionDigest
-      && effectArgsDigest({ request: correction.request, userInputRef: correction.userInputRef }) === correction.requestDigest;
-    // Preflight maps retained obligations; only the guarded terminal paths can produce Closed goal evidence.
-    if (record.acceptance?.some(entry => entry.status === 'deferred') || hasInvalidEvidence(record.evidence ?? [])
-      || !record.acceptance?.some(entry => entry.id === item.acceptance && entry.text === item.criterion && !['deferred','dropped'].includes(entry.status))
-      || !coverage.ok || !coverage.covered.includes(item.acceptance) && !corrected) throw invalid('goal acceptance evidence is missing');
+    const mapped = clarifiedGoalReferences(record, continuity, item.criterion);
+    const refs = mapped ?? [item.acceptance];
+    if (mapped && (Object.hasOwn(item, 'acceptance') || effectArgsDigest(item.acceptances) !== effectArgsDigest(mapped))
+      || !mapped && Object.hasOwn(item, 'acceptances')) throw invalid('goal proof differs from its explicit mapping');
+    if (record.acceptance?.some(entry => entry.status === 'deferred') || hasInvalidEvidence(record.evidence ?? []) || !coverage.ok)
+      throw invalid('goal acceptance evidence is missing');
+    for (const ref of refs) {
+      const criterion = record.acceptance?.find(entry => entry.id === ref);
+      // A clarification changes only the explicit relation, never product or external evidence requirements.
+      if (!criterion || !mapped && criterion.text !== item.criterion
+        || !hasGoalReferenceEvidence(record, ref, continuity, coverage)) throw invalid('goal acceptance evidence is missing');
+    }
   }
   return true;
 }

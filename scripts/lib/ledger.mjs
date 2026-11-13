@@ -59,7 +59,7 @@ export function createLedgerStore(stateRoot) {
     return { dir, ledger: path.join(dir, 'ledger.ndjson'), lock: path.join(dir, '.ledger.lock') };
   }
 
-  async function withLock(unit, action, {wait = true} = {}) {
+  async function withLock(unit, action, {wait = true, lockMetadata = {}} = {}) {
     const files = filesFor(unit);
     await mkdir(files.dir, { recursive: true });
     let lock;
@@ -72,7 +72,7 @@ export function createLedgerStore(stateRoot) {
       }
     }
     try {
-      await lock.writeFile(JSON.stringify({ pid: process.pid }));
+      await lock.writeFile(JSON.stringify({ ...lockMetadata, pid: process.pid }));
       await lock.sync();
       return await action({
         async read() {

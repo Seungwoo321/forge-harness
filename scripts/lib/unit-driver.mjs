@@ -1,3 +1,7 @@
+import { retainedClarificationResume, verifyRetainedClarificationStop } from './goal-acceptance-resume.mjs';
+import { withGoalAcceptanceRecoveryLock } from './goal-acceptance-lock.mjs';
+import { acquireContinuityLock } from './continuity-lock.mjs';
+import { clarifyGoalAcceptance, validateInitialGoalAcceptance } from './goal-acceptance-binding.mjs';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, open, readFile, readdir, rename, rm } from 'node:fs/promises';
 import os from 'node:os';
@@ -706,37 +710,46 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
   const targetProjection = targetUpdated
     ? await projectUnit(targetUpdated, adapters.tracker, createProjectionQueue(stateRoot, adapters))
     : null;
-  let updated = await store.update(unit, next => {
-    if (next.revision !== current.revision) {
-      const error = new Error('unit record changed while the stage output was being inspected');
-      error.code = 'STAGE_STALE';
-      throw error;
-    }
-    const stages = (next.stages ?? []).map(item => item.name !== stage ? item : {
-      ...item,
-      attempts: (item.attempts ?? []).map(attempt => attempt.n === active.n ? {
-        ...attempt,
-        ...(output.status === 'needs-decision' ? {} : { endedAt: adapters.now() }),
-        result: output.status, summary: output.summary, outputDigest: digest(output), submissionId: output.submissionId,
-        changedPaths: attributed.attemptPaths,
-        ...(gateDiagnosis ? { gateDiagnosis } : {}),
-        ...(failureDiagnosis ? { failureDiagnosis } : {}),
-      } : attempt),
+  let updated, scopeGoalLock;
+  try {
+    updated = await store.update(unit, async next => {
+      if (next.revision !== current.revision) {
+        const error = new Error('unit record changed while the stage output was being inspected');
+        error.code = 'STAGE_STALE';
+        throw error;
+      }
+      if (stage === 'scope' && output.status === 'done' && next.continuity?.goalId) {
+        scopeGoalLock = await acquireContinuityLock(path.join(path.resolve(stateRoot), 'goals', next.continuity.goalId, '.lock'));
+        await validateInitialGoalAcceptance({ record: next, acceptance: output.acceptance,
+          goal: await createContinuityStore(stateRoot).read(next.continuity.goalId), store });
+        scopeGoalLock.assertHeld();
+      }
+      const stages = (next.stages ?? []).map(item => item.name !== stage ? item : {
+        ...item,
+        attempts: (item.attempts ?? []).map(attempt => attempt.n === active.n ? {
+          ...attempt,
+          ...(output.status === 'needs-decision' ? {} : { endedAt: adapters.now() }),
+          result: output.status, summary: output.summary, outputDigest: digest(output), submissionId: output.submissionId,
+          changedPaths: attributed.attemptPaths,
+          ...(gateDiagnosis ? { gateDiagnosis } : {}),
+          ...(failureDiagnosis ? { failureDiagnosis } : {}),
+        } : attempt),
+      });
+      const writes = Object.fromEntries(contract.writes.filter(field => Object.hasOwn(output, field)).map(field => [field, output[field]]));
+      if (reviewTarget) {
+        delete writes.findings;
+        delete writes.verdict;
+        delete writes.reviewedHead;
+      }
+      if (Array.isArray(writes.findings)) writes.findings = [...(next.findings ?? []), ...writes.findings];
+      if (Array.isArray(writes.openDecisions)) writes.openDecisions = writes.openDecisions.map(item => ({ ...item, notifiedAt: null, answer: null }));
+      const findings = [...(writes.findings ?? next.findings ?? []), ...attributed.findings, ...(guard.finding ? [guard.finding] : [])];
+      const candidate = { ...next, ...writes, ...(stage === 'implement' ? { diff: null, handoff: null } : {}),
+        ...(repairTarget ? { gateRecovery: { ...next.gateRecovery, repairTarget } } : {}),
+        stages, changedPaths: attributed.changedPaths, findings };
+      return to === next.state ? candidate : transitionRecord(candidate, to);
     });
-    const writes = Object.fromEntries(contract.writes.filter(field => Object.hasOwn(output, field)).map(field => [field, output[field]]));
-    if (reviewTarget) {
-      delete writes.findings;
-      delete writes.verdict;
-      delete writes.reviewedHead;
-    }
-    if (Array.isArray(writes.findings)) writes.findings = [...(next.findings ?? []), ...writes.findings];
-    if (Array.isArray(writes.openDecisions)) writes.openDecisions = writes.openDecisions.map(item => ({ ...item, notifiedAt: null, answer: null }));
-    const findings = [...(writes.findings ?? next.findings ?? []), ...attributed.findings, ...(guard.finding ? [guard.finding] : [])];
-    const candidate = { ...next, ...writes, ...(stage === 'implement' ? { diff: null, handoff: null } : {}),
-      ...(repairTarget ? { gateRecovery: { ...next.gateRecovery, repairTarget } } : {}),
-      stages, changedPaths: attributed.changedPaths, findings };
-    return to === next.state ? candidate : transitionRecord(candidate, to);
-  });
+  } finally { await scopeGoalLock?.close(); }
   let resolverCompleted = null;
   if (resolverCauseKey) {
     resolverCompleted = await createRecoveryStore(stateRoot).finishResolver({ causeKey: resolverCauseKey });
@@ -948,12 +961,14 @@ async function runResume({ stateRoot, unit, options, adapters }) {
   const snapshot = await readJsonFile(path.resolve(options.snapshot), 'resume snapshot', 'CLI_USAGE');
   const boundary = classifySessionBoundary(snapshot.event);
   const existing = await createUnitStateStore(stateRoot).read(unit);
+  let liveContinuation;
   if (existing?.continuity?.goalId) {
     const goal = await createContinuityStore(stateRoot).read(existing.continuity.goalId);
+    liveContinuation = retainedClarificationResume(goal, unit);
     if (!goal || goal.goal.status !== 'active' || !goal.goal.remaining.includes(unit)) throw Object.assign(new Error('goal must be resumed before its unit'), {code:'GOAL_BLOCKED'});
   }
   const store = createUnitStateStore(stateRoot);
-  const result = await createLedgerStore(stateRoot).withLock(unit, async ledger => {
+  const run = lockMetadata => createLedgerStore(stateRoot).withLock(unit, async ledger => {
     const rows = await ledger.read();
     const current = await store.read(unit);
     if (!current) throw continuationError('UNIT_NOT_FOUND', `unit not found: ${unit}`);
@@ -973,17 +988,29 @@ async function runResume({ stateRoot, unit, options, adapters }) {
         await verifyRetryResolution({ stateRoot, record: current, receipt, adapters });
       }
     }
-    return resumeUnitFailure({store,unit,snapshot:{...snapshot,ledger:rows},
-      validateResolution: (record, receipt) => verifyRetryResolution({ stateRoot, record, receipt, adapters }),
-      validateStopped: async record => {
-      let observation;
-      await createContinuityStore(stateRoot).transaction(record.continuity.goalId, async goal => {
-        observation = await verifyRecoveredStop({stateRoot,store,record,goal,rows,adapters,resumed:true});
-        return goal;
-      });
-      return observation;
-    }});
-  });
+    let retainedGoalLock;
+    try {
+      return await resumeUnitFailure({store,unit,lockMetadata,snapshot:{...snapshot,ledger:rows},
+        validateResolution: (record, receipt) => verifyRetryResolution({ stateRoot, record, receipt, adapters }),
+        validateStopped: async (record, { recovery }) => {
+          if (liveContinuation) {
+            retainedGoalLock = await acquireContinuityLock(path.join(path.resolve(stateRoot), 'goals', record.continuity.goalId, '.lock'));
+            const goal = await createContinuityStore(stateRoot).read(record.continuity.goalId);
+            const observation = await verifyRetainedClarificationStop({stateRoot,store,record,goal,rows,adapters,recovery});
+            retainedGoalLock.assertHeld();
+            return observation;
+          }
+          let observation;
+          await createContinuityStore(stateRoot).transaction(record.continuity.goalId, async goal => {
+            observation = await verifyRecoveredStop({stateRoot,store,record,goal,rows,adapters,resumed:true});
+            return goal;
+          });
+          return observation;
+        }});
+    } finally { await retainedGoalLock?.close(); }
+  }, { lockMetadata });
+  const result = liveContinuation
+    ? await withGoalAcceptanceRecoveryLock({stateRoot,unit,requestDigest:liveContinuation.requestDigest}, run) : await run();
   return {
     code: result.stage ? 0 : 3,
     summary: result.stage ? `Resumed ${unit} at ${result.stage}` : `Unit ${unit} requires ${result.recovery?.action ?? 'resume inspection'}`,
@@ -1546,7 +1573,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
             throw Object.assign(new Error('recorded failure changed'), {code:'CONTINUITY_STALE'});
         }
         const goal = subcommand === 'block' ? await store.transaction(id, current => blockGoal(current,request))
-          : await resumeStoppedGoal({stateRoot:effectiveRoot,store:createUnitStateStore(effectiveRoot),id,request,adapters});
+          : await resumeStoppedGoal({stateRoot:effectiveRoot,store:createUnitStateStore(effectiveRoot),id,request,userInputRef:parsed.options['user-input'],adapters});
         return formatCliResult({ code: 0, summary: `Goal ${id} ${subcommand === 'block' ? 'blocked' : 'resumed'}`, details: { goal } });
       }
       if (subcommand === 'amend') {
@@ -1632,7 +1659,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const goal = await store.create({goal:request.goal,source:request.source,policy:resolved.policy.session});
       return formatCliResult({ code: 0, summary: `Goal ${id} registered`, details: { goal } });
     }
-    if (noun !== 'unit' || !['start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'session-recover', 'session-adopt', 'session-rebind', 'stopped-owner-recover', 'goal-bind', 'session-stop', 'session-return', 'policy', 'reopen', 'rework', 'completion-recover', 'delivered-preflight', 'delivered-fence', 'delivered-reconcile', 'delivered-continue'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen|rework|completion-recover|delivered-preflight|delivered-fence|delivered-reconcile|delivered-continue <unit> --request <file>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct|drop <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit session-recover <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
+    if (noun !== 'unit' || !['start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'session-recover', 'session-adopt', 'session-rebind', 'stopped-owner-recover', 'goal-bind', 'goal-acceptance', 'session-stop', 'session-return', 'policy', 'reopen', 'rework', 'completion-recover', 'delivered-preflight', 'delivered-fence', 'delivered-reconcile', 'delivered-continue'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen|rework|completion-recover|delivered-preflight|delivered-fence|delivered-reconcile|delivered-continue <unit> --request <file>, unit goal-acceptance clarify <unit> --request <file> --user-input <ref>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct|drop <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit session-recover <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
     const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
     if (subcommand === 'acceptance') {
       const [action, unit] = rest;
@@ -1747,6 +1774,15 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
         return current.state === 'Accepted' ? transitionRecord(transitionRecord(reopened, 'SelfGated'), 'Implementing') : transitionRecord(reopened, 'Implementing');
       });
       return formatCliResult({ code: 0, summary: `Unit ${unit} reopened for implementation`, details: { unit, state: record.state, revision: record.revision } });
+    }
+    if (subcommand === 'goal-acceptance') {
+      const [action, unit] = rest;
+      if (action !== 'clarify' || !unit || rest.length !== 2 || !parsed.options.request)
+        usageError('unit goal-acceptance clarify <unit> --request <file> --user-input <ref>');
+      const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'goal acceptance clarification', 'CLI_USAGE');
+      const receipt = await clarifyGoalAcceptance({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit,
+        request, userInputRef: parsed.options['user-input'], adapters });
+      return formatCliResult({ code: 0, summary: 'Original goal acceptance mapping clarified', details: { unit, receipt } });
     }
     if (subcommand === 'goal-bind') {
       const [unit] = rest;

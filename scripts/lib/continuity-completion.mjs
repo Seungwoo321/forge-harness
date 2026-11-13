@@ -25,7 +25,7 @@ export async function validateGoalCompletion({ continuity, unit, proof, unitStor
     const coverage = acceptanceCoverage(productAcceptance(record), record.evidence ?? []);
     const correction = currentCorrections(record).find(receipt => receipt.request.acceptanceRef === item.acceptance);
     const criterion = record.acceptance?.find(entry => entry.id === item.acceptance);
-    const corrected = correction && criterion && effectArgsDigest(correctionSource(record)) === correction.request.sourceDigest
+    const corrected = correction && criterion && effectArgsDigest(correctionSource(record, correction, continuity)) === correction.request.sourceDigest
       && effectArgsDigest(criterion) === correction.request.criterionDigest
       && effectArgsDigest({ request: correction.request, userInputRef: correction.userInputRef }) === correction.requestDigest;
     // Preflight maps retained obligations; only the guarded terminal paths can produce Closed goal evidence.

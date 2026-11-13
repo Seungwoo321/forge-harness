@@ -1557,7 +1557,9 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
         for (const bound of new Set([...goal.goal.remaining, ...(goal.transfers ?? []).map(item => item.unit)])) {
           const existing = await unitStore.read(bound);
           if (!existing || existing.continuity?.goalId !== id || existing.state === 'Closed' || !existing.request?.overallGoal) continue;
-          await unitStore.update(bound, record => ({ ...record, request: { ...record.request,
+          await unitStore.update(bound, record => ({ ...record,
+            goalAmendmentHistory: { goalId: id, source: goal.source, amendments: goal.amendments,
+              current: { objective: goal.goal.objective, criteria: goal.goal.criteria } }, request: { ...record.request,
             overallGoal: { ...record.request.overallGoal, objective: goal.goal.objective, criteria: goal.goal.criteria } } }));
         }
         return formatCliResult({ code: 0, summary: `Goal ${id} amended`, details: { goal } });

@@ -21,7 +21,7 @@ import {recoverStoppedOwner} from './lib/stopped-owner-recovery.mjs';
 const packet = ['목표: goal','수용 기준: done','작업관리: change','결정: approved','변경: retained','검증: source','남은 일·위험: access','다음 단위 첫 행동: resume'].join('\n');
 const fields = {title:'Stopped change',objective:'goal',acceptance:'pending',tracking:'change',decision:'blocked',changed:'retained',verification:'source',remainingRisk:'access',nextFirstAction:'resume'};
 const parse = output => JSON.parse(output.slice(output.lastIndexOf('RESULT ')+7));
-async function fixture(t, managed = false, stoppedFrom = 'Implementing') {
+async function fixture(t, managed = false, stoppedFrom = 'Implementing', normal = false) {
   const cwd = await mkdtemp(path.join(tmpdir(),'stopped-owner-'));t.after(()=>rm(cwd,{recursive:true,force:true}));
   const stateRoot = path.join(cwd,'state'), store = createUnitStateStore(stateRoot), goals = createContinuityStore(stateRoot);
   const source = path.join(cwd,'goal.md');await writeFile(source,'goal');
@@ -34,6 +34,7 @@ async function fixture(t, managed = false, stoppedFrom = 'Implementing') {
   await mkdir(path.join(stateRoot,'units/change/failures'),{recursive:true});
   const failurePath='units/change/failures/f1.json';await writeFile(path.join(stateRoot,failurePath),'failure');
   await store.create({schema:'harness.unit/1',unit:'change',kind:'impl',state:'Stopped',stoppedFrom,continuity:{goalId:'goal'},policy:{goal:{class:'product-prelaunch'},session:policy},canon:[],
+    ...(normal ? {accepted:{head:'head',contentFingerprint:'content'},reviewDecision:{required:true,head:'head',contentFingerprint:'content'}} : {}),
     failures:[{path:failurePath,digest:taskDigest('failure'),signature:'original'}],evidence:[{gate:'lint',fingerprint:'old',exit:0,status:'passed'}],acceptance:[{id:'AC-1',text:'done'}],stages:[],openDecisions:[]});
   await goals.transaction('goal',g=>({...g,revision:g.revision+1,goal:{...g.goal,status:'blocked',blocker:{unit:'change',reason:'access',resumeCondition:'access granted',evidence:failurePath}}}));
   let closed=true, authorized=true, hook=async()=>{}, launches=0;
@@ -48,17 +49,22 @@ async function fixture(t, managed = false, stoppedFrom = 'Implementing') {
         && input.unitDigest===digest(input.record) && input.goalDigest===digest(input.goal) && input.custodyDigest===digest(custody);
       await hook();return {...input,verified};
     }},session:{
-      async observe(input){if(input.closedOwner)return {closed,owner};return input.cwd===cwd && input.targetCwd ? parent : owner;},
-      async execute(input){assert.equal(input.effect,'session.start');launches++;const result={...fresh,task:{...fresh,schema:'harness.goal-receipt/1',effectKey:input.key,
+      async observe(input){if(normal && input.recipient)return {...parent,executable:'/bin/codex'};if(input.closedOwner)return {closed,owner:input.closedOwner};return input.cwd===cwd && input.targetCwd ? parent : owner;},
+      async execute(input){
+        if(normal && input.effect==='session.close'){const result={sessionId:owner.sessionId,incarnationId:owner.incarnationId,closed:true};receipts.set(input.key,result);return result;}
+        if(normal && input.effect==='session.deliver'){const result={...parent,task:{...parent,schema:'harness.task-receipt/1',effectKey:input.key,promptDigest:taskDigest('return'),threadId:'parent-thread',requestId:'return',turnId:'return-turn',activityId:'read',packets:['result','handoff','goal'].map(name=>({path:input.args[`${name}Path`],digest:input.args[`${name}Digest`]}))}};receipts.set(input.key,result);return result;}
+        assert.equal(input.effect,'session.start');launches++;const result={...fresh,task:{...fresh,schema:'harness.goal-receipt/1',effectKey:input.key,
         promptDigest:taskDigest('resume'),goalDigest:input.args.goalDigest,goal:{threadId:'fresh-thread',status:'active',objective:'resume'},threadId:'fresh-thread',turnId:'turn',activityId:'read',
         packets:['handoff','goal'].map(name=>({path:input.args[`${name}Path`],digest:input.args[`${name}Digest`]}))}};receipts.set(input.key,result);return result;},
-      async verify(input){return receipts.has(input.key)?{status:'completed',result:receipts.get(input.key)}:{status:'unknown'};}
+      async verify(input){if(normal && input.effect==='session.close' && !closed)return {status:'unknown'};return receipts.has(input.key)?{status:'completed',result:receipts.get(input.key)}:{status:'unknown'};}
     }};
   const run=async args=>parse(await runUnitCli(args,{cwd,stateRoot,adapters}));
   // Generate the original immutable stop packets through the public stop command.
-  const stop=path.join(cwd,'stop.json');await writeFile(stop,JSON.stringify({parentRuntime:owner,handoffContent:packet,resultFields:fields,classification:'authority'}));
-  const observed=adapters.session.observe;adapters.session.observe=async()=>owner;
-  assert.equal((await run(['unit','session-stop','change','--request',stop])).code,0);adapters.session.observe=observed;
+  const stop=path.join(cwd,'stop.json');await writeFile(stop,JSON.stringify({parentRuntime:owner,handoffContent:packet,resultFields:fields,classification:'authority',...(normal ? {returnTo:{...parent,executable:'/bin/codex'}} : {})}));
+  const observed=adapters.session.observe;adapters.session.observe=async input=>normal && input.recipient ? {...parent,executable:'/bin/codex'} : {...owner,closable:true};
+  assert.equal((await run(['unit','session-stop','change','--request',stop])).code,normal ? 3 : 0);
+  if(normal)assert.equal((await run(['unit','finalize','change'])).code,0);
+  adapters.session.observe=observed;
   const unitFile=path.join(stateRoot,'units/change/unit.json');
   const request=async(extra={})=>({id:'recover-1',expectedRevision:(await store.read('change')).revision,expectedGoalRevision:(await goals.read('goal')).revision,
     unitDigest:digest(await store.read('change')),goalDigest:digest(await goals.read('goal')),ledgerDigest:digest(await createLedgerStore(stateRoot).withLock('change',l=>l.read())),
@@ -72,7 +78,7 @@ async function fixture(t, managed = false, stoppedFrom = 'Implementing') {
     setClosed:value=>{closed=value;},deny:()=>{authorized=false;},onVerify:value=>{hook=value;},launches:()=>launches,parent,command};
 }
 
-test('external closure observation preserves stopped history and public same-unit resume selects exactly one fresh owner',async t=>{
+test('external closure observation preserves stopped history and public same-unit resume selects exactly one fresh owner (AC-3)',async t=>{
  for(const managed of [false,true])for(const stoppedFrom of ['Implementing','SelfGated','InReview','Accepted'])await t.test(`${managed?'managed':'existing'} retained ${stoppedFrom}`,async t=>{
   const f=await fixture(t,managed,stoppedFrom),before=await readFile(f.unitFile),oldGoal=await f.goals.read('goal'),request=await f.request();
   assert.equal((await f.activate()).error,'SESSION_CLOSE_PENDING');
@@ -299,4 +305,79 @@ test('AC-1 stale evidence at an unfinished scope or implementation resumes its o
   assert.equal((await f.store.read('change')).evidence.at(-1).status,'stale');
   assert.equal((await f.run(['unit','accept','change'])).error,'INVALID_TRANSITION');
  });
+});
+
+
+test('normal verified stopped closure resumes post-gate states with fresh validation and one next owner (AC-1 AC-2)',async t=>{
+ for(const state of ['SelfGated','InReview','Accepted'])await t.test(state,async t=>{
+  const f=await fixture(t,true,state,true),before=await f.store.read('change');
+  assert.equal(before.sessionFinalization.closeReceipt.result.closed,true);
+  assert.equal((await f.activate()).code,0);
+  const resumed=await f.resume({currentFingerprints:{lint:'fresh'}});
+  assert.equal(resumed.code,0,JSON.stringify(resumed));assert.equal(resumed.recovery.action,'rerun-gate');
+  const record=await f.store.read('change');
+  assert.deepEqual(record.sessionHistory,[before.sessionFinalization]);assert.deepEqual(record.failures,before.failures);
+  assert.equal(record.accepted,null);assert.equal(record.reviewDecision,null);assert.equal(record.evidence.at(-1).status,'stale');
+  const handoff=path.join(f.cwd,'resume.md');await writeFile(handoff,packet);
+  const start={cwd:f.cwd,handoffPath:handoff,handoffDigest:taskDigest(packet),parentRuntime:f.parent,waitSeconds:0};
+  const results=await Promise.all([f.command(['unit','session-start','change'],start),f.command(['unit','session-start','change'],start)]);
+  for(const result of results)assert.equal(result.code,0,JSON.stringify(result));
+  assert.equal((await f.command(['unit','session-start','change'],start)).code,0);
+  assert.equal(f.launches(),1);assert.equal(goalOwner(await f.goals.read('goal'),'change').attempt,2);
+  assert.deepEqual((await f.store.read('change')).sessionHistory,[before.sessionFinalization]);
+ });
+});
+
+test('normal stopped startup rejects live, foreign, stale, incomplete and unproven closure (AC-2)',async t=>{
+ for(const variant of ['live','foreign','stale','incomplete','unproven','pending','foreign-custody','missing-result','pending-result','running-result','uncertain-latest','unknown-latest'])await t.test(variant,async t=>{
+  const f=await fixture(t,true,'SelfGated',true);
+  assert.equal((await f.activate()).code,0);assert.equal((await f.resume({currentFingerprints:{lint:'fresh'}})).code,0);
+  if(variant==='live')f.setClosed(false);
+  else if(variant==='unproven'){
+   const observe=f.adapters.session.observe;f.adapters.session.observe=async input=>input.closedOwner?{closed:false}:observe(input);
+  }else if(variant==='foreign-custody')await f.goals.transaction('goal',g=>({...g,revision:g.revision+1,bootstraps:[...g.bootstraps,{unit:'change',attempt:99,sessionId:'foreign',incarnationId:'foreign-v1',cwd:f.cwd}]}));
+  else if(variant==='missing-result')await f.store.update('change',record=>({...record,sessionHistory:record.sessionHistory.map(plan=>({...plan,closeReceipt:{...plan.closeReceipt,seq:999}}))}));
+  else if(['pending-result','running-result','uncertain-latest','unknown-latest'].includes(variant))await createLedgerStore(f.stateRoot).withLock('change',async l=>{
+   await l.append({event:'intent',effect:'session.deliver',unit:'change',seq:99,key:'unresolved',args:{}});
+   if(variant.endsWith('-latest'))await l.append({event:'result',unit:'change',seq:99,key:'unresolved',result:{status:'completed'}});
+   await l.append({event:'result',unit:'change',seq:99,key:'unresolved',result:{status:variant.split('-')[0]}});
+  });
+  else if(variant==='pending')await createLedgerStore(f.stateRoot).withLock('change',l=>l.append({event:'intent',effect:'session.deliver',unit:'change',seq:99,key:'pending',args:{}}));
+  else await f.store.update('change',record=>{
+   const plan=structuredClone(record.sessionHistory.at(-1));
+   if(variant==='foreign')plan.owner.sessionId='foreign';
+   if(variant==='stale')plan.resultDigest=taskDigest('stale');
+   if(variant==='incomplete')delete plan.closeReceipt;
+   return {...record,sessionHistory:[plan]};
+  });
+  const handoff=path.join(f.cwd,'resume.md');await writeFile(handoff,packet);
+  const result=await f.command(['unit','session-start','change'],{cwd:f.cwd,handoffPath:handoff,handoffDigest:taskDigest(packet),parentRuntime:f.parent,waitSeconds:0});
+  assert.notEqual(result.code,0,JSON.stringify(result));assert.equal(result.error,'CONTINUITY_INVALID');assert.equal(f.launches(),0);
+  const rows=await createLedgerStore(f.stateRoot).withLock('change',l=>l.read());assert.equal(rows.filter(row=>row.event==='intent' && row.effect==='session.start').length,0);
+ });
+});
+
+test('normal stopped startup uses native closed-owner observation from a distinct supervisor (AC-1 AC-2)',async t=>{
+ const f=await fixture(t,true,'SelfGated',true);
+ assert.equal((await f.activate()).code,0);assert.equal((await f.resume({currentFingerprints:{lint:'fresh'}})).code,0);
+ const calls=[];
+ const native=createSessionRunner({runtime:'cmux',parent:{...f.parent,closable:true,workerExecutable:'/bin/codex'},launch:()=>{throw Error('unexpected launch');},
+  command:async(binary,args)=>{calls.push([binary,args]);
+   if(binary==='ps')return {exitCode:0,stdout:'1\n2'};
+   assert.equal(binary,'cmux');assert.deepEqual(args,['--json','--id-format','uuids','tree','--all']);
+   return {exitCode:0,stdout:JSON.stringify({windows:[{workspaces:[{panes:[{surfaces:[]}]}]}]})};
+  }});
+ const plan=(await f.store.read('change')).sessionHistory.at(-1),rows=await createLedgerStore(f.stateRoot).withLock('change',l=>l.read());
+ const close=rows.find(row=>row.event==='intent' && row.effect==='session.close');
+ // A new supervisor has no authority to replay the old owner's close effect.
+ assert.equal((await native.verify({effect:'session.close',args:close.args,key:close.key,seq:close.seq})).status,'unknown');
+ const observe=f.adapters.session.observe,verify=f.adapters.session.verify;
+ f.adapters.session.observe=input=>input.closedOwner?native.observe(input):observe(input);
+ f.adapters.session.verify=input=>input.effect==='session.close'?native.verify(input):verify(input);
+ const handoff=path.join(f.cwd,'resume.md');await writeFile(handoff,packet);
+ const start={cwd:f.cwd,handoffPath:handoff,handoffDigest:taskDigest(packet),parentRuntime:f.parent,waitSeconds:0};
+ const result=await f.command(['unit','session-start','change'],start);
+ assert.equal(result.code,0,JSON.stringify(result));assert.equal(f.launches(),1);
+ assert.deepEqual(plan.owner.worker,f.owner.worker);assert.ok(calls.length>0);
+ assert.ok(calls.every(([binary,args])=>binary==='ps'||args.includes('tree')));
 });

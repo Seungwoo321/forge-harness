@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cp, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { chmod, cp, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -54,6 +54,11 @@ test('a package relocated outside the source checkout completes the documented f
   const installed = path.join(temporary, 'installed package');
   for (const entry of ['scripts', 'skills', 'examples', 'package.json']) {
     await cp(path.join(root, entry), path.join(installed, entry), { recursive: true });
+  }
+  // An installed fixture owns its permissions even when the source snapshot is read-only.
+  for (const entry of await readdir(installed, { recursive: true, withFileTypes: true })) {
+    const file = path.join(entry.parentPath, entry.name);
+    await chmod(file, (await stat(file)).mode | 0o200);
   }
   const result = spawnSync(process.execPath, [path.join(installed, 'examples/first-run.mjs')], { cwd: temporary, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr || result.stdout);

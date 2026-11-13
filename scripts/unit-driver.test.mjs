@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -842,7 +843,7 @@ test('acceptance rejects policy changed away and back during gates', async t => 
   assert.equal((await store.read(unit)).state,'SelfGated');
 });
 
-async function exhaustedGateFixture(t, review = { mode: 'none', by: 'session', triggers: [] }) {
+async function exhaustedGateFixture(t, review = { mode: 'none', by: 'session', triggers: [] }, ordinary = false) {
   const { root, stateRoot, unit, store, adapters, checkpointChanges } = await fixture(t);
   await prepareAcceptanceRecord(store, unit, { review });
   await store.update(unit, current => ({ ...current, scopePaths: ['tests.mjs'],
@@ -853,11 +854,13 @@ async function exhaustedGateFixture(t, review = { mode: 'none', by: 'session', t
   let red = ['first AC-1', 'second AC-2'];
   let testRuns = 0;
   let variant = 'tests';
+  let verifierRevision = 'original';
+  await writeFile(path.join(root, 'verifier-config'), verifierRevision);
   adapters.id = () => `failure-${++sequence}`;
   adapters.git.inspectUnit = async () => ({ head: 'head-1', contentFingerprint: content });
   adapters.gates = { async describe(id) {
     return { id, format: 'tap', acPattern: 'AC-[12]', command: ['node', 'check', id === 'tests' ? variant : id],
-      files: [{ path: `${id}.mjs`, content: await readFile(path.join(root, `${id}.mjs`)) }] };
+      files: [{ path: `${id}.mjs`, content: await readFile(path.join(root, `${id}.mjs`)) }, { path: 'verifier-config', content: verifierRevision }] };
   } };
   adapters.command = async (_binary, args) => {
     const isTests = args.at(-1) === variant;
@@ -882,9 +885,11 @@ async function exhaustedGateFixture(t, review = { mode: 'none', by: 'session', t
       inputDigest, attempt, submissionId: `${name}-${attempt}`, status: 'done', summary: 'Verified stage output', ...fields,
     }));
   };
-  const diagnose = () => stage('root-cause', { assumptions: [], findings: [{
-    id: 'D-1', kind: 'diagnosis', classification: 'product', severity: 'should-fix', site: 'tests.mjs',
-    case: 'The two observed cases do not meet the requirement', claim: 'The shared implementation violates the cases', fix: 'Correct the shared implementation',
+  const diagnose = (classification = 'product') => stage('root-cause', { assumptions: [], findings: [{
+    id: 'D-1', kind: 'diagnosis', classification, severity: 'should-fix', site: 'tests.mjs',
+    case: 'The captured gate reports two failed cases',
+    claim: classification === 'product' ? 'The shared implementation violates the cases' : 'The verifier configuration prevents the cases from running correctly',
+    fix: classification === 'product' ? 'Correct the shared implementation' : 'Correct the verifier configuration and independently reproduce the original gate',
   }] });
   const implement = (next, remaining = red) => stage('implement', { changedPaths: ['tests.mjs'], coverage: [], assumptions: [], openDecisions: [] }, async () => {
     content = next;
@@ -903,6 +908,8 @@ async function exhaustedGateFixture(t, review = { mode: 'none', by: 'session', t
   const second = await fail();
   assert.equal(second.action, 'diagnose', JSON.stringify(second));
   assert.equal((await retry(second.causeKey)).error, 'DIAGNOSIS_REQUIRED');
+  if (ordinary) return { root, stateRoot, unit, store, call, write, adapters, diagnose, accept,
+    causeKey: second.causeKey, retry: () => retry(second.causeKey), isFixed: () => red.length === 0, fixVerifier: async () => { red = []; verifierRevision = 'corrected'; await writeFile(path.join(root, 'verifier-config'), verifierRevision); } };
   assert.equal((await diagnose()).code, 0);
   assert.equal((await retry(second.causeKey)).action, 'retry');
   assert.equal((await implement('second bounded repair')).code, 0);
@@ -911,7 +918,7 @@ async function exhaustedGateFixture(t, review = { mode: 'none', by: 'session', t
   assert.equal(stopped.state, 'Stopped', JSON.stringify(stopped));
   assert.equal(stopped.action, 'stop');
   return { root, stateRoot, unit, store, call, write, diagnose, implement, accept, retry: () => retry(stopped.causeKey),
-    causeKey: stopped.causeKey, testRuns: () => testRuns, changeCommand: () => { variant = 'alternate'; } };
+    adapters, isFixed: () => red.length === 0, fixVerifier: async () => { red = []; verifierRevision = 'corrected'; await writeFile(path.join(root, 'verifier-config'), verifierRevision); }, causeKey: stopped.causeKey, testRuns: () => testRuns, changeCommand: () => { variant = 'alternate'; } };
 }
 
 test('AC-1 AC-2 AC-3 exhausted gate continues through successive verified repairs on the same unit', async t => {
@@ -1005,4 +1012,124 @@ test('AC-2 a repair that regresses a previously corrected case cannot continue',
   assert.equal((await f.implement('regressed-fix', ['first AC-1'])).code, 0);
   assert.equal((await f.accept()).progress, false);
   assert.equal((await f.store.read(f.unit)).gateRecovery.status, 'no-progress');
+});
+
+
+async function classificationProof(input, fixed) {
+  const bytes = await readFile(input.request.evidence.ref);
+  const progressDigest = 'sha256:' + createHash('sha256').update(bytes).digest('hex');
+  const observed = JSON.parse(bytes);
+  const verified = fixed && progressDigest === input.request.evidence.digest
+    && observed.failureId === input.failureId && observed.classification === input.request.classification;
+  return { ...Object.fromEntries(['unit', 'failureId', 'causeKey', 'requestDigest', 'targetDigest', 'diagnosisDigest', 'policyDigest']
+    .map(key => [key, input[key]])), verified, resolved: verified, progressDigest };
+}
+
+async function classificationEvidence(f, classification, failureId) {
+  const ref = await f.write('correction-proof.json', { classification, failureId });
+  return { ref, digest: 'sha256:' + createHash('sha256').update(await readFile(ref)).digest('hex') };
+}
+
+test('A1 A2 A3 captured non-product diagnosis requires verified correction and preserves original failure', async t => {
+  const f = await exhaustedGateFixture(t, { mode: 'required', by: 'session', triggers: [] });
+  const original = await f.store.read(f.unit);
+  assert.equal((await f.diagnose('harness')).code, 0);
+  assert.equal((await f.retry()).error, 'RETRY_NOT_ALLOWED');
+  const before = await f.store.read(f.unit);
+  const causes = await createRecoveryStore(f.stateRoot).causes();
+  const request = { id: 'classification-fix', classification: 'harness', expectedRevision: before.revision,
+    failureId: before.gateRecovery.failureId, evidence: await classificationEvidence(f, 'harness', before.gateRecovery.failureId),
+    reason: 'Verifier configuration, rather than application code, caused the captured failure' };
+  const submit = async value => f.call('unit', 'retry', f.unit, '--cause-key', f.causeKey,
+    '--request', await f.write('classification-request.json', value));
+  assert.equal((await submit({ ...request, classification: 'product' })).error, 'RETRY_RESOLUTION_INVALID');
+  assert.equal((await submit(request)).error, 'ADAPTER_MISSING');
+  assert.deepEqual(await f.store.read(f.unit), before);
+  f.adapters.provider = { async verifyRetryResolution(input) {
+    assert.equal(input.failure.class, 'product');
+    assert.equal(input.diagnosis.classification, 'harness');
+    assert.deepEqual(input.gateRecovery, before.gateRecovery);
+    return classificationProof(input, f.isFixed());
+  } };
+  assert.equal((await submit({ ...request, expectedRevision: before.revision - 1 })).error, 'STAGE_STALE');
+  assert.equal((await submit({ ...request, classification: 'environment' })).error, 'DIAGNOSIS_REQUIRED');
+  assert.equal((await submit(request)).error, 'RETRY_RESOLUTION_UNPROVEN');
+  await f.fixVerifier();
+  assert.equal((await submit({ ...request, evidence: { ...request.evidence, digest: 'sha256:' + 'f'.repeat(64) } })).error, 'RETRY_RESOLUTION_UNPROVEN');
+  assert.deepEqual(await f.store.read(f.unit), before);
+  assert.equal((await submit(request)).code, 0);
+  assert.equal((await submit({ ...request, reason: 'conflicting' })).error, 'RETRY_RESOLUTION_CONFLICT');
+  assert.equal((await submit(request)).receipt.duplicate, true);
+  const snapshot = await f.write('classification-resume.json', { currentFingerprints: Object.fromEntries(before.evidence.map(item => [item.gate, item.fingerprint])), git: { head: 'head-1', checkpoints: Object.fromEntries((await f.store.read(f.unit)).stages.flatMap(stage => stage.attempts.map(item => [item.checkpoint, true]))), worktreeDiff: [], indexDiff: [] } });
+  const resumed = await f.call('unit', 'resume', f.unit, '--snapshot', snapshot);
+  assert.equal(resumed.code, 0, JSON.stringify(resumed));
+  await f.fixVerifier();
+  const accepted = await f.accept();
+  assert.equal(accepted.code, 20, JSON.stringify(accepted));
+  const after = await f.store.read(f.unit);
+  assert.deepEqual(after.failures, original.failures);
+  assert.deepEqual(after.policy, original.policy);
+  assert.deepEqual(after.evidence.slice(0, before.evidence.length), before.evidence);
+  assert.equal(after.accepted, null);
+  const cause = (await createRecoveryStore(f.stateRoot).causes())[f.causeKey];
+  for (const key of ['class', 'causeKey', 'occurrences', 'retries', 'resolverAttempts', 'activeResolver']) assert.equal(cause[key], causes[f.causeKey][key]);
+});
+
+
+test('A1 A2 ordinary environment correction rejects fabricated proof and invalidates evidence without product repair', async t => {
+  const f = await exhaustedGateFixture(t, { mode: 'required', by: 'session', triggers: [] }, true);
+  assert.equal((await f.diagnose('environment')).code, 0);
+  const before = await f.store.read(f.unit);
+  const registry = await createRecoveryStore(f.stateRoot).causes();
+  const request = { id: 'environment-fix', classification: 'environment', expectedRevision: before.revision,
+    failureId: before.gateRecovery.failureId, evidence: await classificationEvidence(f, 'environment', before.gateRecovery.failureId), reason: 'Corrected isolated dependency layout' };
+  const submit = async value => f.call('unit', 'retry', f.unit, '--cause-key', f.causeKey,
+    '--request', await f.write('environment-request.json', value));
+  f.adapters.provider = { async verifyRetryResolution() { return { verified: true, resolved: true }; } };
+  assert.equal((await submit(request)).error, 'RETRY_RESOLUTION_UNPROVEN');
+  assert.deepEqual(await f.store.read(f.unit), before);
+  assert.deepEqual(await createRecoveryStore(f.stateRoot).causes(), registry);
+  f.adapters.provider.verifyRetryResolution = input => classificationProof(input, f.isFixed());
+  await f.fixVerifier();
+  const { resolveExhaustedFailure } = await import('./lib/retry-resolution.mjs');
+  const { resolvePolicy } = await import('./lib/policy.mjs');
+  const { policy } = resolvePolicy({ project: before.policy }, { nonInteractive: true });
+  await assert.rejects(resolveExhaustedFailure({ stateRoot: f.stateRoot, unit: f.unit, request, causeKey: f.causeKey,
+    policy: policy.retry, adapters: f.adapters, store: { ...f.store, async update(unit, action) {
+      await f.store.update(unit, action);
+      throw new Error('interrupted after durable classification receipt');
+    } } }), /interrupted after durable classification receipt/);
+  assert.equal((await f.accept()).error, 'RETRY_RESOLUTION_UNPROVEN');
+  assert.equal((await submit(request)).receipt.duplicate, true);
+  const corrected = await f.store.read(f.unit);
+  assert.equal(corrected.state, 'SelfGated');
+  assert.equal(corrected.gateRecovery, null);
+  assert.deepEqual(corrected.failures, before.failures);
+  assert.deepEqual(corrected.stages, before.stages);
+  assert.equal(corrected.evidence.at(-1).status, 'stale');
+  assert.equal((await submit(request)).receipt.duplicate, true);
+  await f.fixVerifier();
+  const accepted = await f.accept();
+  assert.equal(accepted.code, 20, JSON.stringify(accepted));
+  assert.equal((await f.store.read(f.unit)).classificationRevalidations.length, 1);
+  const inspect = f.adapters.git.inspectUnit;
+  f.adapters.git.inspectUnit = async args => ({ ...await inspect(args), contentFingerprint: 'review-corrected-target' });
+  const reviewedCorrection = await f.accept();
+  assert.equal(reviewedCorrection.code, 20, JSON.stringify(reviewedCorrection));
+  await writeFile(before.gateRecovery.baseline.report, 'changed original report');
+  assert.equal((await f.accept()).error, 'EVIDENCE_STALE');
+});
+
+
+test('A2 classification correction cannot bypass explicit policy', async t => {
+  const f = await exhaustedGateFixture(t, undefined, true);
+  assert.equal((await f.diagnose('harness')).code, 0);
+  await f.store.update(f.unit, current => ({ ...current, policy: { ...current.policy, retry: { onExhaustion: 'stop' } } }));
+  const before = await f.store.read(f.unit);
+  const request = { id: 'forbidden', classification: 'harness', expectedRevision: before.revision,
+    failureId: before.gateRecovery.failureId, evidence: { ref: 'proof', digest: 'sha256:' + 'e'.repeat(64) }, reason: 'Observed correction' };
+  const response = await f.call('unit', 'retry', f.unit, '--cause-key', f.causeKey,
+    '--request', await f.write('forbidden.json', request));
+  assert.equal(response.error, 'RETRY_NOT_ALLOWED');
+  assert.deepEqual(await f.store.read(f.unit), before);
 });

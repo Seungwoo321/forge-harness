@@ -8,9 +8,9 @@ import { snapshotGoal } from './continuity-snapshot.mjs';
 import { loadManagedLaunch } from './continuity-launch-io.mjs';
 import { selectExecutionPolicy, executionPoliciesEqual } from './continuity-decision.mjs';
 import { validateHandoffPacket } from './report.mjs';
-import { createLedgerStore, executeEffect } from './ledger.mjs';
+import { createLedgerStore, executeEffect, unresolvedEffect } from './ledger.mjs';
 import { validateTaskReceipt } from './session-task.mjs';
-import { resolvePolicy } from './policy.mjs';
+import { resolvePolicy, prepareEffect } from './policy.mjs';
 
 const failure = message => Object.assign(new Error(message), {code:'CONTINUITY_INVALID'});
 export async function startGoalSession({ stateRoot, unit, request, store, adapters }) {
@@ -36,8 +36,9 @@ export async function startGoalSession({ stateRoot, unit, request, store, adapte
 async function startLocked({stateRoot,unit,request,store,adapters,record,goal,ledger,targetRecord}) {
   const review = record?.kind === 'review';
   const recovered = record.sessionHistory?.at(-1);
-  const recoveredActive = recovered?.mode === 'stopped-observation'
-    && effectArgsDigest(recovered.recovery) === effectArgsDigest(goal?.stoppedOwnerRecoveries?.findLast(item => item.unit === unit))
+  const normallyStopped = recovered?.mode === 'stopped';
+  const recoveredActive = (normallyStopped || recovered?.mode === 'stopped-observation'
+    && effectArgsDigest(recovered.recovery) === effectArgsDigest(goal?.stoppedOwnerRecoveries?.findLast(item => item.unit === unit)))
     && ['SelfGated','InReview','Accepted'].includes(record.state);
   if (review && record && !record.continuity?.goalId) throw failure('review unit is not bound to a goal: create it with goalId in the unit start request ({kind: "review", targetUnit, goalId})');
   if (!record?.continuity?.goalId || !(review ? record.state === 'InReview' : ['Scoped','Implementing'].includes(record.state) || recoveredActive)) throw failure('unit must be active and bound to a goal');
@@ -55,6 +56,7 @@ async function startLocked({stateRoot,unit,request,store,adapters,record,goal,le
   if (`sha256:${createHash('sha256').update(handoff).digest('hex')}` !== request.handoffDigest) throw failure('handoff digest changed');
   validateHandoffPacket(handoff);
   if (!adapters.session || typeof adapters.session.observe !== 'function') throw Object.assign(new Error('session adapter unavailable'),{code:'ADAPTER_MISSING'});
+  if (normallyStopped) await verifyStoppedClosure({record,goal,rows,unit,attempt,adapters});
   const targetCustody = review ? goalOwner(goal, record.targetUnit) : null;
   if (targetCustody?.ownership === 'existing' && (!targetRecord || targetRecord.state !== 'InReview')) throw failure('adopted review target must be InReview');
   const priorIntent = rows.findLast(row => row.event === 'intent' && row.effect === 'session.start' && row.args?.unit === unit && row.args?.attempt === attempt);
@@ -84,6 +86,7 @@ async function startLocked({stateRoot,unit,request,store,adapters,record,goal,le
   }
   let registeredGoal = goal;
   const boundary = async action => {
+    if (normallyStopped) await verifyStoppedClosure({record,goal,rows:await ledger.read(),unit,attempt,adapters});
     const source = await readFile(goal.source.path);
     if (`sha256:${createHash('sha256').update(source).digest('hex')}` !== goal.source.digest) throw failure('goal source changed');
     await loadManagedLaunch(args);
@@ -131,4 +134,36 @@ async function startLocked({stateRoot,unit,request,store,adapters,record,goal,le
   };
   const result = await perform();
   return {result:{...result,intent:{seq:result.seq,key:result.key,argsDigest:effectArgsDigest(args)}},goal:registeredGoal};
+}
+
+async function verifyStoppedClosure({record,goal,rows,unit,attempt,adapters}) {
+  const plan = record.sessionHistory.at(-1), receipt = plan.closeReceipt;
+  const owner = plan.owner;
+  const prior = [...(goal.bootstraps ?? []),...(goal.transfers ?? []).filter(item => item.successor === unit)]
+    .findLast(item => (item.unit === unit || item.successor === unit) && (item.attempt ?? 1) === attempt - 1);
+  const sameOwner = value => value?.sessionId === owner?.sessionId && value?.incarnationId === owner?.incarnationId && value?.cwd === owner?.cwd;
+  const current = goalOwner(goal,unit);
+  const registered = goal.bootstraps?.find(item => item.unit === unit && item.attempt === attempt);
+  if (!owner || !sameOwner(prior) || !(sameOwner(current) || registered && current === registered) || plan.retainedOwner || !['completed','duplicate','reconciled'].includes(receipt?.status)
+    || receipt.result?.closed !== true || receipt.result.sessionId !== owner.sessionId || receipt.result.incarnationId !== owner.incarnationId)
+    throw failure('normal stopped closure does not match historical custody');
+  const intent = rows.find(row => row.event === 'intent' && row.effect === 'session.close' && row.unit === unit && row.key === receipt.key && row.seq === receipt.seq);
+  const result = rows.findLast(row => row.event === 'result' && row.key === receipt.key && row.seq === receipt.seq);
+  const delivery = rows.find(row => row.event === 'intent' && row.effect === 'session.deliver' && row.key === intent?.args.deliveryKey && row.unit === unit);
+  if (!intent || !delivery || delivery.args.resultDigest !== plan.resultDigest
+    || delivery.args.handoffDigest !== plan.handoffDigest || delivery.args.goalDigest !== plan.goalDigest
+    || prepareEffect('session.close',intent.args).key !== receipt.key
+    || effectArgsDigest(intent.args.owner) !== effectArgsDigest(owner)
+    || intent.args.session !== owner.sessionId || intent.args.incarnation !== owner.incarnationId
+    || intent.args.resultDigest !== plan.resultDigest || effectArgsDigest(intent.args.recipient) !== effectArgsDigest(plan.recipient)
+    || !result || effectArgsDigest(result.result) !== effectArgsDigest(receipt.result)
+    || !rows.some(row => row.event === 'result' && row.key === intent.args.deliveryKey))
+    throw failure('normal stopped closure ledger is incomplete or stale');
+  const currentStart = rows.findLast(row => row.event === 'intent' && row.effect === 'session.start' && row.unit === unit
+    && row.args?.unit === unit && row.args?.attempt === attempt);
+  if (unresolvedEffect(rows.filter(row => row !== currentStart)))
+    throw failure('unresolved effects prevent stopped owner startup');
+  const observed = await adapters.session.observe({closedOwner:owner});
+  if (observed?.closed !== true || effectArgsDigest(observed.owner) !== effectArgsDigest(owner))
+    throw failure('normal stopped owner closure is unproven');
 }

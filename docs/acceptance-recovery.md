@@ -30,6 +30,20 @@
 
 새 정정마다 최신 revision을 사용한다. 같은 ID·payload·사용자 참조의 재호출은 기존 영수증을 반환한다. 같은 ID의 다른 요청은 거부한다. 새로운 영수증으로 관찰을 갱신할 수 있으나 분류·전달 소유자 변경·전달 수준 하향은 허용하지 않는다. 대상이 바뀌면 해당 대상의 새 관찰과 출처 검증이 필요하다. 원 영수증은 남는다.
 
+## 목표 문구 변경과 기존 정정
+
+승인된 공개 goal amend는 열린 결속 단위에 현재 목표 문구와 goalAmendmentHistory를 함께 기록한다. 이력은 원 목표 id·source, 목표 원장의 전체 amendment 행, amend 직후의 objective·criteria(current)를 담는다. 단위의 현재 목표 문구가 이력의 current와 정확히 같을 때만 이력을 사용한다. 목표 완료 사전검사는 목표 id·source가 원장과 같고, 이력이 원장 amendment 행의 앞부분이며, current가 그 행들 직후의 원장 목표 문구인지도 확인한다. 열린 단위는 amend마다 갱신되고 Closed 단위는 마지막 갱신 시점의 이력을 유지한다. 기존 정정은 이력의 이전 objective·criteria만 현재 요청에 대입했을 때 원 sourceDigest와 정확히 일치하는 출처로 검증한다. 요청의 다른 필드·정본·전체 기준은 현재 값 그대로 비교한다. 원 정정 요청·권한 참조·영수증·수용·독립 리뷰·실패는 보존한다. 새로운 정정과 unit progress의 correctionSourceDigest는 현재 출처를 사용한다.
+
+이전 배포본의 목표 변경 뒤 Accepted 단위가 GOAL_INCOMPLETE 또는 ACCEPTANCE_CORRECTION_STALE로 막히면 공식 수정본에서 goal show로 현재 revision과 문구를 확인한다. goal amend는 active 목표만 받는다. 목표가 blocked이면 기존 goal resume 경로로 먼저 재개한다. 원 승인 범위 안에서 현재 objective·criteria를 그대로 담은 새 요청으로 다음 공개 명령을 실행한다. 원 roots와 신뢰 어댑터를 유지한다.
+
+```sh
+node "$PLUGIN_ROOT/scripts/unit.mjs" goal amend "$GOAL" --request goal-amend.json --user-input "$GOAL_AUTH" --adapters "$ADAPTER_MODULE"
+```
+
+명령은 승인 검증과 목표 revision 경합 검사를 거쳐 원 목표 이력을 같은 단위에 연결한다. 새 단위나 정정 영수증을 만들지 않는다. 이어 기존 소유자가 실패했던 원 finish/finalize 명령을 다시 실행한다. 이력 부재·다른 목표/source·그 밖의 요청/기준 변경은 복구하지 않는다.
+
+출처 복원은 원 정정 권한과 관찰의 현재 재검증을 대신하지 않는다. 외부 전달 제공자는 해당 정정의 원 출처와 원 sourceDigest를 받고 실제 현재 전달 증거를 계속 검증한다. 목표 완료 사전검사도 같은 출처 해석을 사용하며, 원 수용 내용과 목표의 현재 기준을 계속 요구한다. [ADR 0040](adr/0040-goal-amendment-correction-provenance.md)을 따른다.
+
 ## 제공자 계약
 
 호스트는 `createRuntimeAdapters`가 반환하는 기존 `provider`에 다음 정정 검증 메서드를 구현하며, 외부 전달에는 아래 `verifyExternalDelivery`도 구현한다. 사용자 입력 참조는 실제 원 저장소에서 읽고 검증한다. 미지원 참조 형식, 다른 사용자·세션의 참조, 출처 부재는 실패다. 코어는 참조 형식을 해석하거나 다른 제공자의 참조로 바꾸지 않는다.

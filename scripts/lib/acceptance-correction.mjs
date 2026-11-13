@@ -12,8 +12,28 @@ const fields = (value, names) => value && typeof value === 'object' && !Array.is
 const reference = value => fields(value, ['ref', 'digest']) && text(value.ref) && sha(value.digest);
 const fail = (message, code = 'ACCEPTANCE_CORRECTION_INVALID') => { throw Object.assign(new Error(message), { code }); };
 
-export function correctionSource(record) {
-  return { request: record.request, canon: record.canon ?? [], acceptance: record.acceptance ?? [] };
+// A correction binds the source it was verified against. An authorized goal amendment changes only the unit's copy of
+// the goal objective/criteria, so the original source is restored from the copied amendment history when the unit's
+// current goal text is exactly the amended state and, given the goal record, the history is a prefix of its ledger
+// ending at that state. Closed units keep the history of their last refresh while the goal may be amended later.
+export function correctionSource(record, receipt, goalRecord) {
+  const source = { request: record.request, canon: record.canon ?? [], acceptance: record.acceptance ?? [] };
+  if (!receipt || effectArgsDigest(source) === receipt.request.sourceDigest) return source;
+  const goal = record.request?.overallGoal, history = record.goalAmendmentHistory;
+  const amended = state => effectArgsDigest({ objective: state?.objective, criteria: state?.criteria });
+  const count = Array.isArray(history?.amendments) ? history.amendments.length : -1, ledger = goalRecord?.amendments ?? [];
+  if (goal && count > 0 && history.goalId === goal.id && record.continuity?.goalId === goal.id
+    && effectArgsDigest(history.source) === effectArgsDigest(goal.source) && amended(history.current) === amended(goal)
+    && (!goalRecord || goalRecord.goal?.id === goal.id && effectArgsDigest(goalRecord.source) === effectArgsDigest(goal.source)
+      && effectArgsDigest(ledger.slice(0, count)) === effectArgsDigest(history.amendments)
+      && amended(ledger[count]?.previous ?? goalRecord.goal) === amended(goal))) {
+    for (const { previous } of history.amendments) {
+      const original = { ...source, request: { ...source.request,
+        overallGoal: { ...goal, objective: previous.objective, criteria: previous.criteria } } };
+      if (effectArgsDigest(original) === receipt.request.sourceDigest) return original;
+    }
+  }
+  return source;
 }
 
 function assertRequest(request, userInputRef) {
@@ -94,7 +114,7 @@ export async function verifyExternalDeliveryBoundary({ store, unit, adapters }) 
       const binding = { unit, acceptanceRef: correction.request.acceptanceRef, correctionDigest: correction.requestDigest,
         sourceDigest: correction.request.sourceDigest, acceptedDigest: effectArgsDigest(before), targetDigest: effectArgsDigest(target) };
       const proof = await adapters.provider.verifyExternalDelivery({ ...binding, request: structuredClone(correction.request),
-        source: structuredClone(correctionSource(current)), accepted: structuredClone(before), target: structuredClone(target) });
+        source: structuredClone(correctionSource(current, correction)), accepted: structuredClone(before), target: structuredClone(target) });
       const delivery = proof?.delivery;
       if (proof?.verified !== true || Object.entries(binding).some(([key, value]) => proof[key] !== value)
         || !reference(proof.evidence) || !delivery || !levels.includes(delivery.level) || levels.indexOf(delivery.level) < levels.indexOf(correction.request.level)
@@ -133,7 +153,7 @@ async function verifyCorrection(record, receipt, adapters, target) {
   const { request, userInputRef, requestDigest } = receipt;
   assertRequest(request, userInputRef);
   const criteria = (record.acceptance ?? []).filter(item => item.id === request.acceptanceRef);
-  const source = correctionSource(record);
+  const source = correctionSource(record, receipt);
   if (criteria.length !== 1 || ['deferred', 'dropped'].includes(criteria[0].status)
     || effectArgsDigest(criteria[0]) !== request.criterionDigest || effectArgsDigest(source) !== request.sourceDigest
     || effectArgsDigest({ request, userInputRef }) !== requestDigest

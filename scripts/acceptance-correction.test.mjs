@@ -10,10 +10,11 @@ import { createAdapters } from './lib/adapters.mjs';
 import { createUnitStateStore } from './lib/unit-state.mjs';
 import { createLedgerStore } from './lib/ledger.mjs';
 import { createProjectionQueue } from './lib/tracker.mjs';
+import { createContinuityStore } from './lib/continuity-store.mjs';
 import { taskDigest } from './lib/session-task.mjs';
 import { validateGoalCompletion } from './lib/continuity-completion.mjs';
 import { effectArgsDigest } from './lib/approvals.mjs';
-import { correctionSource, productAcceptance, describeAcceptanceGate } from './lib/acceptance-correction.mjs';
+import { correctionSource, productAcceptance, describeAcceptanceGate, verifyExternalDeliveryBoundary } from './lib/acceptance-correction.mjs';
 import { gateFingerprint } from './lib/evidence.mjs';
 import { runUnitCli } from './lib/unit-driver.mjs';
 import { executeDelivery } from './lib/delivery-flow.mjs';
@@ -21,7 +22,7 @@ import { executeDelivery } from './lib/delivery-flow.mjs';
 const bytesDigest = bytes => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 const parse = output => JSON.parse(output.slice(output.lastIndexOf('RESULT ') + 7));
 
-async function fixture(t, { owner = 'engine' } = {}) {
+async function fixture(t, { owner = 'engine', goalBound = false } = {}) {
   const cwd = await realpath(await mkdtemp(path.join(tmpdir(), 'acceptance-correction-')));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const stateRoot = path.join(cwd, 'state'), store = createUnitStateStore(stateRoot), unit = 'unit-a';
@@ -31,8 +32,17 @@ async function fixture(t, { owner = 'engine' } = {}) {
   ][i], status: 'open' }));
   const target = { head: 'head-1', contentFingerprint: 'content-1', repo: 'example/product', branch: 'fix/validation',
     base: 'main', tree: 'tree-1', indexTree: 'tree-1', headTree: 'tree-0' };
+  const overallGoal = { id: 'goal-a', objective: 'Implement and release addition', criteria: ['Product and release verified'],
+    source: { path: path.join(cwd, 'goal.md'), digest: bytesDigest('Implement and release addition') } };
+  if (goalBound) {
+    await writeFile(overallGoal.source.path, 'Implement and release addition');
+    await createContinuityStore(stateRoot).create({ goal: { id: overallGoal.id, objective: overallGoal.objective,
+      criteria: overallGoal.criteria, remaining: [unit], status: 'active' }, source: overallGoal.source,
+      policy: { runtime: 'cmux', provider: 'codex', account: '/account', model: 'model', effort: 'low', argv: ['codex'] } });
+  }
   await store.create({ schema: 'harness.unit/1', unit, kind: 'impl', state: 'SelfGated',
-    request: { text: 'Implement addition and verify delivery authority', userInputRef: 'original-request' },
+    ...(goalBound ? { continuity: { goalId: overallGoal.id } } : {}),
+    request: { text: 'Implement addition and verify delivery authority', userInputRef: 'original-request', ...(goalBound ? { overallGoal } : {}) },
     canon: [], acceptance, policy: { goal: { class: 'product-prelaunch' }, delivery: owner === 'external' ? 'none' : 'pr', review: { mode: 'required', by: 'session', triggers: [] }, retry: { maxPerSignature: 2, maxResolver: 2 } },
     stages: [{ name: 'implement', attempt: 1, submittedAt: '2026-01-01', checkpoint: 'checkpoint-implement', checkpointHead: target.head }],
     scopePaths: ['product.mjs'], changedPaths: [], assumptions: [], diff: null, handoff: null,
@@ -341,8 +351,8 @@ test('the public executable loads the correction provider and returns an audited
   assert.equal((await f.read()).acceptanceCorrections.length, 1);
 });
 
-async function externalFixture(t) {
-  const f = await fixture(t, { owner: 'external' });
+async function externalFixture(t, options = {}) {
+  const f = await fixture(t, { ...options, owner: 'external' });
   f.target.headTree = f.target.tree;
   // This host deliberately owns no delivery execution capabilities.
   f.adapters.git = { inspectUnit: f.adapters.git.inspectUnit };
@@ -353,7 +363,8 @@ async function externalFixture(t) {
     const { request, source, accepted, target, ...binding } = input;
     let bytes, data;
     try { bytes = await readFile(evidencePath); data = JSON.parse(bytes); } catch { return { ...binding, verified: false }; }
-    const verified = request.owner === 'external' && data.unit === f.unit && data.sourceDigest === input.sourceDigest
+    const verified = request.owner === 'external' && effectArgsDigest(source) === input.sourceDigest
+      && data.unit === f.unit && data.sourceDigest === input.sourceDigest
       && data.correctionDigest === input.correctionDigest && data.valid === true && data.pushed === true
       && data.validatedHead === (accepted.validatedHead ?? accepted.head)
       && ['repo', 'branch', 'base', 'head', 'contentFingerprint'].every(key => data[key] === target[key])
@@ -404,6 +415,99 @@ async function acceptReviewedProduct(f) {
   const accepted = await f.run(['accept', f.unit]); assert.equal(accepted.code, 0, JSON.stringify(accepted));
   return accepted;
 }
+
+test('AC-1 authorized goal metadata amendments retain accepted corrections, review and live external verification', async t => {
+  const f = await externalFixture(t, { goalBound: true });
+  await f.both(); await acceptReviewedProduct(f); await f.publish();
+  const before = await f.read(), goals = createContinuityStore(f.stateRoot), goalId = before.continuity.goalId;
+  const amend = async () => {
+    const current = await goals.read(goalId), file = path.join(f.cwd, 'amend.json');
+    await writeFile(file, JSON.stringify({ expectedRevision: current.revision, objective: current.goal.objective,
+      criteria: before.acceptance.map(item => item.text), reason: 'Align summary criteria to original acceptance texts' }));
+    return parse(await runUnitCli(['goal', 'amend', goalId, '--request', file, '--user-input', 'user-correction'],
+      { cwd: f.cwd, stateRoot: f.stateRoot, adapters: f.adapters }));
+  };
+  assert.equal((await amend()).code, 0);
+  const after = await f.read();
+  for (const key of ['accepted', 'acceptanceCorrections', 'reviewDecision', 'reviewedHead', 'verdict', 'evidence', 'failures', 'policy', 'state'])
+    assert.deepEqual(after[key], before[key], key);
+  assert.notEqual(effectArgsDigest(correctionSource(after)), before.acceptanceCorrections[0].request.sourceDigest);
+  const proof = before.acceptance.map(item => ({ criterion: item.text, unit: f.unit, acceptance: item.id }));
+  const complete = async () => validateGoalCompletion({ continuity: await goals.read(goalId), unit: f.unit, proof, unitStore: f.store });
+  assert.equal(await complete(), true);
+  const verify = () => verifyExternalDeliveryBoundary({ store: f.store, unit: f.unit, adapters: f.adapters });
+  await verify();
+  assert.equal((await f.read()).externalDeliveryEvidence.length, 1);
+
+  // Reproduce the old release's already-amended record, then recover it through the same public command.
+  await f.store.update(f.unit, record => { const { goalAmendmentHistory, ...rest } = record; return rest; });
+  await assert.rejects(complete(), { code: 'GOAL_INCOMPLETE' });
+  await assert.rejects(verify(), { code: 'ACCEPTANCE_CORRECTION_STALE' });
+  assert.equal((await amend()).code, 0);
+  assert.equal(await complete(), true); await verify();
+  assert.deepEqual((await f.read()).acceptanceCorrections, before.acceptanceCorrections);
+  assert.deepEqual((await f.read()).goalAmendmentHistory.amendments, (await goals.read(goalId)).amendments);
+  await f.publish({ valid: false });
+  await assert.rejects(verify(), { code: 'EXTERNAL_DELIVERY_UNPROVEN' });
+  assert.equal(f.sessionEvents.length, 0); assert.equal(f.trace.length, 0);
+});
+
+test('AC-2 historical goal provenance cannot authorize changed source, target or revoked authority', async t => {
+  const f = await externalFixture(t, { goalBound: true });
+  await f.both(); await acceptReviewedProduct(f); await f.publish();
+  const before = await f.read(), goalId = before.continuity.goalId;
+  const file = path.join(f.cwd, 'amend.json');
+  await writeFile(file, JSON.stringify({ expectedRevision: 1, objective: 'Exact original requirements',
+    criteria: before.acceptance.map(item => item.text), reason: 'Align criteria' }));
+  const amended = parse(await runUnitCli(['goal', 'amend', goalId, '--request', file, '--user-input', 'user-correction'],
+    { cwd: f.cwd, stateRoot: f.stateRoot, adapters: f.adapters }));
+  assert.equal(amended.code, 0);
+  const baseline = await f.read(), verify = () => verifyExternalDeliveryBoundary({ store: f.store, unit: f.unit, adapters: f.adapters });
+  const goals = createContinuityStore(f.stateRoot), proof = baseline.acceptance.map(item => ({ criterion: item.text, unit: f.unit, acceptance: item.id }));
+  const complete = async () => validateGoalCompletion({ continuity: await goals.read(goalId), unit: f.unit, proof, unitStore: f.store });
+  assert.equal(await complete(), true);
+  // A copied history that mirrors forged goal text is caught where the goal ledger is held.
+  const ledgerOnly = record => { record.request.overallGoal.objective = 'Unauthorized objective'; record.goalAmendmentHistory.current.objective = 'Unauthorized objective'; };
+  for (const [index, change] of [
+    record => { record.request.overallGoal.objective = 'Unauthorized objective'; },
+    record => { record.request.overallGoal.criteria = ['Unauthorized criterion']; },
+    record => { record.request.overallGoal.id = 'other-goal'; },
+    record => { record.goalAmendmentHistory.amendments[0].previous.objective = 'Forged history'; },
+    record => { record.request.text = 'Different product'; },
+    record => { record.request.userInputRef = 'different-authority'; },
+    record => { record.request.overallGoal.source.digest = bytesDigest('different-source'); },
+    record => { record.canon = [{ path: 'different.md', digest: bytesDigest('different') }]; },
+    record => { record.acceptance[0].text = 'Different product requirement'; },
+    record => { record.goalAmendmentHistory.goalId = 'other-goal'; },
+    record => { record.continuity.goalId = 'other-goal'; },
+    ledgerOnly,
+  ].entries()) {
+    await f.store.update(f.unit, () => { const record = structuredClone(baseline); change(record); return record; });
+    await assert.rejects(complete(), { code: 'GOAL_INCOMPLETE' }, `completion ${index}`);
+    if (change !== ledgerOnly) await assert.rejects(verify(), { code: 'ACCEPTANCE_CORRECTION_STALE' }, `external ${index}`);
+  }
+  await f.store.update(f.unit, () => structuredClone(baseline));
+  f.target.contentFingerprint = 'changed-content';
+  await assert.rejects(verify(), { code: 'ACCEPTANCE_CORRECTION_STALE' });
+  f.target.contentFingerprint = baseline.accepted.contentFingerprint;
+  f.revoke();
+  await assert.rejects(verify(), { code: 'ACCEPTANCE_CORRECTION_UNPROVEN' });
+  assert.equal((await f.read()).externalDeliveryEvidence, undefined);
+
+  // A closed unit keeps the history of its last refresh; later goal amendments extend the ledger past it.
+  await f.store.update(f.unit, () => ({ ...structuredClone(baseline), state: 'Closed' }));
+  const later = await goals.read(goalId);
+  await writeFile(file, JSON.stringify({ expectedRevision: later.revision, objective: 'Later added work',
+    criteria: later.goal.criteria, reason: 'Added work changes the objective' }));
+  assert.equal(parse(await runUnitCli(['goal', 'amend', goalId, '--request', file, '--user-input', 'user-correction'],
+    { cwd: f.cwd, stateRoot: f.stateRoot, adapters: f.adapters })).code, 0);
+  assert.deepEqual((await f.read()).goalAmendmentHistory, baseline.goalAmendmentHistory);
+  const finalGoal = await goals.read(goalId);
+  assert.equal(await validateGoalCompletion({ continuity: finalGoal, unit: f.unit, proof, unitStore: f.store, requireClosed: true }), true);
+  await f.store.update(f.unit, record => ({ ...record, goalAmendmentHistory: { ...record.goalAmendmentHistory,
+    amendments: [{ ...record.goalAmendmentHistory.amendments[0], reason: 'Forged reason' }] } }));
+  await assert.rejects(validateGoalCompletion({ continuity: finalGoal, unit: f.unit, proof, unitStore: f.store, requireClosed: true }), { code: 'GOAL_INCOMPLETE' });
+});
 
 test('delivery:none accepts products before external PR, then finish and finalization require bound live PR evidence without execution adapters', async t => {
   const f = await externalFixture(t), original = await f.read();

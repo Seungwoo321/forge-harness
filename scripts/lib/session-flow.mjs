@@ -1,3 +1,4 @@
+import { verifyGoalAcceptanceClarification } from './goal-acceptance-binding.mjs';
 import { goalOwner, assertAdoptedOwner } from './continuity-custody.mjs';
 import { createHash } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
@@ -64,6 +65,7 @@ export async function finishSessionUnit({
   }
   if (!record || !['Accepted', 'Delivering', 'Delivered'].includes(record.state)) throw Object.assign(new Error('session finish requires an Accepted, Delivering, or Delivered Unit Record'), { code: 'INVALID_TRANSITION' });
   if (record.sameSessionContinuation && !sameSession) throw Object.assign(new Error('same-session continuation is already bound'), { code: 'SESSION_CONTINUATION_CONFLICT' });
+  if (record.goalAcceptanceClarifications?.length) await verifyGoalAcceptanceClarification({ record, stateRoot, adapters, target: await adapters.git.inspectUnit({ unit, record }) });
   const continuity = await prepareGoalFinish({stateRoot,store,record,unit,parentRuntime,successor: sameSession ? {approved:true,unit:sameSession.nextUnit} : successor,goalComplete,goalProof});
   const custody = goalOwner(continuity,unit);
   const retainedOwner = custody?.ownership === 'existing' ? custody : null;
@@ -254,6 +256,7 @@ export async function finishSessionUnit({
     if (retainedOwner) await observeParent();
     if (continuity && goalComplete) {
       const current = await store.read(unit);
+      if (current.goalAcceptanceClarifications?.length) await verifyGoalAcceptanceClarification({ record: current, stateRoot, adapters, target: await adapters.git.inspectUnit({ unit, record: current }) });
       await fenceGoalClose({continuityStore:createContinuityStore(stateRoot),unitStore:store,unit,plan:current.sessionFinalization ?? null,completion:current.goalCompletion,action:async()=>{}});
     }
     const closed = await commitTerminalClose({ store, unit, git: adapters.git, provider: adapters.provider, now: adapters.now });
@@ -370,9 +373,12 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters }) 
   if (!['completed', 'reconciled', 'duplicate'].includes(delivered.status)) return pending('Result is queued or its acceptance/start is unverified');
   if (!plan.sessionStart || !record.continuity) validateTaskReceipt(delivered.result, { args: deliveryArgs, key: prepareEffect('session.deliver', deliveryArgs).key });
   if (delivered.result.sessionId !== recipient.sessionId || delivered.result.incarnationId !== recipient.incarnationId) return pending('Result recipient identity changed');
+  const closeArgs = { owner: plan.owner, recipient, session: plan.owner.sessionId, incarnation: plan.owner.incarnationId,
+    resultDigest: plan.resultDigest, deliveryKey: delivered.key, ...(recoveryEpoch ? {recoveryEpoch} : {}) };
   if (record.state !== 'Closed' && record.state !== 'Stopped') {
     record = await verifyExternalDeliveryBoundary({ store, unit, adapters });
     const current = await adapters.git.inspectUnit({ unit, record });
+    await verifyGoalAcceptanceClarification({ record, stateRoot, adapters, target: current, closingArgs: closeArgs });
     if (current.head !== record.accepted.head || current.contentFingerprint !== record.accepted.contentFingerprint) return pending('Accepted content changed before session close');
   }
   await observeCustody();
@@ -383,8 +389,6 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters }) 
     if (current.state === 'Closed' && current.goalCompletion) await commitGoalCompletion({continuityStore:createContinuityStore(stateRoot),unitStore:store,goalId:current.goalCompletion.goalId,unit});
     return {code:current.state === 'Closed' || current.state === 'Stopped' ? 0 : 3,state:current.state,resultPath:plan.resultPath,summary:current.state === 'Closed' || current.state === 'Stopped' ? 'Result accepted; existing user session retained' : 'Accepted target changed before terminal completion'};
   }
-  const closeArgs = { owner: plan.owner, recipient, session: plan.owner.sessionId, incarnation: plan.owner.incarnationId,
-    resultDigest: plan.resultDigest, deliveryKey: delivered.key, ...(recoveryEpoch ? {recoveryEpoch} : {}) };
   const validateClose = result => {
     if (result?.closed !== true || result.sessionId !== plan.owner.sessionId || result.incarnationId !== plan.owner.incarnationId) throw new Error('unverified close result');
     return result;

@@ -12,3 +12,5 @@ Read only the StageInput file named by the unit driver. Use its request, canonic
 3. Resolve technical choices when the canonical direction, acceptance criteria, existing code conventions, or a named design principle leaves one valid choice. Record each choice in `assumptions` with `decision`, `basis`, and `reversible`; do not ask the user about it or create an `openDecisions` entry.
 4. Use `openDecisions` only when multiple choices remain and the answer changes product meaning, UX, price, risk tolerance, external authority, or canonical direction. Defer only the acceptance criteria that actually depend on the answer.
 5. Do not infer user intent from repository clues. Do not read or write Unit Record, policy, evidence, failure, or ledger files. Submit only through the unit driver.
+
+For a goal-bound scope, retain exact original criterion text in the ACs assigned to this unit. The final unit must bind every original goal criterion through its ACs or accepted predecessor obligations. A wording mismatch is rejected before implementation; do not narrow the goal or substitute inferred equivalence. Additional product obligations remain required.

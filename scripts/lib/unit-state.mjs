@@ -132,7 +132,7 @@ export function createUnitStateStore(stateRoot) {
     await new Promise(resolve => setTimeout(resolve, 10));
   }
 
-  async function withLock(paths, action) {
+  async function withLock(paths, action, lockMetadata = {}) {
     await mkdir(paths.dir, { recursive: true });
     let lock;
     while (!lock) {
@@ -144,7 +144,7 @@ export function createUnitStateStore(stateRoot) {
       }
     }
     try {
-      await lock.writeFile(JSON.stringify({ pid: process.pid }));
+      await lock.writeFile(JSON.stringify({ ...lockMetadata, pid: process.pid }));
       await lock.sync();
       return await action();
     } finally {
@@ -190,13 +190,13 @@ export function createUnitStateStore(stateRoot) {
       return await readUnlocked(paths, unit);
     },
 
-    async withLock(unit, action) {
+    async withLock(unit, action, { lockMetadata } = {}) {
       const paths = pathsFor(unit);
       return await withLock(paths, async () => {
         const current = await readUnlocked(paths, unit);
         if (!current) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
         return await action(structuredClone(current));
-      });
+      }, lockMetadata);
     },
 
     async create(record) {
@@ -214,7 +214,7 @@ export function createUnitStateStore(stateRoot) {
       });
     },
 
-    async update(unit, mutate) {
+    async update(unit, mutate, { lockMetadata } = {}) {
       const paths = pathsFor(unit);
       return await withLock(paths, async () => {
         const current = await readUnlocked(paths, unit);
@@ -236,7 +236,7 @@ export function createUnitStateStore(stateRoot) {
         const next = validateRecord({ ...candidate, revision: current.revision + 1 }, unit);
         await writeUnlocked(paths, next);
         return next;
-      });
+      }, lockMetadata);
     },
 
     async transition(unit, to) {

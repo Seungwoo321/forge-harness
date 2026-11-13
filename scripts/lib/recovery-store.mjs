@@ -199,7 +199,7 @@ export function createRecoveryStore(stateRoot) {
   });
 }
 
-export async function resumeUnitFailure({ store, unit, snapshot, validateStopped, validateResolution }) {
+export async function resumeUnitFailure({ store, unit, snapshot, validateStopped, validateResolution, lockMetadata }) {
   if (!store || typeof store.read !== 'function' || typeof store.update !== 'function') throw new TypeError('Unit Record store is required');
   const record = await store.read(unit);
   if (!record) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
@@ -227,7 +227,7 @@ export async function resumeUnitFailure({ store, unit, snapshot, validateStopped
       let observation;
       if (current.state === 'Stopped' && current.stopReport && !current.sessionFinalization) {
         if (!validateStopped) throw Object.assign(new Error('retained stopped owner closure is not verified'), {code:'SESSION_CLOSE_PENDING'});
-        observation = await validateStopped(current);
+        observation = await validateStopped(current, { recovery });
         if (!observation) throw Object.assign(new Error('retained stopped owner closure is not verified'), {code:'SESSION_CLOSE_PENDING'});
       }
       if (current.sessionFinalization?.mode === 'stopped' && !current.sessionFinalization.closeReceipt?.result?.closed)
@@ -256,7 +256,7 @@ export async function resumeUnitFailure({ store, unit, snapshot, validateStopped
         if (!beforeGates && resumed.state !== 'SelfGated') resumed = transitionRecord(resumed, 'SelfGated');
       }
       return resumed;
-    }) : record;
+    }, { lockMetadata }) : record;
   const stage = ({ Scoped: 'scope', Implementing: 'implement', SelfGated: 'gates', InReview: 'review', Accepted: 'delivery', Delivering: 'delivery', Delivered: 'handoff' })[updated.state];
   return { record: updated, stage, recovery };
 }

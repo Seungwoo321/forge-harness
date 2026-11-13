@@ -79,6 +79,8 @@ export async function createRuntimeAdapters(input){
   await goals.transaction('g',g=>({...g,revision:g.revision+1,reviews:[{unit:'review',sessionId:'surface',incarnationId:owner.incarnationId,cwd:root}]}));
   const stage=await createRuntimeAdapters({...args,options:{'state-root':stateRoot},argv:['unit','stage','submit','review','review']});
   assert.equal((await stage.sessionRunner.observe({cwd:root,targetCwd:root})).closable,true);
+  const clarification = await createRuntimeAdapters({ ...args, options: { 'state-root': stateRoot }, argv: ['unit', 'goal-acceptance', 'clarify', 'u'] });
+  assert.equal((await clarification.sessionRunner.observe({ cwd: root, targetCwd: root })).worker.threadId, owner.worker.threadId);
   // A policy refresh does not change an adopted live owner's original account.
   await goals.transaction('g',g=>({...g,revision:g.revision+1,policy:{...g.policy,account:'/new-account'},
     policyChanges:[{previous:g.policy}]}));

@@ -1,3 +1,4 @@
+import { verifyGoalAcceptanceClarification } from './goal-acceptance-binding.mjs';
 import { authorizeDelivery, bindDeliveryCommit, bindMergeResult, validateAcceptedContent } from './delivery.mjs';
 import { createLedgerStore, executeEffect } from './ledger.mjs';
 import { resolvePolicy, prepareEffect } from './policy.mjs';
@@ -51,6 +52,7 @@ export async function executeDelivery({ stateRoot, store, unit, requestedDeliver
     throw failure('DELIVERY_PLAN_MISMATCH', 'resumed delivery must retain its original level');
   }
   const inspect = current => adapters.git.inspectUnit({ unit, record: current });
+  if (record.goalAcceptanceClarifications?.length) await verifyGoalAcceptanceClarification({ record, stateRoot, adapters, target: await inspect(record) });
   if (record.acceptanceCorrections?.length) await verifyAcceptanceCorrections(record, adapters, await inspect(record));
   const validAcceptance = current => current.accepted && !hasInvalidEvidence(current.evidence);
   const invalidate = async (target, reason) => {
@@ -169,6 +171,7 @@ export async function executeDelivery({ stateRoot, store, unit, requestedDeliver
       },
       adapter: { now: () => adapters.now(), execute: async input => {
         await beforeEffect?.();
+        if (record.goalAcceptanceClarifications?.length) await verifyGoalAcceptanceClarification({ record, stateRoot, adapters, target: await inspect(record) });
         const changed = await stale();
         if (changed) return { status: 'not-applied', failure: { class: 'product', reason: 'accepted target changed before execution' },
           verify: { adapter: 'git', operation: 'unit.inspect', args: { unit }, observed: changed } };

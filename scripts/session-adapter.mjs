@@ -14,7 +14,7 @@ import { effectArgsDigest } from './lib/approvals.mjs';
 export async function createRuntimeAdapters({ cwd, adapters, options, argv }) {
   const {positional} = parseUnitArgs(argv);
   const request = options.request ? JSON.parse(await readFile(path.resolve(cwd, options.request),'utf8')) : null;
-  const unit = positional[0] === 'goal' && ['policy-recover','resume'].includes(positional[1]) ? request?.unit : positional[positional[1] === 'stage' ? 3 : 2];
+  const unit = positional[0] === 'goal' && ['policy-recover','resume'].includes(positional[1]) ? request?.unit : positional[['stage', 'goal-acceptance'].includes(positional[1]) ? 3 : 2];
   if (!options['state-root'] || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(unit ?? '') || ['.','..'].includes(unit)) throw new TypeError('session adapter requires an explicit state root and unit');
   const stateRoot = path.resolve(cwd, options['state-root']);
   const record = JSON.parse(await readFile(path.join(stateRoot,'units',unit,'unit.json'),'utf8'));

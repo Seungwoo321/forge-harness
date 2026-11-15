@@ -948,7 +948,23 @@ async function runRetry({ stateRoot, unit, options, adapters }) {
     return { code: 0, summary: 'Same-unit gate repair opened', details: { unit, action: 'repair',
       state: repaired.state, stage: 'implement', failureId: repaired.gateRecovery.failureId } };
   }
-  const failure = await createRecoveryStore(stateRoot).reserveRetry({ causeKey: options['cause-key'], retryLimit: policy.retry.maxPerSignature });
+  const recovery=createRecoveryStore(stateRoot),reference=record.failures?.at(-1);
+  if(!reference || !(await validCapturedReport({report:path.join(stateRoot,reference.path),digest:reference.digest})))
+    throw continuationError('RETRY_NOT_ALLOWED','ordinary retry requires the current recorded failure');
+  const original=await recovery.readFailure(unit,path.basename(reference.path,'.json'));
+  if(original.causeKey!==options['cause-key'])throw continuationError('RETRY_NOT_ALLOWED','retry cause differs from the current unit failure');
+  const failure = await createLedgerStore(stateRoot).withLock(unit,async ledger=>{
+    if(unresolvedEffect(await ledger.read()))throw continuationError('EFFECT_UNCERTAIN','reconcile unresolved effects before ordinary retry');
+    return recovery.reserveRetry({causeKey:options['cause-key'],retryLimit:policy.retry.maxPerSignature,apply:async decision=>{
+      await store.update(unit,current=>{
+        if(current.revision!==record.revision)throw continuationError('STAGE_STALE','unit changed before ordinary retry');
+        if(['review','ops'].includes(current.kind)||!['Implementing','SelfGated','InReview'].includes(current.state)||current.accepted||current.deliveryPlan||current.sessionFinalization)
+          throw continuationError('RETRY_NOT_ALLOWED','ordinary retry requires an unaccepted change unit');
+        return decision.action==='stop'?transitionRecord(current,'Stopped')
+          :current.state==='Implementing'?current:transitionRecord(current,'Implementing');
+      });
+    }});
+  });
   return {
     code: failure.action === 'stop' ? 3 : 0,
     summary: failure.action === 'retry' ? 'Retry reserved' : 'Retry limit reached',
@@ -991,6 +1007,7 @@ async function runResume({ stateRoot, unit, options, adapters }) {
     let retainedGoalLock;
     try {
       return await resumeUnitFailure({store,unit,lockMetadata,snapshot:{...snapshot,ledger:rows},
+        ...(typeof adapters.git?.inspectUnit === 'function' ? {inspectTarget: record => adapters.git.inspectUnit({unit,record})} : {}),
         validateResolution: (record, receipt) => verifyRetryResolution({ stateRoot, record, receipt, adapters }),
         validateStopped: async (record, { recovery }) => {
           if (liveContinuation) {

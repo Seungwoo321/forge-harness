@@ -7,6 +7,7 @@ import {createLedgerStore,sessionEffectRetired} from './ledger.mjs';
 import {transitionRecord} from './unit-state.mjs';
 import {goalOwner} from './continuity-custody.mjs';
 import {prepareEffect} from './policy.mjs';
+import {correctClosedDeliveryOmission} from './closed-delivery-correction.mjs';
 
 const fail=(message,code='COMPLETION_RECOVERY_INVALID')=>{throw Object.assign(new Error(message),{code});};
 const digest=value=>typeof value==='string' && /^sha256:[a-f0-9]{64}$/.test(value);
@@ -14,6 +15,7 @@ const text=value=>typeof value==='string' && value.trim().length>0;
 
 // Retiring an uncertain close is allowed only after a trusted host has fenced the old executor.
 export async function recoverGoalCompletion({stateRoot,store,unit,request,userInputRef,adapters}) {
+  if(request?.kind==='closed-delivery-omission')return correctClosedDeliveryOmission({stateRoot,store,unit,request,userInputRef,adapters});
   const fields=['id','expectedRevision','expectedGoalRevision','reservationDigest','targetDigest','provenance','reason'];
   if (!request || Object.keys(request).sort().join(',')!==fields.sort().join(',')
     || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(request.id ?? '') || ['.','..'].includes(request.id)

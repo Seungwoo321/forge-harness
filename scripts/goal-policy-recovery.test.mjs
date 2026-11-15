@@ -49,8 +49,9 @@ async function fixture(t) {
         return {...binding,verified:authorized && r.provenance.path === provenance.path,originalAuthority:true,currentPolicyUnauthorized:true,priorPolicyAuthorized:true,
           nativeExecutionVerified:true,evidenceDigest:provenance.digest,...proofOverride};
       }}};
+  let requestSequence = 0;
   const run = async (r=request,ref='original-human') => {
-    const file = path.join(cwd,`${r.id}.json`); await writeFile(file,JSON.stringify(r));
+    const file = path.join(cwd,`${r.id}-${++requestSequence}.json`); await writeFile(file,JSON.stringify(r));
     return parse(await runUnitCli(['goal','policy-recover','goal','--request',file,'--user-input',ref],{cwd,stateRoot,adapters}));
   };
   return {cwd,stateRoot,goals,store,ledger,source,policy,badPolicy,target,owner,request,run,adapters,

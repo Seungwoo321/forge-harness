@@ -545,3 +545,14 @@ test('expanded footer rejects Working, unknown status/footer, modal and hidden o
     assert.equal(mutations,0);
   }
 });
+
+test('AC-2 unsupported fresh platform proof cannot cross the durable submission boundary',async()=>{
+ for(const platform of ['codex/0.169.1','codex/0.170.0','codex/0.169.0-custom']) {
+  let marks=0,writes=0;
+  const submission={async mark(){marks++;}};
+  await assert.rejects(observeGoalTask({observed,input,prompt:'finish',packets,submission,
+   transport:{observeGoal:async()=>({state:'unmaterialized',threadId:'thread',proof:{platform,threadId:'thread',sqliteRoot:'/account',queueCount:0}})},
+   submit:async(_request,mark)=>{writes++;await mark();}}),/native input absence is unverified/);
+  assert.equal(marks,0);assert.equal(writes,0);
+ }
+});

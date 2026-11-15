@@ -143,6 +143,7 @@ export async function executeEffect({
       if (!goalStart && effect !== 'session.deliver') return input;
       const rows = await ledger.read();
       const previous = rows.findLast(row => row.event === 'submission' && row.seq === input.seq && row.key === input.key);
+      const receiver = rows.findLast(row => row.event === 'receiver' && row.seq === input.seq && row.key === input.key);
       const readOnly = rows.some(row => row.event === 'result' && row.seq === input.seq && row.key === input.key);
       const belongs = row => row.seq === input.seq && row.key === input.key;
       const repairIndex = rows.findLastIndex(row => belongs(row) && row.event === 'draft-repair');
@@ -152,10 +153,24 @@ export async function executeEffect({
         && rows.slice(repairIndex + 1).some(row => belongs(row) && row.event === 'verification' && row.verify?.code === 'SESSION_TASK_UNVERIFIED' && row.verify.message === 'native goal composer contains another draft')
         && !rows.some(row => belongs(row) && row.event === 'draft-clear-recovery');
       const submission = {attempted:Boolean(previous),binding:previous?.binding,recovery,readOnly,
-        pendingDraft:rows.some(row => belongs(row) && row.event === 'verification' && row.verify?.code === 'SESSION_TASK_UNVERIFIED' && row.verify.message === 'native goal composer did not settle'),
+        receiver:receiver?.binding,
+        pendingDraft:rows.some(row => belongs(row) && row.event === 'verification' && row.verify?.code === 'SESSION_TASK_UNVERIFIED'
+          && (row.verify.message === 'native goal composer did not settle'
+            || goalStart && row.verify.nativeRequestAbsent === true && row.verify.exactPendingComposer === true)),
         repairAttempted:rows.some(row => belongs(row) && row.event === 'draft-repair'),
         recoverClear,
         confirmed:rows.some(row => belongs(row) && row.event === 'confirmation'),
+        async bindReceiver(binding) {
+          if (!goalStart || submission.readOnly || submission.attempted || submission.receiver
+            || (await ledger.read()).some(row=>belongs(row)&&row.event==='receiver'))
+            throw errorWithCode('EFFECT_UNCERTAIN','native startup receiver was already bound');
+          if (!binding || Object.keys(binding).sort().join(',')!=='cwd,incarnationId,runtime,sessionId'
+            || binding.runtime!=='orca' || binding.cwd!==input.args.cwd || typeof binding.sessionId!=='string' || !binding.sessionId
+            || typeof binding.incarnationId!=='string' || !binding.incarnationId)
+            throw errorWithCode('LEDGER_VERIFY_INVALID','host-created native receiver binding is incomplete');
+          await ledger.append({event:'receiver',unit,effect,seq:input.seq,key:input.key,binding:structuredClone(binding),observed_at:adapter.now()});
+          submission.receiver=structuredClone(binding);
+        },
         async repair(binding,correction) {
           if (correction?.kind !== 'first-burst-slash-loss' || correction.route !== 'codex-cancel/1' || !/^sha256:[a-f0-9]{64}$/.test(correction.fromDigest ?? '') || !/^sha256:[a-f0-9]{64}$/.test(correction.toDigest ?? '')) throw errorWithCode('LEDGER_VERIFY_INVALID','native draft correction binding is incomplete');
           if (submission.repairAttempted && (!submission.recoverClear || correction.fromDigest !== priorRepair.correction.fromDigest || correction.toDigest !== priorRepair.correction.toDigest)) throw errorWithCode('EFFECT_UNCERTAIN','legacy native clear recovery is unverified');
@@ -167,6 +182,7 @@ export async function executeEffect({
             throw errorWithCode('EFFECT_UNCERTAIN',goalStart ? 'native goal input was already attempted' : 'native result input was already attempted');
           const packets = ['handoff','result','goal'].filter(name=>input.args[`${name}Path`] !== undefined).map(name=>({path:input.args[`${name}Path`],digest:input.args[`${name}Digest`]}));
           if (!binding || !['cmux','orca'].includes(binding.runtime) || !Number.isSafeInteger(binding.pid) || binding.pid < 1 || !binding.executable
+            || submission.receiver && ['runtime','sessionId','incarnationId','cwd'].some(key=>binding[key]!==submission.receiver[key])
             || effectArgsDigest(binding.packets) !== effectArgsDigest(packets) || binding.cwd !== input.args.cwd || binding.goalDigest !== input.args.goalDigest
             || !binding.threadId || !binding.sessionId || !binding.incarnationId || !binding.promptDigest || !Array.isArray(binding.packets)
             || !goalStart && (!input.args.recipient || binding.sessionId !== input.args.recipient.sessionId
@@ -288,7 +304,12 @@ export async function executeEffect({
       const doneAt = adapter.now();
       await ledger.append({ event: 'result', unit, seq, key: prepared.key, result, done_at: doneAt, verify: result?.verify ?? null });
       return { status: 'completed', key: prepared.key, result, seq };
-    } catch {
+    } catch (error) {
+      if (effect === 'session.start' && args.goalPath) {
+        const verification={code:error?.code ?? 'SESSION_EXECUTION_FAILED',message:error?.message ?? 'native session execution failed'};
+        await ledger.append({event:'verification',unit,seq,key:prepared.key,status:'unknown',verify:verification,checked_at:adapter.now()});
+        return {status:'uncertain',key:prepared.key,seq,verification};
+      }
       return { status: 'uncertain', key: prepared.key, seq, verification: null };
     }
     };

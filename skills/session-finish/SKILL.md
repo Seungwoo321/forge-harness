@@ -5,14 +5,16 @@ description: Finish an accepted unit through the goal-bound handoff and finaliza
 
 # Finish a session
 
-Call the installed `scripts/unit.mjs unit finish <unit> --request <file> --adapters <module>` from the project cwd. For remaining goal work, supply the approved successor, exact parent runtime and the complete handoff. For an actual final goal completion, supply `goalComplete: true` and `goalProof` entries mapping each goal criterion verbatim to a covered acceptance of an accepted goal unit. Never use a unit's acceptance as proof that the overall goal is complete. Provide a distinct `returnTo` recipient for the last goal session. The control plane verifies the successor's goal, handoff and result before closing the owner. A pending outcome is not closed; use `unit finalize` with the original roots and adapter. Use `goal reconcile <id>` to complete a previously recorded goal completion after a crash.
+Call the installed `scripts/unit.mjs unit finish <unit> --request <file> --adapters <module>` from the project cwd. If supplying a `delivery` payload, also supply an explicit `requestedDelivery` (for example, `"merge"` with actual user merge intent). Policy delivery is an authority cap, not a request or a mandatory level. For remaining goal work, supply the approved successor, exact parent runtime and the complete handoff. For an actual final goal completion, supply `goalComplete: true` and `goalProof` entries mapping each goal criterion verbatim to a covered acceptance of an accepted goal unit. Never use a unit's acceptance as proof that the overall goal is complete. Provide a distinct `returnTo` recipient for the last goal session. The control plane verifies the successor's goal, handoff and result before closing the owner. A pending outcome is not closed; use `unit finalize` with the original roots and adapter. Use `goal reconcile <id>` to complete a previously recorded goal completion after a crash.
 
 ## Request shape
 
-Hand off remaining goal work to a successor session:
+Hand off remaining goal work to a successor session; this example assumes an explicitly authorized merge:
 
 ```json
 {
+  "requestedDelivery": "merge",
+  "delivery": { "message": "Complete the approved correction", "title": "Approved correction", "body": "Behavior and verification" },
   "successor": { "approved": true, "unit": "<next-unit>", "cwd": "<absolute successor cwd>" },
   "parentRuntime": { "sessionId": "<owner>", "incarnationId": "<owner incarnation>", "cwd": "<owner cwd>" },
   "handoffContent": "<complete handoff: state, decisions, remaining work, first action>",

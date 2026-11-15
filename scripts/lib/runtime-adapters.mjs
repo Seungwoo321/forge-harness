@@ -37,7 +37,7 @@ export async function runPublicUnitCli(argv, { cwd = process.cwd(), contractsDir
     const { sessionRunner, ...injected } = providers;
     const session = createAdapters({ sessionRunner }).session;
     const output = await runUnitCli(argv, { cwd, contractsDir, adapters: Object.freeze({ ...core, ...injected, session }) });
-    const result = JSON.parse(output.slice(output.lastIndexOf('RESULT ') + 7));
+    const result = JSON.parse(output.split(/\r?\n/).findLast(line => line.startsWith('RESULT ')).slice(7));
     if (argv[0] === 'unit' && ['finish', 'session-stop', 'session-return'].includes(argv[1]) && result.finalizePending && options.adapters) {
       const directory = path.join(result.stateRoot, 'units', argv[2]);
       await mkdir(directory, { recursive: true });

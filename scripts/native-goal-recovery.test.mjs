@@ -16,7 +16,7 @@ import { taskPackets } from './lib/session-task.mjs';
 
 const parse = output => JSON.parse(output.slice(output.lastIndexOf('RESULT ')+7));
 const packet = ['목표: goal','수용 기준: done','작업관리: change','결정: review','변경: source','검증: checks','남은 일·위험: review','다음 단위 첫 행동: inspect'].join('\n');
-async function fixture(t,preTurn=false,initialInput=false,multiline=false,version='0.167.0') {
+async function fixture(t,preTurn=false,initialInput=false,multiline=false,version='0.167.0',pollAttempts=1) {
   const cwd=await realpath(await mkdtemp(path.join(tmpdir(),'native-recovery-')));t.after(()=>rm(cwd,{recursive:true,force:true}));
   const stateRoot=path.join(cwd,'state'),store=createUnitStateStore(stateRoot),goals=createContinuityStore(stateRoot);
   const source=path.join(cwd,'goal.md');await writeFile(source,'goal');
@@ -64,7 +64,7 @@ process.stdout.write(out);
         if(s.native==='absent')return preTurn?{state:'unmaterialized',threadId:s.thread,proof:{platform:`codex/${version}`,threadId:s.thread,sqliteRoot:'/test-account',queueCount:0,defaultLineEditing:s.customKeys!==true}}:{state:'absent',threadId:s.thread,fence:s.thread,notApplied:s.absence};
         return {state:s.native,threadId:s.thread,goal:{threadId:s.thread,status:'active',objective:request.prompt},
           enforcement:{status:'verified',cwd,key:'hook',hash:'hash'},turnId:'turn',activityId:'read-packets',packets:request.packets};}};
-    const sessionRunner=createSessionRunner({runtime:'cmux',command,parent:{...owner,workerExecutable:'codex'},launch:()=>['codex'],taskTransport:transport,pollAttempts:1});
+    const sessionRunner=createSessionRunner({runtime:'cmux',command,parent:{...owner,workerExecutable:'codex'},launch:()=>['codex'],taskTransport:transport,pollAttempts});
     return {...core,...createAdapters({sessionRunner}),git:{inspectUnit:async()=>({head:'head',contentFingerprint:'content'})}};
   };
   const handoff=path.join(cwd,'handoff.md');await writeFile(handoff,packet);
@@ -111,6 +111,24 @@ test('public exact pending draft resumes Return without retyping or correction',
  const f=await fixture(t,true);await f.pending('exact');assert.equal((await f.run()).code,0);const s=await f.read();assert.deepEqual(s.writes,[]);assert.equal(s.keys,undefined);assert.equal(s.returns,1);
 });
 
+test('a marked pending goal follows its immutable receiver after the discovery title changes',async t=>{
+ const f=await fixture(t,true);await f.pending('exact');await f.edit({title:'renamed by the native application'});
+ assert.equal((await f.run()).code,0);const s=await f.read();assert.deepEqual(s.writes,[]);assert.equal(s.returns,1);assert.equal(s.launches,1);
+});
+
+test('a renamed receiver cannot replace the thread of a marked pending goal',async t=>{
+ const f=await fixture(t,true);await f.pending('exact');await f.edit({title:'renamed',thread:'replacement-thread'});
+ assert.equal((await f.run()).code,3);const s=await f.read();assert.deepEqual(s.writes,[]);assert.equal(s.returns,0);assert.equal(s.launches,1);
+});
+
+test('the first pre-Return execution failure survives later generic polling observations',async t=>{
+ const f=await fixture(t,true,false,false,'0.169.0',2);await f.edit({trust:true,mode:'crash-before-write'});
+ assert.equal((await f.run()).code,3);const rows=await f.ledger();
+ assert.ok(rows.some(row=>row.event==='verification'&&row.verify?.message==='cmux observation or launch failed'));
+ assert.equal((await f.run()).code,3);assert.deepEqual((await f.read()).writes,[]);assert.equal((await f.read()).launches,1);
+ assert.equal((await f.ledger()).filter(row=>row.event==='submission').length,1);
+});
+
 test('foreign pending draft or custom correction keys refuse all edits and Return',async t=>{
  for(const mode of ['foreign','custom'])await t.test(mode,async t=>{const f=await fixture(t,true);await f.pending(mode==='foreign'?'foreign':'slash-loss');if(mode==='custom')await f.edit({customKeys:true});
  assert.equal((await f.run()).code,3);const s=await f.read();assert.deepEqual(s.writes,[]);assert.equal(s.keys,undefined);assert.equal(s.returns,0);});
@@ -131,8 +149,8 @@ test('public trust timeout recovers the same reviewer and seq1 on Ready, with on
   assert.equal((await f.goals.read('g')).reviews.length,1);assert.deepEqual(await f.store.read('change'),before);
 });
 
-test('public first-input recovery keeps the original intent and worker across trust timeout and lazy rollout',async t=>{
- for(const version of ['0.167.1','0.168.0'])await t.test(version,async t=>{
+test('AC-1 AC-3 public first-input recovery keeps the original intent and worker across trust timeout and lazy rollout',async t=>{
+ for(const version of ['0.167.1','0.168.0','0.169.0'])await t.test(version,async t=>{
  const f=await fixture(t,true,false,false,version),before=await f.store.read('change');assert.equal((await f.run()).code,3);
  await f.edit({trust:true});const result=await f.run();assert.equal(result.code,0,JSON.stringify(result));assert.equal(result.result.seq,1);
  assert.equal((await f.run()).code,0);const native=await f.read(),rows=await f.ledger();

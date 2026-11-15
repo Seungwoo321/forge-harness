@@ -1,5 +1,11 @@
 # 완료 예약과 전달 후 재작업 복구
 
+## 완료된 전달 요청 누락의 정정
+
+원 `finish`가 전달 설명을 제공하면서 `requestedDelivery`를 생략해 `none`으로 닫혔고 실제 사람의 merge 의도와 merge 권한이 검증되면, 같은 `unit completion-recover`에 `kind: "closed-delivery-omission"` 정정을 제출한다. 요청은 `id`, 단위·목표의 예상 revision, 현재 전체 `targetDigest`, 원 `finishRequest`와 `provenance`의 절대 경로·digest, 명시한 `correctionPaths`, `requestedDelivery: "merge"`, 정확한 native `owner`, `reason`을 담는다.
+
+신뢰된 `verifyClosedDeliveryCorrection`은 원 요청 누락과 실제 사람의 merge 권한, 외부 효과 부재, 살아 있는 원 소유자, 미적용 종료, 종료된 원 실행 및 정리된 큐를 현재 단위·목표·대상·원장에 결속해 증명한다. 원 Closed 결과·수용·리뷰·실패·완료 기록은 보존하고 같은 단위를 Implementing, 같은 목표를 active로 되돌린다. 명시한 정정 경로 밖 변경은 거부한다. 수용·증거·리뷰는 무효화하며 이후 정상 범위 변경, 필수 게이트와 독립 리뷰를 거친다. 원 요청에 전달 수준이 있었거나 다른 완료 경로인 경우에는 적용하지 않는다. 정책 상한은 전달 요청으로 승격되지 않는다.
+
 완료 예약은 목표의 현재 단위와 수용 내용, 결과 전달 계획을 결속한다. 예약이 있으면 결과를 기록하고 목표 완료를 확정할 때까지 다른 목표 전이는 차단된다. 같은 완료 요청이 중단된 경우 원래 요청으로 재시도하거나, 단위가 이미 `Closed`면 `goal reconcile <goal>`을 실행한다.
 
 ## 완료 예약 뒤 대상이 바뀐 경우

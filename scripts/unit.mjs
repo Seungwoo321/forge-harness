@@ -9,5 +9,5 @@ const output = await runPublicUnitCli(process.argv.slice(2), {
   contractsDir: path.resolve(scriptDir, '..', 'skills'),
 });
 process.stdout.write(`${output}\n`);
-const result = JSON.parse(output.slice(output.lastIndexOf('RESULT ') + 7));
+const result = JSON.parse(output.split(/\r?\n/).findLast(line => line.startsWith('RESULT ')).slice(7));
 process.exitCode = result.code;

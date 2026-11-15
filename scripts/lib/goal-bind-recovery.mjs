@@ -39,20 +39,23 @@ export async function recoverMissingGoalBinding({stateRoot,store,unit,request,us
           receipt={...previous,duplicate:true};throw duplicate;
         }
         if(record.revision!==request.expectedRevision || effectArgsDigest(record)!==request.unitDigest)fail('unit changed','GOAL_BIND_STALE');
-        if(record.state!=='Accepted' || ['review','ops'].includes(record.kind) || !record.continuityRequired || record.continuity?.goalId
+        const accepted=record.state==='Accepted';
+        if(!['Accepted','SelfGated','InReview'].includes(record.state) || !accepted && record.accepted!=null
+          || ['review','ops'].includes(record.kind) || !record.continuityRequired || record.continuity?.goalId
           || typeof record.request?.text!=='string' || typeof record.request?.userInputRef!=='string'
           || record.request?.overallGoal || record.deliveryPlan || record.deliveryResult || record.sessionFinalization || record.sessionHistory?.length
-          || (record.stages??[]).some(stage=>(stage.attempts??[]).some(attempt=>!attempt.endedAt)))fail('an unbound, submitted, undelivered Accepted change unit is required');
+          || (record.stages??[]).some(stage=>(stage.attempts??[]).some(attempt=>!attempt.endedAt))
+          || !accepted && !['scope','implement'].every(name=>(record.stages??[]).some(stage=>stage.name===name && stage.attempts?.length)))fail('an unbound, submitted, undelivered change unit is required');
         if(rows.some(row=>row.event==='intent' && (row.effect?.startsWith('session.') || !sessionEffectRetired(rows,row)
           && !rows.some(done=>done.event==='result' && done.seq===row.seq && done.key===row.key && !['unknown','uncertain'].includes(done.result?.status)))))
           fail('existing native activity or uncertain effects require investigation','EFFECT_UNCERTAIN');
         const target=await adapters.git.inspectUnit({unit,record});
-        if(effectArgsDigest(target??null)!==request.targetDigest || !validateAcceptedContent(record.accepted,target).valid)fail('accepted target changed','GOAL_BIND_STALE');
+        if(effectArgsDigest(target??null)!==request.targetDigest || accepted && !validateAcceptedContent(record.accepted,target).valid)fail('target changed','GOAL_BIND_STALE');
         const review=record.reviewedHead?{verdict:record.verdict,head:record.reviewedHead,contentFingerprint:record.reviewDecision?.contentFingerprint}:null;
         const evaluation=evaluateAcceptance({acceptance:productAcceptance(record),evidence:record.evidence??[],requiredGates:selectProfile(record.kind).gates,
           head:record.head,contentFingerprint:record.contentFingerprint,currentHead:target.head,currentContentFingerprint:target.contentFingerprint,
           reviewRequired:record.reviewDecision?.required===true || record.policy?.review?.mode==='required',review,findings:record.findings??[],enforceSnapshot:true});
-        if(!evaluation.ok)fail('existing acceptance or independent review is not valid','GOAL_BIND_UNPROVEN');
+        if(accepted && !evaluation.ok)fail('existing acceptance or independent review is not valid','GOAL_BIND_UNPROVEN');
         if(!await goals.read(request.goalId))fail('goal not found','GOAL_NOT_FOUND');
         goalLock=await acquireContinuityLock(path.join(path.resolve(stateRoot),'goals',request.goalId,'.lock'));
         const goal=await goals.read(request.goalId);

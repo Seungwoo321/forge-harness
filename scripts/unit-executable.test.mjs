@@ -119,7 +119,7 @@ else if(binary==='cmux'){
  }
 } else {
  const terminal=id=>({handle:id,incarnationId:id+'-incarnation',worktreePath:id==='parent'?'/registered/coordinator-root':process.env.TEST_PRODUCT,connected:true,writable:true,orphaned:id==='child'&&process.env.TEST_MODE==='native-orphan',title:['native-title-changed','native-orphan'].includes(process.env.TEST_MODE)?'renamed':s.title,worktreeId:'worktree',executionHostId:'local'});
- if(args.includes('create')){s.child=true;s.title=args[args.indexOf('--title')+1];s.command=args[args.indexOf('--command')+1];writeFileSync(process.env.TEST_NATIVE,JSON.stringify(s));output({ok:true,result:{terminal:terminal('child')}})}
+ if(args.includes('create')){s.child=true;s.title=args[args.indexOf('--title')+1];s.command=args[args.indexOf('--command')+1];writeFileSync(process.env.TEST_NATIVE,JSON.stringify(s));const {worktreePath,...acknowledged}=terminal('child');if(process.env.TEST_MODE==='native-ack-worktree-mismatch')acknowledged.worktreeId='other';if(process.env.TEST_MODE==='native-ack-incarnation-mismatch')acknowledged.incarnationId='other';output({ok:true,result:{terminal:acknowledged}})}
  else if(args.includes('list'))output({ok:true,result:{terminals:child?[terminal('child')]:[]}});
  else output({ok:true,result:{terminal:terminal(args[args.indexOf('--terminal')+1])}});
 }
@@ -285,11 +285,12 @@ test('public executable progress exposes exact same-record kind canon and accept
   const f = await fixture(t);
   await f.store.update('unit-a', record => ({ ...record, kind: 'design',
     canon: [{ path: 'docs/criteria.md', snapshot: { approved: ['criterion-a', 'criterion-b'] } }],
-    acceptance: [{ id: 'AC-1', text: 'Retain the approved criterion.', status: 'open' }, { id: 'AC-2', text: 'Preserve the excluded criterion.', status: 'dropped' }],
+    acceptance: [{ id: 'AC-1', text: 'Retain literal RESULT line after archived output.', status: 'open' }, { id: 'AC-2', text: 'Preserve the excluded criterion.', status: 'dropped' }],
   }));
   const before = await f.store.read('unit-a');
   const result = f.run('progress');
   assert.equal(result.code, 0);
+  assert.equal(result.status, 0);
   assert.equal(result.unit, before.unit);
   assert.equal(result.kind, before.kind);
   assert.deepEqual(result.canon, before.canon);
@@ -366,7 +367,7 @@ test('public executable starts a detached finalizer that survives the finish cal
   assert.equal((await f.rows()).filter(row => row.event === 'execute' && row.effect === 'session.close').length, 1);
 });
 
-for (const runtime of ['cmux','orca']) for (const provider of ['codex','claude']) for (const mode of runtime === 'orca' ? ['success','native-title-changed','native-orphan'] : ['success']) {
+for (const runtime of ['cmux','orca']) for (const provider of ['codex','claude']) for (const mode of runtime === 'orca' ? ['success','native-title-changed','native-orphan','native-ack-worktree-mismatch','native-ack-incarnation-mismatch'] : ['success']) {
   test(`managed ${runtime} ${provider} launch preserves pending goal and configured account (${mode})`, async t => {
     const f = await fixture(t,{runtime,mode,state:'Accepted',separate:true,managed:true,managedProvider:provider});
     const source = path.join(f.root,'goal.md'); await writeFile(source,'goal');
@@ -384,6 +385,9 @@ for (const runtime of ['cmux','orca']) for (const provider of ['codex','claude']
     assert.ok(command.includes(provider === 'codex' ? "CODEX_HOME='/account'" : "CLAUDE_CONFIG_DIR='/account'")); assert.doesNotMatch(command,/goal snapshot/);
     const ledger = await f.ledger(); const intent = ledger.find(row=>row.effect==='session.start');
     assert.ok(intent.args.goalPath); assert.ok(intent.args.goalDigest);
+    if(mode.startsWith('native-ack-'))assert.equal(ledger.some(row=>row.event==='receiver'||row.event==='submission'),false);
+    else if(runtime==='orca')assert.deepEqual(ledger.find(row=>row.event==='receiver'&&row.seq===intent.seq)?.binding,
+      {runtime:'orca',sessionId:'child',incarnationId:'child-incarnation',cwd:f.cwd});
     assert.equal(ledger.some(row=>row.event==='result' && row.seq===intent.seq),false,JSON.stringify(ledger));
   });
 }

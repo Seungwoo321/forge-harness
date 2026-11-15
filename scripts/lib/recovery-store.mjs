@@ -4,6 +4,7 @@ import path from 'node:path';
 import { createCauseKey, decideFailure, finishResolver, reserveRetry, resumeFailure, transitionForFailure } from './classify.mjs';
 import { decideResume } from './resume.mjs';
 import { transitionRecord } from './unit-state.mjs';
+import { effectArgsDigest } from './approvals.mjs';
 
 function digest(value) {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
@@ -199,7 +200,7 @@ export function createRecoveryStore(stateRoot) {
   });
 }
 
-export async function resumeUnitFailure({ store, unit, snapshot, validateStopped, validateResolution, lockMetadata }) {
+export async function resumeUnitFailure({ store, unit, snapshot, validateStopped, validateResolution, inspectTarget, lockMetadata }) {
   if (!store || typeof store.read !== 'function' || typeof store.update !== 'function') throw new TypeError('Unit Record store is required');
   const record = await store.read(unit);
   if (!record) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
@@ -245,14 +246,23 @@ export async function resumeUnitFailure({ store, unit, snapshot, validateStopped
         resumed.gateRecovery = null;
       }
       if (revalidate) {
+        const target = inspectTarget ? await inspectTarget(current) : null;
+        if (target && (typeof target.head !== 'string' || !target.head || typeof target.contentFingerprint !== 'string' || !target.contentFingerprint
+          || target.head !== snapshot.git.head || snapshot.git.contentFingerprint !== undefined && target.contentFingerprint !== snapshot.git.contentFingerprint))
+          throw Object.assign(new Error('current target differs from the resume snapshot'), {code:'CONTINUITY_STALE'});
+        if (inspectTarget && (!target || effectArgsDigest(await inspectTarget(current)) !== effectArgsDigest(target)))
+          throw Object.assign(new Error('current target changed during resume'), {code:'CONTINUITY_STALE'});
+        const targetChanged = target && (current.head !== target.head || current.contentFingerprint !== target.contentFingerprint);
         const latest = new Map((current.evidence ?? []).map(item => [item.gate, item]));
-        const invalidated = [...latest.values()].filter(item => recovery.action === 'revalidate' || item.gate === recovery.gate)
+        const invalidated = [...latest.values()].filter(item => targetChanged || recovery.action === 'revalidate' || item.gate === recovery.gate)
           .map(item => ({ ...item, status: 'stale', covers: [] }));
         resumed = { ...resumed, accepted: null, reviewDecision: null, reviewedHead: null, verdict: null,
           evidence: [...(current.evidence ?? []), ...invalidated],
           resumeRevalidations: [...(current.resumeRevalidations ?? []), { revision: current.revision + 1, fromState: current.state,
             resumeState: recovery.resumeState, recovery, previousAcceptance: current.accepted ?? null,
-            previousReview: { reviewDecision: current.reviewDecision ?? null, reviewedHead: current.reviewedHead ?? null, verdict: current.verdict ?? null } }] };
+            previousReview: { reviewDecision: current.reviewDecision ?? null, reviewedHead: current.reviewedHead ?? null, verdict: current.verdict ?? null },
+            ...(target ? {previousTarget:{head:current.head ?? null,contentFingerprint:current.contentFingerprint ?? null},target:structuredClone(target)} : {}) }] ,
+          ...(target ? {head:target.head,contentFingerprint:target.contentFingerprint,...(targetChanged ? {diff:null,handoff:null} : {})} : {}) };
         if (!beforeGates && resumed.state !== 'SelfGated') resumed = transitionRecord(resumed, 'SelfGated');
       }
       return resumed;

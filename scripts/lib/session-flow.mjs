@@ -56,6 +56,7 @@ export async function finishSessionUnit({
   parentSessionId, parentRuntime, returnTo, goalProof, requestedDelivery, delivery, trackerAdapter, sessionAdapter, adapters,
 }) {
   let record = await store.read(unit);
+  if (delivery !== undefined && requestedDelivery == null) throw Object.assign(new Error('delivery payload requires explicit requestedDelivery'), {code:'DELIVERY_LEVEL_REQUIRED'});
   if (record?.sessionFinalization) return { code: 3, state: record.state, finalizePending: true, summary: 'Session finalization requires surviving supervisor verification' };
   if (sameSession !== null && (!sameSession || typeof sameSession !== 'object' || Array.isArray(sameSession)
     || Object.keys(sameSession).sort().join(',') !== 'approved,nextUnit' || sameSession.approved !== true

@@ -44,6 +44,18 @@ test('AC-3 concurrent exact bindings commit one audit receipt',async t=>{
  const f=await fixture(t);const results=await Promise.all([f.run(),f.run()]);assert.equal(results.filter(r=>r.duplicate).length,1);assert.equal((await f.store.read('u')).goalBindings.length,1);assert.equal((await f.store.read('u')).revision,2);
 });
 
+test('submitted unaccepted binding preserves red gates, pending review and failed history without accepting or launching',async t=>{
+ for(const state of ['SelfGated','InReview'])await t.test(state,async t=>{
+  const f=await fixture(t);
+  await f.store.update('u',r=>({...r,state,accepted:null,reviewedHead:null,verdict:null,evidence:[{gate:'tests',status:'failed',exit:1}]}));
+  const before=await f.store.read('u');f.request.expectedRevision=before.revision;f.request.unitDigest=effectArgsDigest(before);
+  const goalBytes=await readFile(path.join(f.root,'goals/g/goal.json'));
+  await f.run();const after=await f.store.read('u');
+  for(const key of ['state','accepted','evidence','stages','failures','reviewDecision','reviewedHead','verdict','acceptance','policy'])assert.deepEqual(after[key],before[key],key);
+  assert.equal(after.continuity.goalId,'g');assert.deepEqual(await readFile(path.join(f.root,'goals/g/goal.json')),goalBytes);
+ });
+});
+
 test('untrusted, stale, already-owned, unfinished and drifted bindings fail without changing the unit or goal',async t=>{
  const cases={
   'operator input':async f=>f.setProof(false),
@@ -57,7 +69,7 @@ test('untrusted, stale, already-owned, unfinished and drifted bindings fail with
   'target drift during verification':async f=>{let n=0;f.adapters.git.inspectUnit=async()=>++n===1?f.target:{...f.target,contentFingerprint:'changed'};},
   'goal concurrently refreshing':async f=>{f.adapters.provider.verifyUserInput=async binding=>{await assert.rejects(f.goals.transaction('g',g=>({...g,revision:g.revision+1})),{code:'GOAL_LOCKED'});return {...binding,verified:false};};},
  };
- for(const [name,patch]of Object.entries({bound:{continuity:{goalId:'another'}},open:{stages:[{name:'implement',attempts:[{n:2}]}]},delivery:{deliveryPlan:{}},owner:{sessionHistory:[{}]},review:{verdict:'fix'},evidence:{evidence:[]},unaccepted:{state:'Implementing',accepted:null}}))cases[name]=async f=>{
+ for(const [name,patch]of Object.entries({bound:{continuity:{goalId:'another'}},open:{stages:[{name:'implement',attempts:[{n:2}]}]},delivery:{deliveryPlan:{}},owner:{sessionHistory:[{}]},review:{verdict:'fix'},evidence:{evidence:[]},unaccepted:{state:'Implementing',accepted:null},'unsubmitted InReview':{state:'InReview',accepted:null,stages:[]},'conflicting acceptance':{state:'InReview'}}))cases[name]=async f=>{
   await f.store.update('u',r=>({...r,...patch}));const r=await f.store.read('u');f.request.expectedRevision=r.revision;f.request.unitDigest=effectArgsDigest(r);
  };
  cases['pending external effect']=async f=>{await createLedgerStore(f.root).withLock('u',l=>l.append({event:'intent',seq:1,key:'pending',effect:'git.commit',args:{}}));};

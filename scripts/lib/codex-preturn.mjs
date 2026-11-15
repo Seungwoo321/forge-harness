@@ -5,7 +5,7 @@ import { readCodexNativeGoal } from './codex-native-goal.mjs';
 // The pinned fresh-thread contracts defer rollouts; see ADR 0039.
 // queue/list resolves the thread before reading the independent queue store.
 export async function observeUnmaterializedThread({rpc, initialization, threadId, account, sqliteRoot, cwd, readError}) {
-  const version = /^session_transport\/(0\.(?:167\.[01]|168\.0))(?: |$)/.exec(initialization?.userAgent ?? '')?.[1];
+  const version = /^session_transport\/(0\.(?:167\.[01]|168\.0|169\.0))(?: |$)/.exec(initialization?.userAgent ?? '')?.[1];
   if (!sqliteRoot || initialization?.codexHome !== account
     || !version
     || readError.rpcCode !== -32600 || readError.message !== `thread not loaded: ${threadId}`) throw readError;

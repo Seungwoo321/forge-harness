@@ -157,6 +157,7 @@ test('unit retry CLI uses the persisted policy limit after diagnosis', async t =
   await writeFile(input, JSON.stringify(failure));
   const run = async args => JSON.parse((await runUnitCli(args, { stateRoot, adapters })).split('\n').at(-1).slice('RESULT '.length));
   const first = await run(['unit', 'fail', 'unit-cli-retry', '--failure', input]);
+  await store.update('unit-cli-retry',current=>({...current,state:'InReview'}));
   const second = await run(['unit', 'fail', 'unit-cli-retry', '--failure', input]);
   assert.equal(first.action, 'retry');
   assert.equal(second.action, 'diagnose');
@@ -164,8 +165,20 @@ test('unit retry CLI uses the persisted policy limit after diagnosis', async t =
   assert.equal(retry.code, 0);
   assert.equal(retry.action, 'retry');
   assert.equal(retry.cause.retries, 2);
+  assert.equal((await store.read('unit-cli-retry')).state,'Implementing');
   const third = await run(['unit', 'fail', 'unit-cli-retry', '--failure', input]);
   assert.equal(third.action, 'diagnose');
+});
+
+test('ordinary diagnosed retry cannot reopen accepted content or spend its reservation on refusal',async t=>{
+ const {stateRoot,store,recovery,adapters}=await fixture(t,'accepted-retry');
+ const input=path.join(stateRoot,'failure.json');await writeFile(input,JSON.stringify({class:'product',failurePoint:'test',reason:'failed'}));
+ const run=async args=>JSON.parse((await runUnitCli(args,{stateRoot,adapters})).split('\n').at(-1).slice('RESULT '.length));
+ await run(['unit','fail','accepted-retry','--failure',input]);const diagnosed=await run(['unit','fail','accepted-retry','--failure',input]);
+ await store.update('accepted-retry',r=>({...r,state:'Accepted',accepted:{head:'accepted',contentFingerprint:'content'}}));
+ const before=await store.read('accepted-retry'),causes=await recovery.causes();
+ assert.equal((await run(['unit','retry','accepted-retry','--cause-key',diagnosed.causeKey])).error,'RETRY_NOT_ALLOWED');
+ assert.deepEqual(await store.read('accepted-retry'),before);assert.deepEqual(await recovery.causes(),causes);
 });
 
 test('AC-1 changed accepted content resumes through revalidation and preserves prior proof',async t=>{
@@ -193,6 +206,33 @@ test('AC-2 revalidation cannot reopen terminal, delivery or incompatible lifecyc
   const before=await store.read('conflict');
   const result=await resumeUnitFailure({store,unit:'conflict',snapshot:{git:{head:'head',checkpoints:{},worktreeDiff:[],indexDiff:[]},currentFingerprints:{lint:'new'}}});
   assert.equal(result.stage,undefined);assert.deepEqual(await store.read('conflict'),before);
+ });
+});
+
+test('public resume refreshes an independently observed target without accepting red gates or losing prior proof',async t=>{
+ const {store,stateRoot,root}=await fixture(t,'changed-submission','InReview');
+ await store.update('changed-submission',r=>({...r,head:'old-head',contentFingerprint:'old-content',diff:{old:true},handoff:{old:true},
+  reviewDecision:{required:true},reviewedHead:'old-head',verdict:'ship',failures:[{id:'original-failure'}],
+  evidence:[{gate:'lint',fingerprint:'old',exit:0,status:'passed',covers:['AC-1']},{gate:'tests',fingerprint:'old',exit:1,status:'failed',covers:[]}]}));
+ const before=await store.read('changed-submission'),target={head:'current-head',contentFingerprint:'current-content',changedPaths:['src/fix.mjs']};
+ const snapshot=path.join(root,'current.json');await writeFile(snapshot,JSON.stringify({git:{...target,checkpoints:{},worktreeDiff:target.changedPaths,indexDiff:[]},currentFingerprints:{lint:'new',tests:'new'}}));
+ let observations=0;
+ const output=await runUnitCli(['unit','resume','changed-submission','--snapshot',snapshot],{stateRoot,adapters:{git:{inspectUnit:async()=>{observations++;return target;}}}});
+ const result=JSON.parse(output.slice(output.lastIndexOf('RESULT ')+7));assert.equal(result.code,0,output);assert.equal(observations,2);
+ const resumed=await store.read('changed-submission');assert.equal(resumed.state,'SelfGated');assert.equal(resumed.head,target.head);assert.equal(resumed.contentFingerprint,target.contentFingerprint);
+ assert.equal(resumed.accepted,null);assert.equal(resumed.reviewDecision,null);assert.equal(resumed.reviewedHead,null);assert.equal(resumed.verdict,null);assert.equal(resumed.diff,null);assert.equal(resumed.handoff,null);
+ assert.deepEqual(resumed.evidence.slice(0,2),before.evidence);assert.deepEqual(resumed.evidence.slice(2).map(e=>[e.gate,e.status,e.covers]),[['lint','stale',[]],['tests','stale',[]]]);
+ assert.deepEqual(resumed.failures,before.failures);assert.deepEqual(resumed.resumeRevalidations[0].previousTarget,{head:before.head,contentFingerprint:before.contentFingerprint});assert.deepEqual(resumed.resumeRevalidations[0].target,target);
+});
+
+test('unverified or drifting revalidation targets cannot change the persisted unit',async t=>{
+ for(const mode of ['head','content','missing','malformed','drift'])await t.test(mode,async t=>{
+  const {store}=await fixture(t,'target-guard','InReview');
+  await store.update('target-guard',r=>({...r,head:'old',contentFingerprint:'old',evidence:[{gate:'lint',fingerprint:'old',status:'passed',exit:0,covers:['AC-1']}]}));
+  const before=await store.read('target-guard');let observations=0;
+  const inspectTarget=async()=>{observations++;return mode==='missing'?null:mode==='malformed'?{}:{head:mode==='head'?'other':'current',contentFingerprint:mode==='content'||mode==='drift'&&observations>1?'other':'content'};};
+  await assert.rejects(resumeUnitFailure({store,unit:'target-guard',inspectTarget,snapshot:{git:{head:'current',contentFingerprint:'content',checkpoints:{},worktreeDiff:[],indexDiff:[]},currentFingerprints:{lint:'new'}}}),{code:'CONTINUITY_STALE'});
+  assert.deepEqual(await store.read('target-guard'),before);
  });
 });
 

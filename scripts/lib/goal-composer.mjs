@@ -1,6 +1,7 @@
 import { taskError, taskDigest } from './session-task.mjs';
 
 export function nativeComposerContents(screen, provider) {
+  if (typeof screen?.renderedDraft === 'string') return screen.renderedDraft;
   if (typeof screen?.draft === 'string') return screen.draft;
   if (typeof screen === 'object') screen = screen.screen;
   if (typeof screen !== 'string') throw taskError('native goal composer is unavailable');
@@ -40,10 +41,15 @@ function slashLossDraft(objective) {
   return '/goal' + characters.slice(0,128).join('').replaceAll('/','') + characters.slice(128).join('') + (rest.length ? '\n'+rest.join('\n') : '');
 }
 
+function renderedMatches(screen, display, expected) {
+  if (typeof screen?.renderedDraft === 'string' && !expected.includes('\n') && display.split('\n').some(line => !line)) return false;
+  return composerTextMatches(display, expected);
+}
+
 export function classifyNativeGoalDraft(screen,provider,objective) {
   const expected = `/goal ${objective}`;
   const display = nativeComposerContents(screen,provider);
-  const exact = text => typeof screen?.draft === 'string' ? screen.draft === text : display.startsWith('/goal ') && composerTextMatches(display,text);
+  const exact = text => typeof screen?.draft === 'string' ? screen.draft === text : display.startsWith('/goal ') && renderedMatches(screen,display,text);
   if (exact(expected)) return 'exact';
   if (provider === 'codex') {
     const damaged = slashLossDraft(objective);
@@ -61,7 +67,7 @@ export async function submitNativeGoal({ provider, objective, read, write, newli
       // The complete fresh view excludes optimistically rendered input and queue/startup
       // previews; Ready alone does not describe those fields in the pinned native versions.
       const platform = preTurn === true ? 'codex/0.167.0' : preTurn.platform;
-      if (provider !== 'codex' || !/^codex\/(?:0\.167\.[01]|0\.168\.0)$/.test(platform ?? '')
+      if (provider !== 'codex' || !/^codex\/(?:0\.167\.[01]|0\.168\.0|0\.169\.0)$/.test(platform ?? '')
         || lines.filter(line => line.trim() === `>_ OpenAI Codex (v${platform.slice(6)})`).length !== 1
         || lines.filter(line => /^\s*›(?: |$)/.test(line)).length !== 1
         || lines.some(line => /Messages to be submitted|Queued follow-up inputs|edit last queued message|Waiting for startup|Preparing images|pending approval|approve this|request_user_input|Review plugin hooks/i.test(line))) throw taskError('fresh native receiver view is unverified');
@@ -150,7 +156,7 @@ export async function submitNativeGoal({ provider, objective, read, write, newli
     if (preTurn || resumeDraft) requireReady(screen);
     if (typeof screen?.draft === 'string') return screen.draft === expected;
     const display = nativeComposerContents(screen, provider);
-    return composerTextMatches(display, expected) || provider === 'claude' && !resumeDraft && matchesClipped(display);
+    return renderedMatches(screen,display,expected) || provider === 'claude' && !resumeDraft && matchesClipped(display);
   };
   let settled = 0;
   for (let attempt = 0; attempt < 20; attempt += 1) {

@@ -4,12 +4,13 @@ import os from 'node:os';
 import { createCodexTaskTransport } from './codex-task.mjs';
 import { createClaudeTaskTransport } from './claude-task.mjs';
 import { observeTask, observeGoalTask, taskPackets, taskDigest } from './session-task.mjs';
-import { submitNativeGoal } from './goal-composer.mjs';
+import { submitNativeGoal, classifyNativeGoalDraft } from './goal-composer.mjs';
 import { codexComposerMatches, codexComposerWorking, submitCodexComposer } from './codex-composer.mjs';
 import { claudeComposerMatches, submitClaudeComposer } from './claude-composer.mjs';
 import { loadManagedLaunch } from './continuity-launch-io.mjs';
 import { effectArgsDigest } from './approvals.mjs';
 import { createOrcaRuntimeRpc } from './orca-runtime-rpc.mjs';
+import { orcaGoalScreen } from './orca-goal-screen.mjs';
 
 function invalid(message) {
   return Object.assign(new Error(message), { code: 'SESSION_OBSERVATION_INVALID' });
@@ -201,7 +202,13 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     const packets = await taskPackets(args);
     const prompt = goalPrompt ?? (taskPrompt ? await taskPrompt(args, argv) : argv.at(-1));
     let matches, candidates;
-    if (runtime === 'cmux') {
+    const receiver=submission?.binding ?? submission?.receiver;
+    if (receiver) {
+      const binding=receiver;
+      if(binding.runtime!==runtime || binding.cwd!==args.cwd || typeof binding.sessionId!=='string' || !binding.sessionId)
+        throw invalid('durable native receiver binding is invalid');
+      matches=[binding.sessionId];
+    } else if (runtime === 'cmux') {
       const tree = await cmux(['tree', '--all'], args.cwd);
       const workspaces = (tree.windows ?? []).flatMap(window => window.workspaces ?? []).filter(item => item.title === title);
       matches = workspaces.flatMap(workspace => (workspace.panes ?? []).flatMap(pane => pane.surfaces ?? [])).filter(item => item.type === 'terminal').map(item => item.id);
@@ -241,12 +248,13 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     }
     if (matches.length !== 1 || matches[0] === parent.sessionId) throw invalid('successor target is missing or ambiguous');
     const observed = await inspect(matches[0], args.cwd, argv[0]);
+    if(receiver && observed.incarnationId!==receiver.incarnationId)throw invalid('durable native receiver incarnation changed');
     if (!observed.executable
       || path.basename(observed.executable) !== path.basename(argv[0])) throw invalid('configured worker executable has not started');
     const transport = transportFor(argv[0], env);
     const result = goalPrompt ? await observeGoalTask({ transport, observed, input, prompt, packets, submission, submit: async (request, beforeWrite) => {
       if (request.preTurn) {
-        if (runtime !== 'cmux' || path.basename(argv[0]) !== 'codex') throw invalid('full fresh native receiver observation is unavailable');
+        if (!['cmux','orca'].includes(runtime) || path.basename(argv[0]) !== 'codex') throw invalid('full fresh native receiver observation is unavailable');
         for (let index = 1; index < argv.length; index += 1) {
           if (['--dangerously-bypass-approvals-and-sandbox','--no-alt-screen'].includes(argv[index])) continue;
           if (argv[index] === '--model' && argv[index + 1]) { index += 1; continue; }
@@ -261,8 +269,7 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       const target = ['--workspace', observed.workspaceId, '--surface', observed.sessionId];
       const read = runtime === 'cmux' ? () => invoke('cmux',['read-screen',...target,...(request.preTurn ? ['--scrollback'] : [])],observed.cwd) : async () => {
         const terminal = (await orca(['terminal','read','--terminal',observed.sessionId,'--screen'],observed.cwd)).terminal;
-        if (terminal?.source !== 'screen' || terminal.handle !== observed.sessionId) throw invalid('Orca rendered screen is unavailable');
-        return {screen:Array.isArray(terminal.tail) ? terminal.tail.join('\n') : terminal.tail, draft:terminal.draft};
+        return orcaGoalScreen(terminal,observed.sessionId,Boolean(request.preTurn));
       };
       const orcaSend = async text => {
         const result = await orca(['terminal','send','--terminal',observed.sessionId,'--text',text],observed.cwd);
@@ -278,7 +285,7 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
           if (typeof submission?.confirm !== 'function') throw invalid('durable native Return fence is unavailable');
           await submission.confirm(request.binding);
         },
-        repair:request.resumeDraft && (!submission.repairAttempted || submission.recoverClear) && request.preTurn?.defaultLineEditing === true ? async (guard,correction) => {
+        repair:runtime === 'cmux' && request.resumeDraft && (!submission.repairAttempted || submission.recoverClear) && request.preTurn?.defaultLineEditing === true ? async (guard,correction) => {
           if (typeof submission.repair !== 'function') throw invalid('durable native draft correction fence is unavailable');
           await guard(); await submission.repair(request.binding,{...correction,route:'codex-cancel/1'});
           await fenceOwner(); await guard();
@@ -428,10 +435,31 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
   async function poll(action) {
     let failure;
     for (let attempt = 0; attempt < pollAttempts; attempt += 1) {
-      try { return await action(); } catch (error) { failure = error; }
+      try { return await action(); } catch (error) { failure ??= error; }
       if (attempt + 1 < pollAttempts) await new Promise(resolve => setTimeout(resolve, 1000));
     }
     throw failure;
+  }
+
+  async function exactPendingGoal(input) {
+    const submission=input.submission;
+    if (runtime!=='orca' || input.effect!=='session.start' || !input.args.goalPath || !submission?.attempted
+      || submission.confirmed || submission.readOnly || submission.pendingDraft) return false;
+    const {argv,env,goalPrompt}=await configuredLaunch(input.args);
+    if(path.basename(argv[0])!=='codex')return false;
+    const original=submission.binding,observed=await inspect(original.sessionId,input.args.cwd,argv[0]);
+    const packets=await taskPackets(input.args),transport=transportFor(argv[0],env);
+    const request={observed,input,prompt:goalPrompt,packets},native=await transport.observeGoal(request);
+    const binding={runtime:observed.runtime,sessionId:observed.sessionId,incarnationId:observed.incarnationId,cwd:observed.cwd,
+      executable:observed.executable,pid:observed.pid,threadId:native.threadId,promptDigest:taskDigest(goalPrompt),goalDigest:input.args.goalDigest,
+      packets:packets.map(({path,digest})=>({path,digest}))};
+    if(effectArgsDigest(binding)!==effectArgsDigest(original) || native.state!=='unmaterialized'
+      || native.proof?.threadId!==original.threadId || native.proof.queueCount!==0
+      || native.proof.account!==env.CODEX_HOME || !native.proof.sqliteRoot) return false;
+    const terminal=(await orca(['terminal','read','--terminal',observed.sessionId,'--screen'],observed.cwd)).terminal;
+    if(classifyNativeGoalDraft(orcaGoalScreen(terminal,observed.sessionId,true),'codex',goalPrompt)!=='exact')return false;
+    return JSON.stringify(await inspect(original.sessionId,input.args.cwd,argv[0]))===JSON.stringify(observed)
+      && effectArgsDigest(await transport.observeGoal(request))===effectArgsDigest(native);
   }
 
   return Object.freeze({
@@ -504,6 +532,7 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       if (input.effect !== 'session.start' || !path.isAbsolute(input.args?.cwd ?? '')) throw invalid('unsupported session effect');
       const { argv, env, goalPrompt } = await configuredLaunch(input.args);
       if (goalPrompt && typeof input.submission?.mark !== 'function') throw invalid('managed launch requires a durable submission fence');
+      if (goalPrompt && runtime==='orca' && typeof input.submission?.bindReceiver!=='function') throw invalid('managed launch requires a durable host receiver fence');
       if (goalPrompt && /[\r\t\0\x1b]/.test(goalPrompt)) throw invalid('native goal contains unsupported input');
       if (!Array.isArray(argv) || !argv.length || argv.some(value => typeof value !== 'string' || !value || value.includes('\0'))) throw invalid('launch must return a nonempty argument vector');
       const assignments = Object.entries(env).map(([key, value]) => `${key}=${quote(value)}`).join(' ');
@@ -512,7 +541,15 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
         // Mutation acknowledgments can be plain text; completion requires live observation below.
         await invoke('cmux', ['--json', '--id-format', 'uuids', 'new-workspace', '--name', marker(input.key), '--cwd', input.args.cwd, '--command', text, '--focus', 'true'], input.args.cwd);
       } else {
-        await orca(['terminal', 'create', '--worktree', `path:${input.args.cwd}`, '--title', marker(input.key), '--command', text], input.args.cwd);
+        const created=await orca(['terminal', 'create', '--worktree', `path:${input.args.cwd}`, '--title', marker(input.key), '--command', text], input.args.cwd);
+        if(goalPrompt) {
+          const acknowledged=created.terminal;
+          if(!acknowledged?.handle || !acknowledged.incarnationId || !acknowledged.worktreeId || acknowledged.executionHostId!=='local')throw invalid('host-created native receiver is unverified');
+          const terminal=(await orca(['terminal','show','--terminal',acknowledged.handle],input.args.cwd)).terminal;
+          if(terminal?.handle!==acknowledged.handle || terminal.incarnationId!==acknowledged.incarnationId
+            || terminal.worktreeId!==acknowledged.worktreeId || terminal.worktreePath!==input.args.cwd || terminal.executionHostId!=='local')throw invalid('host-created native receiver changed before binding');
+          await input.submission.bindReceiver({runtime,sessionId:terminal.handle,incarnationId:terminal.incarnationId,cwd:input.args.cwd});
+        }
       }
       return poll(() => findStarted(input, input.submission));
     },
@@ -522,6 +559,10 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
         return { status: input.effect === 'session.close' && !result.closed ? 'not-applied' : 'completed', result };
       }
       catch (error) {
+        try {
+          if(await exactPendingGoal(input))return {status:'unknown',verify:{code:'SESSION_TASK_UNVERIFIED',
+            message:'native goal is pending exact verified Return',nativeRequestAbsent:true,exactPendingComposer:true}};
+        } catch { /* A failed observation never authorizes another input. */ }
         if (input.effect === 'session.deliver' && error.pendingComposer === true) {
           return { status: 'not-applied', result: { sessionId: input.args.recipient.sessionId, incarnationId: input.args.recipient.incarnationId },
             verify: { nativeRequestAbsent: true, exactPendingComposer: true } };

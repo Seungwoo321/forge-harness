@@ -62,7 +62,7 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
         || original.goal.id!==goal.goal.id || effectArgsDigest(original.source)!==effectArgsDigest(goal.source)) fail('goal changed or is not the current target','CONTINUITY_STALE');
       const owners=review?goal.reviews:goal.bootstraps;
       if (owners?.some(item=>item.unit===unit) || !review && goalOwner(goal,unit)) fail('startup already has a registered owner','SESSION_RECOVERY_CONFLICT');
-      if (!settleOnly && executionPoliciesEqual(original.policy,goal.policy)) fail('execution policy must change before recovery');
+      const unchangedPolicy=!settleOnly && executionPoliciesEqual(original.policy,goal.policy);
       if (!settleOnly && intent.args.targetDigest!== (target?effectArgsDigest(targetRecord):undefined)) fail('review target changed','CONTINUITY_STALE');
       await checkFile(goal.source); await checkFile(request.provenance);
       if (typeof adapters.provider?.verifySessionStartRecovery!=='function') fail('trusted terminal non-start verifier is required','ADAPTER_MISSING');
@@ -72,10 +72,11 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
       const nextArgs=settleOnly?null:{...intent.args,attempt:nextAttempt,goalPath:snapshot.path,goalDigest:snapshot.digest};
       if (nextArgs) await loadManagedLaunch(nextArgs);
       const submission=rows.findLast(row=>row.event==='submission' && row.seq===intent.seq && row.key===intent.key);
+      const receiver=rows.findLast(row=>row.event==='receiver' && row.seq===intent.seq && row.key===intent.key);
       if (typeof adapters.session?.verify === 'function') {
         let observed;
         try { observed=await adapters.session.verify({effect:'session.start',args:intent.args,key:intent.key,seq:intent.seq,
-          submission:{attempted:Boolean(submission),binding:submission?.binding,confirmed:rows.some(row=>row.event==='confirmation' && row.key===intent.key && row.seq===intent.seq),readOnly:true,recovery:true}}); }
+          submission:{attempted:Boolean(submission),binding:submission?.binding,receiver:receiver?.binding,confirmed:rows.some(row=>row.event==='confirmation' && row.key===intent.key && row.seq===intent.seq),readOnly:true,recovery:true}}); }
         catch { /* An unavailable receiver is not non-start proof; the trusted verifier below must prove it. */ }
         if (observed?.status==='completed') fail('original startup has a receipt; reconcile it instead','SESSION_RECOVERY_CONFLICT');
       }
@@ -98,8 +99,14 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
         || proof.receiver.runtime!==selectExecutionPolicy(original.policy,intent.args.role).runtime
         || path.basename(proof.receiver.executable ?? '')!==selectExecutionPolicy(original.policy,intent.args.role).provider
         || proof.receiver.cwd!==intent.args.cwd || proof.evidenceDigest!==request.provenance.digest) fail('terminal native non-start is unproven','SESSION_RECOVERY_UNPROVEN');
+      if (unchangedPolicy && (!digest(proof.providerCorrection?.beforeDigest) || !digest(proof.providerCorrection?.afterDigest)
+        || proof.providerCorrection.beforeDigest===proof.providerCorrection.afterDigest
+        || proof.providerCorrection.evidenceDigest!==request.provenance.digest))
+        fail('unchanged execution policy requires a verified provider correction','SESSION_RECOVERY_UNPROVEN');
       if (submission && ['runtime','sessionId','incarnationId','cwd','threadId','pid','executable'].some(key=>proof.receiver[key]!==submission.binding[key]))
         fail('proof belongs to another original receiver','SESSION_RECOVERY_UNPROVEN');
+      if (receiver && ['runtime','sessionId','incarnationId','cwd'].some(key=>proof.receiver[key]!==receiver.binding[key]))
+        fail('proof belongs to another host-created receiver','SESSION_RECOVERY_UNPROVEN');
       await checkFile(goal.source); await checkFile(request.provenance); await loadManagedLaunch(intent.args); if (nextArgs) await loadManagedLaunch(nextArgs);
       if (previous) {receipt={...previous,duplicate:true};return goal;}
       receipt={event:'session-start-recovery',unit,id:request.id,seq:intent.seq,key:intent.key,request:structuredClone(request),userInputRef,requestDigest,

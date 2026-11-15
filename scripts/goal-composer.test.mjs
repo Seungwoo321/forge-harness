@@ -2,6 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { submitNativeGoal, classifyNativeGoalDraft } from './lib/goal-composer.mjs';
 
+test('Orca UI-only soft wraps preserve the complete original goal and reject altered, extra or partial text',async()=>{
+ const objective='Read the approved goal packet/path and preserve its exact checksum.';
+ const full='/goal '+objective;
+ const wrapped='/goal Read the approved goal\npacket/path and preserve its exact\nchecksum.';
+ const screen=renderedDraft=>({screen:' >_ OpenAI Codex (v0.169.0)\n›\n model · Ready · context\n ? for shortcuts',renderedDraft});
+ assert.equal(classifyNativeGoalDraft(screen(wrapped),'codex',objective),'exact');
+ for(const draft of [wrapped.replace('packet/path','packetpath'),wrapped+' foreign',wrapped.replace('approved','different'),wrapped.slice(6),wrapped.slice(0,-1),wrapped+'\n',wrapped.replace('\n','\n\n')])assert.notEqual(classifyNativeGoalDraft(screen(draft),'codex',objective),'exact');
+ let confirmations=0,enters=0;
+ await submitNativeGoal({provider:'codex',objective,read:async()=>screen(wrapped),resumeDraft:true,preTurn:{platform:'codex/0.169.0'},
+  write:async()=>{throw Error('An exact pending goal must never be typed again');},beforeWrite:async()=>{throw Error('An existing submission must not repeat');},verify:async()=>{},beforeEnter:async()=>{confirmations++;},enter:async check=>{await check();enters++;}});
+ assert.equal(confirmations,1);assert.equal(enters,1);assert.notEqual(full,wrapped);
+});
+
 test('Korean full drafts preserve slash identity across wide wraps and reject clipped or foreign text',()=>{
  const objective='Goal: 승인 범위 검증; 패키지/그룹 중단; 실패/생략과 로그/산출물 보존. Read packet/path (sha256:abcdef).';
  const chars=[...` ${objective}`],damaged='/goal'+chars.slice(0,128).join('').replaceAll('/','')+chars.slice(128).join('');
@@ -54,8 +67,8 @@ test('fresh queue/goal proof is rechecked after owner probes at first input and 
  }
 });
 
-test('fresh 0.168.0 input requires its exact supported platform and matching native welcome',async()=>{
- for(const [platform,welcome,allowed] of [['0.168.0','0.168.0',true],['0.168.1','0.168.1',false],['0.168.0','0.167.1',false]]) {
+test('AC-2 fresh supported input requires its exact supported platform and matching native welcome',async()=>{
+ for(const [platform,welcome,allowed] of [['0.169.0','0.169.0',true],['0.169.1','0.169.1',false],['0.170.0','0.170.0',false],['0.169.0-custom','0.169.0-custom',false],['0.169.0','0.168.0',false],['0.168.0','0.169.0',false],['0.168.0','0.168.0',true],['0.168.1','0.168.1',false],['0.168.0','0.167.1',false]]) {
   let draft='',entered=0,writes=0;
   const read=async()=>` >_ OpenAI Codex (v${welcome})\n› ${draft||'Ask Codex to do anything'}\n model · Ready · context\n ? for shortcuts`;
   const run=()=>submitNativeGoal({provider:'codex',objective:'finish',preTurn:{platform:`codex/${platform}`},read,

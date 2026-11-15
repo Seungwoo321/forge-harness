@@ -6,7 +6,7 @@
 
 ## 공개 예약 경로
 
-사용자가 실행 정책 변경과 같은 단위 재개를 정확히 승인했고 원 작업이 실제로 미착수였다는 신뢰된 증명이 있으면 `unit session-recover`로 다음 attempt를 예약한다. 원 영수증이 성공했거나 단위·목표에 소유자가 등록돼 있으면 거부한다. 원 수신자와 대기 작업이 영구적으로 실행 불가능해야 한다. 살아 있는 Ready 세션은 이 복구의 증거가 아니다.
+사용자가 같은 단위 재개를 정확히 승인했고 실행 정책 변경 또는 검증된 제공자 결함 수정이 있으며 원 작업이 실제로 미착수였다는 신뢰된 증명이 있으면 `unit session-recover`로 다음 attempt를 예약한다. 원 영수증이 성공했거나 단위·목표에 소유자가 등록돼 있으면 거부한다. 원 수신자와 대기 작업이 영구적으로 실행 불가능해야 한다. 살아 있는 Ready 세션은 이 복구의 증거가 아니다.
 
 요청은 다음 필드만 포함한다. digest는 `scripts/lib/approvals.mjs`의 `effectArgsDigest`로 해당 전체 객체를 계산한다. 파일 digest는 원 바이트의 SHA-256이다. 현재 단위 revision은 `unit progress`로, 목표 revision은 `goal show`로 확인한다. 원 intent 참조는 같은 session-start를 재관찰한 `RESULT.result.intent`의 `key`·`seq`·`argsDigest`를 사용한다. 원장을 직접 읽거나 수정할 필요가 없다.
 
@@ -72,3 +72,7 @@ node "$PLUGIN_ROOT/scripts/unit.mjs" unit session-start change --request origina
 선택적 session verifier가 원 영수증을 발견하면 예약을 거부한다. verifier에는 `submission.readOnly:true`가 전달되며 입력을 제출하지 않는다. 원 native 환경을 읽을 수 없거나 영구적인 미실행을 증명할 수 없으면 예약하지 않는다. 패키지 기본 세션 어댑터는 이러한 권한 검증을 임의로 제공하지 않으므로 호스트 제공자가 없으면 차단한다.
 
 기동과 예약은 원장→단위→기존 사용자 소유 리뷰 대상→목표 순서로 잠근다. 목표 정책 변경은 같은 목표 잠금과 경합하며 진행 중 기동을 덮지 않는다. 기존 사용자 소유자의 리뷰에서는 기동 시 실제 소유자와 Git 대상을 계속 재검증한다. 근거: [ADR 0030](adr/0030-session-policy-recovery.md), [네이티브 제출 경계](native-goal-recovery.md).
+
+## 실행 정책이 같은 제공자 수정
+
+실행 정책은 그대로이고 세션 제공자의 결함을 수정한 경우에도 같은 공개 요청을 사용한다. 정책 값을 복구 조건에 맞추기 위해 바꾸지 않는다. 신뢰된 `verifySessionStartRecovery`는 기존 모든 binding과 실제 미착수·정확한 원 수신자 종료·대기 작업 취소 증명에 더해 `providerCorrection: {beforeDigest, afterDigest, evidenceDigest}`를 반환한다. 두 코드 digest는 실제 수정 전후 제공자 입력을 결속하며 서로 달라야 한다. evidenceDigest는 같은 request.provenance.digest다. 제공자는 실제 실패와 수정 전후 바이트·회귀 검증을 읽어 원인을 제거한 수정인지 확인한다. 요청자의 boolean이나 파일 존재만으로 수정과 안전한 재시작을 추정하지 않는다. 기존 proof가 없거나 같은 코드·다른 증명·살아 있는 수신자·대기 작업·착수 이력이 있으면 예약하지 않는다. 원 정책·단위·목표·실패·submission과 confirmation은 그대로 남고 원장에 같은 예약 영수증만 추가한다.

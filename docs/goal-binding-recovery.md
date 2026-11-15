@@ -38,7 +38,7 @@ node "$PLUGIN_ROOT/scripts/unit.mjs" unit goal-bind change --request binding.jso
 
 goal은 기존 공개 정책·goal 등록 명령으로 먼저 등록한다. 사용자에게 승인된 실제 실행 설정을 사용하고 과거 단위에 session 정책이 없었다는 사실을 보존한다. 기본 계정·모델·권한을 만들어 넣지 않는다.
 
-복구는 미결속·continuityRequired·미전달 Accepted 변경 단위에만 적용한다. 완료 단계·필수 게이트·수용 기준·독립 리뷰와 현재 Accepted 대상을 검증한다. 등록된 native 소유권, 기존 session 효과 이력, 미해결 효과, 진행 중 단계·전달·종료 계획, 이미 다른 goal에 결속된 단위는 거부한다. 현재 active goal의 첫 남은 단위여야 하며 source 파일 바이트가 저장 digest와 같아야 한다.
+복구는 미결속·continuityRequired·미전달 Accepted·SelfGated·InReview 변경 단위에 적용한다. Accepted는 완료 단계·필수 게이트·수용 기준·독립 리뷰와 현재 Accepted 대상을 검증한다. SelfGated·InReview는 accepted가 null이며 scope·implement 제출이 끝나 있어야 한다. 미수용 단위는 실패한 게이트·미결 리뷰·현재 상태를 그대로 유지하며 결속으로 수용이나 검증 완료를 얻지 않는다. 등록된 native 소유권, 기존 session 효과 이력, 미해결 효과, 진행 중 단계·전달·종료 계획, 이미 다른 goal에 결속된 단위는 거부한다. 현재 active goal의 첫 남은 단위여야 하며 source 파일 바이트가 저장 digest와 같아야 한다.
 
 `verifyUserInput`은 `effect:'unit.goal.bind.recover'`, `unit`, `goalId`, `userInputRef`, `argsDigest`(`{request,userInputRef}`), `unitDigest`, `goalDigest`, `targetDigest`, `sourceDigest`, `originalRequestDigest`, `policyDigest`, `reason` 전체를 검증한다. 원 실제 사람 지시·차단 문맥·원 요청과 새 goal의 관계·실행 정책이 정확히 허용되는지 확인한다. 같은 필드와 `verified:true`만으로 성공하며 검증 부재는 차단한다.
 

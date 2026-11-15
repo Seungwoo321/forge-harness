@@ -18,7 +18,7 @@ import {assertReviewsSettled} from './lib/continuity-custody.mjs';
 
 const hash=value=>`sha256:${createHash('sha256').update(value).digest('hex')}`;
 const result=output=>JSON.parse(output.slice(output.lastIndexOf('RESULT ')+7));
-async function fixture(t,{submitted=true,blockedReview=false}={}) {
+async function fixture(t,{submitted=true,blockedReview=false,samePolicy=false,hostCreated=false}={}) {
   const root=await mkdtemp(path.join(tmpdir(),'start-recovery-'));t.after(()=>rm(root,{recursive:true,force:true}));
   const source=path.join(root,'goal.md'),handoffPath=path.join(root,'handoff.md'),provenancePath=path.join(root,'native-proof.json');
   await writeFile(source,'goal');
@@ -41,18 +41,19 @@ async function fixture(t,{submitted=true,blockedReview=false}={}) {
   const session={observe:async()=>({...startRequest.parentRuntime,runtime:ownerRuntime}),async execute(input){launches++;
     if(input.args.attempt>1)return receiptFor(input);
     oldInput=input;
+    if(hostCreated)await input.submission.bindReceiver({runtime:'orca',sessionId:receiver.sessionId,incarnationId:receiver.incarnationId,cwd:root});
     if(submitted){const binding={...receiver,goalDigest:input.args.goalDigest,promptDigest:taskDigest('prompt'),packets:['handoff','goal'].map(name=>({path:input.args[`${name}Path`],digest:input.args[`${name}Digest`]}))};await input.submission.mark(binding);await input.submission.confirm(binding);}
     throw Error('authentication failed before task start');},
     async verify(input){checks++;seen.push(input);if(mode==='completed'||input.args.attempt>1)return {status:'completed',result:receiptFor(input)};return {status:'unknown',verify:{code:'SESSION_TASK_UNVERIFIED'}};}};
   const provider={verifyUserInput:async binding=>({...binding,verified:binding.userInputRef==='actual-instruction'}),
     async verifySessionStartRecovery({request,intent,submission,original,goal,nextArgs,...binding}){
       assert.equal(original.policy.account,'/old-account');assert.equal(intent.args.goalDigest,oldInput.args.goalDigest);
-      assert.equal(goal.policy.account,blockedReview?'/old-account':'/new-account');
+      assert.equal(goal.policy.account,blockedReview||samePolicy?'/old-account':'/new-account');
       if(blockedReview){assert.equal(nextArgs,null);assert.equal(binding.targetDigest,effectArgsDigest(await store.read('change')));}
       else assert.equal(nextArgs.attempt,intent.args.attempt+1);
       if(submitted)assert.equal(submission.binding.threadId,'original-thread');
       const bytes=await readFile(request.provenance.path);const evidence=JSON.parse(bytes);
-      return {...binding,verified:true,...evidence,evidenceDigest:hash(bytes)};
+      return {...binding,verified:true,...evidence,evidenceDigest:hash(bytes),...(samePolicy?{providerCorrection:{beforeDigest:hash('original provider'),afterDigest:hash('corrected provider'),evidenceDigest:hash(bytes)}}:{})};
     }};
   const adapters={session,provider,now:()=> '2026-01-01T00:00:00Z'};
   const start=()=>startGoalSession({stateRoot:root,unit:'u',request:startRequest,store,adapters});
@@ -62,11 +63,42 @@ async function fixture(t,{submitted=true,blockedReview=false}={}) {
   if(blockedReview){
     await store.update('change',r=>({...r,state:'Stopped',stoppedFrom:'InReview',stopReport:{owner:{sessionId:'parent'}}}));
     await goals.transaction('g',g=>({...g,revision:g.revision+1,goal:{...g.goal,status:'blocked',blocker:{unit:'change',reason:'startup blocked',resumeCondition:'verified recovery',evidence:'original failure'}}}));
-  }else await goals.transaction('g',goal=>({...goal,revision:goal.revision+1,policy:{...policy,provider:'codex',account:'/new-account',argv:['codex']},policyChanges:[{previous:policy,reason:'authorized account change',userInputRef:'actual-instruction'}]}));
+  }else if(!samePolicy)await goals.transaction('g',goal=>({...goal,revision:goal.revision+1,policy:{...policy,provider:'codex',account:'/new-account',argv:['codex']},policyChanges:[{previous:policy,reason:'authorized account change',userInputRef:'actual-instruction'}]}));
   const request={id:'recovery-1',expectedRevision:1,expectedGoalRevision:(await goals.read('g')).revision,intent:{key:intent.key,seq:intent.seq,argsDigest:effectArgsDigest(intent.args)},provenance:{path:provenancePath,digest:hash(await readFile(provenancePath))},reason:'Authorized same-unit startup recovery'};
   const recover=(patch={})=>recoverGoalSession({stateRoot:root,unit:'u',request,userInputRef:'actual-instruction',store,adapters,...patch});
   return {root,goals,store,ledgerStore,adapters,request,startRequest,intent,rows,start,recover,seen,get launches(){return launches;},get checks(){return checks;},set mode(value){mode=value;},set ownerRuntime(value){ownerRuntime=value;}};
 }
+
+test('public same-policy startup recovery requires a verified provider correction and preserves original history',async t=>{
+  const f=await fixture(t,{samePolicy:true}),before=await f.rows(),record=await f.store.read('u'),goal=await f.goals.read('g');
+  const requestFile=path.join(f.root,'same-policy.json');await writeFile(requestFile,JSON.stringify(f.request));
+  const output=result(await runUnitCli(['unit','session-recover','u','--request',requestFile,'--user-input','actual-instruction'],{stateRoot:f.root,adapters:f.adapters}));
+  assert.equal(output.code,0,JSON.stringify(output));assert.equal(output.receipt.nextArgs.attempt,2);
+  assert.deepEqual(await f.store.read('u'),record);assert.deepEqual(await f.goals.read('g'),goal);
+  assert.deepEqual((await f.rows()).slice(0,before.length),before);assert.equal(f.launches,1);
+  assert.equal((await f.start()).status,'completed');assert.equal(f.launches,2);
+});
+
+test('pre-input recovery retains the host-created receiver and refuses proof for another surface',async t=>{
+ for(const foreign of [false,true])await t.test(String(foreign),async t=>{
+  const f=await fixture(t,{submitted:false,samePolicy:true,hostCreated:true});
+  const before=await f.rows(),verify=f.adapters.provider.verifySessionStartRecovery;
+  if(foreign)f.adapters.provider.verifySessionStartRecovery=async input=>{const p=await verify(input);return {...p,receiver:{...p.receiver,sessionId:'foreign'}};};
+  if(foreign)await assert.rejects(f.recover(),{code:'SESSION_RECOVERY_UNPROVEN'});
+  else assert.equal((await f.recover()).nextArgs.attempt,2);
+  assert.deepEqual((await f.rows()).slice(0,before.length),before);assert.equal(f.launches,1);
+ });
+});
+
+test('same-policy restart refuses missing, unchanged or unbound corrections and live or queued receivers',async t=>{
+  const patches={missing:p=>({...p,providerCorrection:undefined}),unchanged:p=>({...p,providerCorrection:{...p.providerCorrection,afterDigest:p.providerCorrection.beforeDigest}}),unbound:p=>({...p,providerCorrection:{...p.providerCorrection,evidenceDigest:hash('other')}}),live:p=>({...p,receiverStopped:false}),queued:p=>({...p,queueCancelled:false}),started:p=>({...p,taskNeverStarted:false})};
+  for(const [name,patch] of Object.entries(patches))await t.test(name,async t=>{
+    const f=await fixture(t,{samePolicy:true}),verify=f.adapters.provider.verifySessionStartRecovery;
+    f.adapters.provider.verifySessionStartRecovery=async input=>patch(await verify(input));
+    await assert.rejects(f.recover(),{code:'SESSION_RECOVERY_UNPROVEN'});
+    assert.equal((await f.rows()).filter(row=>row.event==='session-start-recovery').length,0);assert.equal(f.launches,1);
+  });
+});
 
 test('blocked review settlement preserves records and original intent, then the same reviewer starts only after target recovery',async t=>{
   const f=await fixture(t,{submitted:false,blockedReview:true});

@@ -1,6 +1,51 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { submitNativeGoal, classifyNativeGoalDraft } from './lib/goal-composer.mjs';
+import { submitNativeGoal, classifyNativeGoalDraft, nativeComposerContents } from './lib/goal-composer.mjs';
+
+const statusFooter = 'GPT-6.1-Sol high · ~/work/repository/long-product-directory · fix/maintenance-change · Ready · Context 100% left · weekly 20% left';
+function wrappedStatusScreen(draft, width = 80, footer = statusFooter, hint = '← for agents · ? for shortcuts') {
+ const rows=[];
+ for(let offset=0;offset<footer.length;offset+=width-2)rows.push('  '+footer.slice(offset,offset+width-2));
+ return ` >_ OpenAI Codex (v0.169.0)\n› ${draft.replaceAll('\n','\n  ')}\n \n${rows.join('\n')}\n  ${hint}\n`;
+}
+
+test('AC-1 wrapped native status footers preserve exact empty and multiline composer contents',()=>{
+ for(const footer of [statusFooter,statusFooter+' · 475K window · 262K used',statusFooter+' · 475K window · 75.4K used'])
+ for(const width of [40,80,149,240])for(const draft of ['Ask Codex to do anything','Ask Codex to do anything ','/goal Read packet/path\nwith  exact spaces','/goal finish ','/goal finish\n','/goal finish\n\n','(']) {
+  const view=wrappedStatusScreen(draft,width,footer);
+  assert.equal(nativeComposerContents(view,'codex'),draft);
+  assert.equal(nativeComposerContents(view.replace('  ← for agents · ? for shortcuts\n',''),'codex'),draft);
+  assert.equal(classifyNativeGoalDraft(view,'codex','Read packet/path\nwith  exact spaces'),draft==='/goal Read packet/path\nwith  exact spaces'?'exact':'other');
+ }
+ for(const hint of ['← for agents · ? for shortcuts    Pursuing goal (2m)','← for agents · ? for shortcuts    ⚠ 1 warning · f2 to view','← for agents · ? for shortcuts    Pursuing goal (1h 2m) · ⚠ 4 warnings · f2 to view'])
+  assert.equal(nativeComposerContents(wrappedStatusScreen('/goal finish ',80,statusFooter,hint),'codex'),'/goal finish ');
+});
+
+test('AC-2 native submission preserves real and footer-like drafts and refuses ambiguous footer tails',async()=>{
+ for(const draft of ['/goal finish ','/goal finish\n','/goal finish\n\n']) {
+  const view=wrappedStatusScreen(draft);
+  assert.notEqual(classifyNativeGoalDraft(view,'codex','finish'),'exact');
+  let writes=0,enters=0;
+  await assert.rejects(submitNativeGoal({provider:'codex',objective:'finish',resumeDraft:true,read:async()=>view,
+   verify:async()=>{},write:async()=>{writes++;},enter:async()=>{enters++;}}));
+  assert.equal(writes,0);assert.equal(enters,0);
+ }
+ for(const footer of [statusFooter,statusFooter+' · 475K window · 262K used'])
+ for(const draft of ['(','foreign draft','Ask Codex to do anything ','Ask Codex to do anything\n','Ask Codex to do anything\n\n','Ask Codex to do anything\n'+statusFooter,'/goal different\nmodel · Ready · context']) {
+  let writes=0,enters=0;
+  await assert.rejects(submitNativeGoal({provider:'codex',objective:'finish',read:async()=>wrappedStatusScreen(draft,80,footer),
+   verify:async()=>{},write:async()=>{writes++;},enter:async()=>{enters++;}}));
+  assert.equal(writes,0);assert.equal(enters,0);
+ }
+ for(const ambiguous of [wrappedStatusScreen('Ask Codex to do anything').replace('  ← for agents','  foreign tail\n  ← for agents'),wrappedStatusScreen('Ask Codex to do anything')+'foreign tail\n',
+  wrappedStatusScreen('Ask Codex to do anything').replace('  ← for agents · ? for shortcuts\n','')+'foreign tail\n',
+  ...['← for agents · ? for shortcuts · foreign tail','foreign tail · ← for agents · ? for shortcuts'].map(hint=>wrappedStatusScreen('Ask Codex to do anything',80,statusFooter,hint))]) {
+ let writes=0,enters=0;
+ await assert.rejects(submitNativeGoal({provider:'codex',objective:'finish',read:async()=>ambiguous,
+  verify:async()=>{},write:async()=>{writes++;},enter:async()=>{enters++;}}));
+ assert.equal(writes,0);assert.equal(enters,0);
+ }
+});
 
 test('Orca UI-only soft wraps preserve the complete original goal and reject altered, extra or partial text',async()=>{
  const objective='Read the approved goal packet/path and preserve its exact checksum.';

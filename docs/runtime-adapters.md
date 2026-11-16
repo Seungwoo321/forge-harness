@@ -70,6 +70,8 @@ Orca가 자동 생성한 제목으로 터미널 이름을 바꾸더라도 Claude
 
 Codex 네이티브 목표는 해당 계정의 `goals_1.sqlite`에서 결속된 thread의 `thread_goals` 행을 읽기 전용으로 관찰한다. 별도 app-server에 라이브 thread를 로드하지 않으며 원본 데이터베이스를 수정하거나 생성하지 않는다. 저장소 또는 스키마가 지원되지 않으면 차단한다. 목표가 없는 새 thread는 writer lock·프로세스·cwd 결속 아래에서 목표 부재를 반환하고, 목표가 있으면 전체 objective가 의도한 문구와 정확히 일치하는지 확인하고 실제 활동 기록과 패킷 읽기를 추가 확인한다. active 또는 이미 complete인 목표만 수신 근거가 되며 완료 상태만으로 작업 착수를 인정하지 않는다. 패킷 읽기 뒤 같은 turn의 별도 성공 명령이 출력한 경로·checksum도 실제 본문 읽기와 결속할 수 있다. 참조 경로는 검증된 worker cwd를 기준으로 해석하며 반복되는 절대 경로를 목표 입력에 중복하지 않는다. cmux 새 수신 창은 tty와 입력 화면이 관찰 가능한 활성 상태로 연다. 긴 목표는 작은 입력 묶음 사이의 처리 시간을 두어 붙여넣기 블록으로 접히는 것을 방지하며, 화면과 입력이 일치하기 전에는 Return을 보내지 않는다.
 
+지원되는 Codex Ready 상태 footer는 전체 상태 블록이 일치할 때만 여러 화면 행에 걸쳐 제외한다. 이 정규화는 footer 인식에만 적용하며 실제 draft의 공백과 줄바꿈은 보존한다. 알려지지 않은 후속 행이나 기존 초안은 빈 입력으로 해석하지 않는다.
+
 다른 worker는 명시적 `taskTransport`를 등록한다. `observe({observed,input,prompt,packets})`는 `startup|modal|ready|prefilled|queued|accepted|started`와 네이티브 근거를 반환한다. `started`에는 promptDigest·threadId·requestId·turnId·activityId·packets가 필요하다. `submit({...request,fence})`는 같은 native readiness fence에서 정확한 입력만 조건부 제출한다. interactive pending 입력의 Enter와 busy 입력의 steering/queue는 이 transport가 처리한다. 화면은 composer 준비 관찰에만 쓰고 승인·수신 증거로 쓰지 않는다. cmux는 원자적 composer API가 없으므로 native identity와 정확한 화면을 입력 전 재검사하며 receipt를 별도로 검증한다. `identity(observed)`는 실제 worker의 threadId를 반환한다. `taskPrompt(args,argv)`는 초기 prompt 형식이 다른 worker에만 필요하다.
 
 승인된 다음 작업을 같은 세션에서 계속할 때 finish 요청의 `sameSession: {approved: true, nextUnit: "<unit>"}`을 사용한다. 이 경로는 단위 결과·남은 일·다음 작업을 기록하고 단위만 닫으며 session start·deliver·close나 종료 finalizer를 만들지 않는다. 전체 목표 완료나 실제 인계와 함께 요청할 수 없다.

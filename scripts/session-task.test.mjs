@@ -226,6 +226,26 @@ test('upgrading a legacy full-packet delivery observes its receipt or queue with
 });
 
 const screen = (text, hint = 'tab to queue message') => `busy output\n› ${text}\n\n  Model · /work · Ready · Context 30% left\n  ${hint}\n`;
+test('wrapped Ready status excludes every footer row from interactive packet delivery',async()=>{
+ const prompt='Read /work/result (sha256:exact)';
+ const footer='  GPT-6.1-Sol high · ~/work/long-product-directory · fix/change · Ready · Context 100%\n  left · weekly 20% left · 475K window · 262K used\n  ← for agents · ? for shortcuts    Pursuing goal (2m) · ⚠ 4 warnings · f2 to view';
+ const render=draft=>`› ${draft.replaceAll('\n','\n  ')}\n\n${footer}\n`;
+ let draft='Ask Codex to do anything',pastes=0,enters=0;
+ await submitCodexComposer({prompt,read:async()=>render(draft),verify:async()=>{},
+  paste:async text=>{draft=text;pastes++;},enter:async()=>{enters++;}});
+ assert.equal(pastes,1);assert.equal(enters,1);assert.equal(draft,prompt);
+ for(const foreign of ['(','Ask Codex to do anything ','Ask Codex to do anything\n',prompt+'\n'+footer]) {
+  assert.equal(codexComposerMatches(render(foreign),prompt),false);
+  await assert.rejects(submitCodexComposer({prompt,read:async()=>render(foreign),verify:async()=>{},
+   paste:async()=>{throw Error('must not paste');},enter:async()=>{throw Error('must not enter');}}),/another draft/);
+ }
+ for(const view of [render('Ask Codex to do anything').replace('← for agents','foreign tail · ← for agents'),render('Ask Codex to do anything')+'foreign tail',render('Ask Codex to do anything').replace('? for shortcuts','? for shortcuts · foreign tail')]) {
+  let mutations=0;
+  await assert.rejects(submitCodexComposer({prompt,read:async()=>view,verify:async()=>{},paste:async()=>{mutations++;},enter:async()=>{mutations++;}}));
+  assert.equal(mutations,0);
+ }
+});
+
 test('ready composer settles before separate Return; a prefilled retry never pastes again', async () => {
   let text = 'Ask Codex to do anything'; const events = [];
   const options = { prompt: 'Read /packet (sha256:digest)',

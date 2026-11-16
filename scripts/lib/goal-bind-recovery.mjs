@@ -40,8 +40,9 @@ export async function recoverMissingGoalBinding({stateRoot,store,unit,request,us
         }
         if(record.revision!==request.expectedRevision || effectArgsDigest(record)!==request.unitDigest)fail('unit changed','GOAL_BIND_STALE');
         const accepted=record.state==='Accepted';
+        const legacy=!Object.hasOwn(record,'continuityRequired');
         if(!['Accepted','SelfGated','InReview'].includes(record.state) || !accepted && record.accepted!=null
-          || ['review','ops'].includes(record.kind) || !record.continuityRequired || record.continuity?.goalId
+          || ['review','ops'].includes(record.kind) || !legacy && record.continuityRequired!==true || record.continuity?.goalId
           || typeof record.request?.text!=='string' || typeof record.request?.userInputRef!=='string'
           || record.request?.overallGoal || record.deliveryPlan || record.deliveryResult || record.sessionFinalization || record.sessionHistory?.length
           || (record.stages??[]).some(stage=>(stage.attempts??[]).some(attempt=>!attempt.endedAt))
@@ -71,9 +72,9 @@ export async function recoverMissingGoalBinding({stateRoot,store,unit,request,us
         if(effectArgsDigest(await adapters.git.inspectUnit({unit,record}))!==request.targetDigest)fail('target changed during verification','GOAL_BIND_STALE');
         goalLock.assertHeld();
         receipt={id:request.id,goalId:request.goalId,request:structuredClone(request),userInputRef,requestDigest,
-          previous:{request:structuredClone(record.request),policy:structuredClone(record.policy)},policyDigest:binding.policyDigest,
+          previous:{request:structuredClone(record.request),policy:structuredClone(record.policy),...(legacy?{continuityRequiredAbsent:true}:{})},policyDigest:binding.policyDigest,
           source:structuredClone(goal.source),revision:record.revision+1,boundAt:adapters.now()};
-        return {...record,continuity:{goalId:request.goalId},request:{...record.request,overallGoal:{id:goal.goal.id,objective:goal.goal.objective,criteria:goal.goal.criteria,source:goal.source}},
+        return {...record,continuityRequired:true,continuity:{goalId:request.goalId},request:{...record.request,overallGoal:{id:goal.goal.id,objective:goal.goal.objective,criteria:goal.goal.criteria,source:goal.source}},
           goalBindings:[...(record.goalBindings??[]),receipt]};
       });
     });

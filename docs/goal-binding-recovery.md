@@ -38,7 +38,7 @@ node "$PLUGIN_ROOT/scripts/unit.mjs" unit goal-bind change --request binding.jso
 
 goal은 기존 공개 정책·goal 등록 명령으로 먼저 등록한다. 사용자에게 승인된 실제 실행 설정을 사용하고 과거 단위에 session 정책이 없었다는 사실을 보존한다. 기본 계정·모델·권한을 만들어 넣지 않는다.
 
-복구는 미결속·continuityRequired·미전달 Accepted·SelfGated·InReview 변경 단위에 적용한다. Accepted는 완료 단계·필수 게이트·수용 기준·독립 리뷰와 현재 Accepted 대상을 검증한다. SelfGated·InReview는 accepted가 null이며 scope·implement 제출이 끝나 있어야 한다. 미수용 단위는 실패한 게이트·미결 리뷰·현재 상태를 그대로 유지하며 결속으로 수용이나 검증 완료를 얻지 않는다. 등록된 native 소유권, 기존 session 효과 이력, 미해결 효과, 진행 중 단계·전달·종료 계획, 이미 다른 goal에 결속된 단위는 거부한다. 현재 active goal의 첫 남은 단위여야 하며 source 파일 바이트가 저장 digest와 같아야 한다.
+복구는 미결속·미전달 Accepted·SelfGated·InReview 변경 단위 중 `continuityRequired: true`이거나 해당 자체 속성이 없는 역사 단위에 적용한다. 명시된 false·null 등 true 이외의 값은 거부한다. 역사 단위도 같은 정확한 출처 승인을 검증하며, 성공하는 단일 원자적 결속에서 `continuityRequired: true`를 설정하고 영수증의 `previous.continuityRequiredAbsent: true`에 원래 부재를 기록한다. 실패하면 필드도 바꾸지 않는다. Accepted는 완료 단계·필수 게이트·수용 기준·독립 리뷰와 현재 Accepted 대상을 검증한다. SelfGated·InReview는 accepted가 null이며 scope·implement 제출이 끝나 있어야 한다. 미수용 단위는 실패한 게이트·미결 리뷰·현재 상태를 그대로 유지하며 결속으로 수용이나 검증 완료를 얻지 않는다. 등록된 native 소유권, 기존 session 효과 이력, 미해결 효과, 진행 중 단계·전달·종료 계획, 이미 다른 goal에 결속된 단위는 거부한다. 현재 active goal의 첫 남은 단위여야 하며 source 파일 바이트가 저장 digest와 같아야 한다.
 
 `verifyUserInput`은 `effect:'unit.goal.bind.recover'`, `unit`, `goalId`, `userInputRef`, `argsDigest`(`{request,userInputRef}`), `unitDigest`, `goalDigest`, `targetDigest`, `sourceDigest`, `originalRequestDigest`, `policyDigest`, `reason` 전체를 검증한다. 원 실제 사람 지시·차단 문맥·원 요청과 새 goal의 관계·실행 정책이 정확히 허용되는지 확인한다. 같은 필드와 `verified:true`만으로 성공하며 검증 부재는 차단한다.
 
@@ -46,7 +46,7 @@ goal은 기존 공개 정책·goal 등록 명령으로 먼저 등록한다. 사�
 
 결속은 native 소유권이 아니다. 이어 기존 `session-adopt`로 실제 소유자·계정·출처·대상을 검증하고, 같은 단위의 정상 acceptance/finish를 사용한다. task/enforcement/transfer/close 영수증을 합성하지 않는다. source나 권한·native 관찰·전달 어댑터가 없으면 해당 공개 경계에서 중단한다. 이 복구는 delivery 정책을 낮추거나 게이트를 지우지 않는다.
 
-설계 근거: [ADR 0029](adr/0029-recover-missing-goal-binding.md).
+설계 근거: [ADR 0029](adr/0029-recover-missing-goal-binding.md), [역사 단위 결속](adr/0050-legacy-submitted-goal-binding.md).
 
 ## 초기 기준 결속과 동일 단위 명확화
 

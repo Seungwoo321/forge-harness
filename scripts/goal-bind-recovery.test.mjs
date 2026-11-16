@@ -11,13 +11,13 @@ import {effectArgsDigest} from './lib/approvals.mjs';
 import {recoverMissingGoalBinding} from './lib/goal-bind-recovery.mjs';
 import {runUnitCli} from './lib/unit-driver.mjs';
 const hash=bytes=>`sha256:${createHash('sha256').update(bytes).digest('hex')}`;
-async function fixture(t){
+async function fixture(t,{legacy=false}={}){
  const root=await realpath(await mkdtemp(path.join(tmpdir(),'goal-bind-recovery-')));t.after(()=>rm(root,{recursive:true,force:true}));const source=path.join(root,'goal.md');await writeFile(source,'Original task and required recovery');
  const store=createUnitStateStore(root),goals=createContinuityStore(root);const policy={runtime:'cmux',provider:'codex',account:'/fixture-account',model:'model',effort:'high',argv:['codex']};
  await goals.create({goal:{id:'g',objective:'Original task',criteria:['verified'],remaining:['u'],status:'active'},source:{path:source,digest:hash(await readFile(source))},policy});
  const target={head:'head',contentFingerprint:'content'};
  const evidence=['typecheck','lint','tests','build','acceptance-coverage'].map(gate=>({gate,status:'passed',exit:0,covers:['AC-1'],failureClass:null,fingerprint:hash(gate),execution:{kind:'isolated-snapshot-v1',fingerprint:hash(gate)}}));
- await store.create({schema:'harness.unit/1',unit:'u',kind:'impl',state:'Accepted',continuityRequired:true,request:{text:'Original work',userInputRef:'original-user'},
+ await store.create({schema:'harness.unit/1',unit:'u',kind:'impl',state:'Accepted',...(legacy?{}:{continuityRequired:true}),request:{text:'Original work',userInputRef:'original-user'},
   policy:{goal:{class:'task'},review:{mode:'required',by:'session',triggers:[]}},head:target.head,contentFingerprint:target.contentFingerprint,accepted:{...target,basis:'review'},
   acceptance:[{id:'AC-1',text:'verified'}],reviewedHead:target.head,verdict:'ship',reviewDecision:{required:true,contentFingerprint:target.contentFingerprint},evidence,
   stages:[{name:'scope',attempts:[{n:1,endedAt:'done'}]},{name:'implement',attempts:[{n:1,endedAt:'done'}]}],failures:[{id:'first-failure'}],scopeAmendments:[{previous:['src'],added:['lib'],userInputRef:'operator'}],scopeApprovalCorrections:[{id:'original-human-correction'}]});
@@ -56,6 +56,32 @@ test('submitted unaccepted binding preserves red gates, pending review and faile
  });
 });
 
+test('AC-1 authorized legacy binding records absent continuity flag and preserves submitted history',async t=>{
+ for(const state of ['Accepted','SelfGated','InReview'])await t.test(state,async t=>{
+  const f=await fixture(t,{legacy:true});
+  if(state!=='Accepted')await f.store.update('u',r=>({...r,state,accepted:null,reviewedHead:null,verdict:null,evidence:[{gate:'tests',status:'failed',exit:1}]}));
+  const before=await f.store.read('u');f.request.expectedRevision=before.revision;f.request.unitDigest=effectArgsDigest(before);
+  assert.equal(Object.hasOwn(before,'continuityRequired'),false);
+  const goalBytes=await readFile(path.join(f.root,'goals/g/goal.json'));
+  await f.run();const after=await f.store.read('u');
+  assert.equal(after.continuityRequired,true);assert.equal(after.continuity.goalId,'g');
+  assert.equal(after.goalBindings[0].previous.continuityRequiredAbsent,true);
+  for(const key of ['state','accepted','evidence','stages','failures','reviewDecision','reviewedHead','verdict','acceptance','policy','scopeAmendments','scopeApprovalCorrections'])assert.deepEqual(after[key],before[key],key);
+  assert.deepEqual(await readFile(path.join(f.root,'goals/g/goal.json')),goalBytes);
+  assert.equal((await f.run()).duplicate,true);assert.deepEqual(await f.store.read('u'),after);
+ });
+});
+
+test('AC-2 explicit non-true continuity flags remain refused without mutation',async t=>{
+ for(const value of [false,null,0,'',1,'true'])await t.test(JSON.stringify(value),async t=>{
+  const f=await fixture(t);await f.store.update('u',r=>({...r,continuityRequired:value}));
+  const before=await f.store.read('u');f.request.expectedRevision=before.revision;f.request.unitDigest=effectArgsDigest(before);
+  const goalBytes=await readFile(path.join(f.root,'goals/g/goal.json'));
+  await assert.rejects(f.run(),{code:'GOAL_BIND_INVALID'});
+  assert.deepEqual(await f.store.read('u'),before);assert.deepEqual(await readFile(path.join(f.root,'goals/g/goal.json')),goalBytes);
+ });
+});
+
 test('untrusted, stale, already-owned, unfinished and drifted bindings fail without changing the unit or goal',async t=>{
  const cases={
   'operator input':async f=>f.setProof(false),
@@ -75,7 +101,7 @@ test('untrusted, stale, already-owned, unfinished and drifted bindings fail with
  cases['pending external effect']=async f=>{await createLedgerStore(f.root).withLock('u',l=>l.append({event:'intent',seq:1,key:'pending',effect:'git.commit',args:{}}));};
  cases['old native intent even if settled']=async f=>{await createLedgerStore(f.root).withLock('u',async l=>{await l.append({event:'intent',seq:1,key:'native',effect:'session.start',args:{}});await l.append({event:'result',seq:1,key:'native',result:{}});});};
  cases['goal already has custody']=async f=>{await f.goals.transaction('g',g=>({...g,revision:g.revision+1,adoptions:[{unit:'u',sessionId:'existing'}]}));const g=await f.goals.read('g');f.request.goalDigest=effectArgsDigest(g);f.request.expectedGoalRevision=g.revision;};
- for(const [name,mutate]of Object.entries(cases))await t.test(name,async t=>{
-  const f=await fixture(t);await mutate(f);const before=await f.store.read('u'),goalBytes=await readFile(path.join(f.root,'goals/g/goal.json'));await assert.rejects(f.run());assert.deepEqual(await f.store.read('u'),before);assert.deepEqual(await readFile(path.join(f.root,'goals/g/goal.json')),goalBytes);
+ for(const legacy of [false,true])for(const [name,mutate]of Object.entries(cases))await t.test(`${legacy?'legacy':'current'}: ${name}`,async t=>{
+  const f=await fixture(t,{legacy});await mutate(f);const before=await f.store.read('u'),goalBytes=await readFile(path.join(f.root,'goals/g/goal.json'));await assert.rejects(f.run());assert.deepEqual(await f.store.read('u'),before);assert.deepEqual(await readFile(path.join(f.root,'goals/g/goal.json')),goalBytes);
  });
 });

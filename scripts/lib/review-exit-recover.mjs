@@ -25,13 +25,16 @@ async function withGoalReadLock(stateRoot,goalId,action) {
   finally {await guard.close();}
 }
 
-export async function recoverExitedReviewFinalization({stateRoot,store,unit,request,userInputRef,adapters,cwd}) {
+async function recoverReviewFinalization({stateRoot,store,unit,request,userInputRef,adapters,cwd,liveSender}) {
+  const mode=liveSender?'exited-recipient-live-reviewer':'exited-review-finalization';
+  const verifier=liveSender?'verifyExitedReviewRecipientRecovery':'verifyExitedReviewFinalizationRecovery';
+  const effect=liveSender?'unit.review.recipient.recover':'unit.review.exit.recover';
   if(!id(unit)||!request||Object.keys(request).sort().join(',')!=='expectedGoalRevision,expectedRevision,goalDigest,id,ledgerDigest,owner,previousCustodyDigest,provenance,reason,targetDigest,unitDigest'
     || !id(request.id)||![request.expectedRevision,request.expectedGoalRevision].every(n=>Number.isSafeInteger(n)&&n>0)
     || !['unitDigest','goalDigest','ledgerDigest','previousCustodyDigest','targetDigest'].every(key=>sha(request[key]))
     || Object.keys(request.provenance??{}).sort().join(',')!=='digest,path'||!path.isAbsolute(request.provenance.path??'')||!sha(request.provenance.digest)
-    || typeof request.reason!=='string'||!request.reason.trim()||typeof userInputRef!=='string'||!userInputRef.trim())fail('exact exited-review request and original continuation authority required');
-  if(typeof adapters.provider?.verifyExitedReviewFinalizationRecovery!=='function'||typeof adapters.session?.observe!=='function'||typeof adapters.git?.inspectUnit!=='function')fail('trusted exited-review native and authorization verifiers required');
+    || typeof request.reason!=='string'||!request.reason.trim()||typeof userInputRef!=='string'||!userInputRef.trim())fail('exact review-transport request and original continuation authority required');
+  if(typeof adapters.provider?.[verifier]!=='function'||typeof adapters.session?.observe!=='function'||typeof adapters.git?.inspectUnit!=='function')fail('trusted review-transport native and authorization verifiers required');
   const owner=nativeOwner(request.owner);
   if(digest(owner)!==digest(request.owner)||owner.runtime!=='cmux'||await realpath(cwd)!==owner.cwd)fail('exact current replacement caller required');
   const ledgers=createLedgerStore(stateRoot),requestDigest=digest({request,userInputRef});
@@ -43,8 +46,8 @@ export async function recoverExitedReviewFinalization({stateRoot,store,unit,requ
       || !attempt?.endedAt||attempt.result!=='done'||!sha(attempt.outputDigest)||!attempt.submissionId)fail('original submitted Closed managed review required');
     if(record.revision!==request.expectedRevision||digest(record)!==request.unitDigest)fail('original review changed');
     const all=await ledger.read(),prior=all.findLast(row=>row.event==='review-finalization-recovery');
-    if(prior&&(prior.id!==request.id||prior.requestDigest!==requestDigest||prior!==all.at(-1)))fail('original retirement audit differs');
-    const rows=prior?all.slice(0,-1):all;
+    if(prior&&(prior.mode!==mode||prior.id!==request.id||prior.requestDigest!==requestDigest||!liveSender&&prior!==all.at(-1)))fail('original retirement audit differs');
+    const rows=prior?all.slice(0,all.indexOf(prior)):all;
     if(digest(rows)!==request.ledgerDigest)fail('original full ledger changed');
     const intents=rows.filter(row=>row.event==='intent'),intent=intents.at(-1),start=intents[0];
     const submission=rows.findLast(row=>row.event==='submission'&&row.seq===start?.seq&&row.key===start?.key);
@@ -78,23 +81,28 @@ export async function recoverExitedReviewFinalization({stateRoot,store,unit,requ
       const check=async()=>{
         if(hash(await readFile(goal.source.path))!==goal.source.digest||hash(await readFile(request.provenance.path))!==request.provenance.digest
           || digest(await adapters.git.inspectUnit({unit:target.unit,record:target}))!==digest(targetGit))fail('source, evidence or current target changed');
-        for(const previousOwner of [old,recipient]){
+        if(liveSender){
+          const sender=await adapters.session.observe({recipient:{...old,executable:old.worker.executable},nativeOwner:true,cwd:owner.cwd});
+          if(digest(nativeOwner(sender))!==digest(old))fail('original live reviewer identity changed');
+        }
+        for(const previousOwner of liveSender?[recipient]:[old,recipient]){
           const observed=await adapters.session.observe({cwd:owner.cwd,targetCwd:owner.cwd,exitedOwner:previousOwner});
-          if(observed.previousOwnerExited!==true||digest(nativeOwner(observed))!==digest(owner))fail('both original native owners must remain exited and replacement caller exact');
+          if(observed.previousOwnerExited!==true||digest(nativeOwner(observed))!==digest(owner))fail('original destination absence or replacement caller changed');
         }
         await taskPackets(plan);await loadManagedLaunch(start.args);
         const checked=JSON.parse(await readFile(inputPath,'utf8'));
         if(digest(checked)!==digest(input))fail('original submitted stage changed');
       };
       const binding={unit,targetUnit:target.unit,goalId:goal.goal.id,userInputRef,argsDigest:requestDigest,unitDigest:request.unitDigest,goalDigest:request.goalDigest,targetDigest:request.targetDigest,gitTargetDigest:digest(targetGit),
-        ledgerDigest:request.ledgerDigest,previousCustodyDigest:request.previousCustodyDigest,ownerDigest:digest(owner),intentDigest:digest(intent),planDigest:digest(plan),provenanceDigest:request.provenance.digest};
+        ledgerDigest:request.ledgerDigest,previousCustodyDigest:request.previousCustodyDigest,ownerDigest:digest(owner),intentDigest:digest(intent),planDigest:digest(plan),provenanceDigest:request.provenance.digest,...(liveSender?{reviewerState:'live',recipientState:'exited'}:{})};
+      if(prior&&!retiredReviewFinalization({reviewer:record,rows:all,goal}))fail('original audit or trailing observations changed');
       await check();
-      await verifyApprovalInput(adapters.provider,{...binding,effect:'unit.review.exit.recover',reason:request.reason});
-      const proof=await adapters.provider.verifyExitedReviewFinalizationRecovery({...binding,request:structuredClone(request),record:structuredClone(record),target:structuredClone(target),targetGit:structuredClone(targetGit),goal:structuredClone(goal),previousCustody:structuredClone(previous),intent:structuredClone(intent),rows:structuredClone(rows)});
-      if(['taskNeverStarted','receiverSuspended','closed','deliveryCompleted'].some(key=>Object.hasOwn(proof??{},key))||Object.entries(binding).some(([key,value])=>proof?.[key]!==value)||proof.verified!==true||proof.receiverExited!==true||proof.recipientExited!==true||proof.ownerFenced!==true||proof.recipientFenced!==true
-        ||proof.evidenceDigest!==request.provenance.digest||digest(proof.receiver)!==digest(receiver(old))||digest(proof.recipient)!==digest(receiver(recipient)))fail('original native work, authority and both exited owners are unproven');
+      await verifyApprovalInput(adapters.provider,{...binding,effect,reason:request.reason});
+      const proof=await adapters.provider[verifier]({...binding,request:structuredClone(request),record:structuredClone(record),target:structuredClone(target),targetGit:structuredClone(targetGit),goal:structuredClone(goal),previousCustody:structuredClone(previous),intent:structuredClone(intent),rows:structuredClone(rows)});
+      if(['taskNeverStarted','receiverSuspended','closed','deliveryCompleted',...(liveSender?['receiverExited','ownerFenced','recipientFenced']:['receiverLive','receiverIdle','transportFenced'])].some(key=>Object.hasOwn(proof??{},key))||Object.entries(binding).some(([key,value])=>proof?.[key]!==value)||proof.verified!==true||proof.recipientExited!==true||(liveSender?proof.receiverLive!==true||proof.receiverIdle!==true||proof.transportFenced!==true:proof.receiverExited!==true||proof.ownerFenced!==true||proof.recipientFenced!==true)
+        ||proof.evidenceDigest!==request.provenance.digest||digest(proof.receiver)!==digest(receiver(old))||digest(proof.recipient)!==digest(receiver(recipient)))fail(liveSender?'original live reviewer, exited recipient and exact transport fence are unproven':'original native work, authority and both exited owners are unproven');
       await check();
-      const audit={event:'review-finalization-recovery',mode:'exited-review-finalization',id:request.id,unit,targetUnit:target.unit,goalId:goal.goal.id,seq:intent.seq,key:intent.key,effect:intent.effect,
+      const audit={event:'review-finalization-recovery',mode,id:request.id,unit,targetUnit:target.unit,goalId:goal.goal.id,seq:intent.seq,key:intent.key,effect:intent.effect,
         gitTargetDigest:binding.gitTargetDigest,intentDigest:binding.intentDigest,unitDigest:binding.unitDigest,planDigest:binding.planDigest,ledgerDigest:binding.ledgerDigest,sourceDigest:digest(goal.source),previousCustodyDigest:request.previousCustodyDigest,request:structuredClone(request),requestDigest,userInputRef,proof:structuredClone(proof)};
       if(!retiredReviewFinalization({reviewer:record,rows:[...rows,audit],goal}))fail('retirement audit does not preserve the original record');
       assertReviewHeld();assertTargetHeld();goalGuard.assertHeld();
@@ -104,3 +112,7 @@ export async function recoverExitedReviewFinalization({stateRoot,store,unit,requ
     })),{wait:false});
   })).then(()=>receipt);
 }
+
+
+export const recoverExitedReviewFinalization=input=>recoverReviewFinalization({...input,liveSender:false});
+export const recoverExitedReviewRecipient=input=>recoverReviewFinalization({...input,liveSender:true});

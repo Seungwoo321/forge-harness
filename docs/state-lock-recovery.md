@@ -1,0 +1,17 @@
+# Critical-section marker recovery
+
+Use `node scripts/unit.mjs unit lock recover <unit> --request <file> --user-input <ref> --state-root <root> --project-root <project> --adapters <trusted-module>` only after observing the original owner exited and fencing all legacy writers. Recover ledger and unit markers separately when both exist.
+
+The request contains exactly `{kind:'unit'|'ledger',lockDigest:'sha256:…',reason,evidence:{path:<absolute>,digest:'sha256:…'}}`. Digests hash original bytes. Recovery refuses malformed or reserved markers and live, reused or unobservable PIDs. Normal writers retain their marker format and metadata.
+
+`provider.verifyLockRecovery` receives `{purpose:'critical-section-recovery',stateRoot,unit,unitDigest,goalId,goalDigest,kind,lockDigest,userInputRef,argsDigest,evidence,boundary:['ledger','unit'],locks:[{kind,status,digest,owner}],ledgerDigest,previousEffects:[{seq,key,effect,intentDigest,state,resultDigest}]}`. Unit, goal and ledger digests hash raw bytes. Effect digests use `effectArgsDigest`. State is `recorded`, `retired` or `unresolved`.
+
+`provider.verifyUserInput` receives only scalars `{unit,kind,userInputRef,effect:'unit.lock.recover',argsDigest,stateRoot,unitDigest,goalId,goalDigest,lockDigest,ledgerDigest,bindingDigest,reason}`. It returns these unchanged with `verified:true` based on actual original authority. `bindingDigest` binds the complete full-verifier input.
+
+The full verifier returns every input field unchanged plus `verified:true,ownerFenced:true,legacyWritersFenced:true,legacyLeaseAbsent:true,externalEffects:[{seq,key,intentDigest,status,evidence}]`. Exactly one observation per unresolved original intent is required; status is `pending`, `completed`, `not-applied` or `unknown`, and evidence is a nonempty actual observation reference. A close intent without a result remains unresolved even when the unit says Closed. Verify its original arguments through the official native session verifier. Recovery never executes or settles that effect.
+
+The provider must establish original account/native custody, current caller and user authority, complete unchanged records/effects, and absence of original/resumed/legacy writers or leases. An unverified caller assertion is insufficient. It must not launch or close a session while verifying recovery.
+
+Recovery retains original marker bytes in `.abandoned-<digest>`, fsyncs them before unlink, and retains a durable `.recovery-<request-digest>.json` receipt. Replay requires the matching archive and digest. Unit, goal and ledger bytes remain unchanged. Resume the original public reconcile/finalize operation to record verified effect results; do not replace the unit or edit its ledger.
+
+When an original Closed review has a positive recorded delivery receipt and an unresolved original close intent, use `unit finalize <review> --reconcile-only` after marker recovery. This verifies the exact original native close through `session.verify` and records only the original result/close receipt. It does not require the original recipient to be live and cannot send a result, execute close, retry an external effect or create a new intent. Unknown/not-applied native observations stay pending. Immutable packets, original positive delivery receipt, exact close arguments/key and unchanged full review record remain mandatory. Ordinary finalization keeps its execution and custody checks.

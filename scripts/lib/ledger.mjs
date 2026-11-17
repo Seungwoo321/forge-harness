@@ -1,5 +1,6 @@
 import { open, mkdir, readFile, appendFile, rm } from 'node:fs/promises';
 import path from 'node:path';
+import {withStateLockGuard} from './state-lock.mjs';
 import { authorizeEffect, effectDefinition, prepareEffect } from './policy.mjs';
 import { effectArgsDigest } from './approvals.mjs';
 
@@ -61,6 +62,7 @@ export function createLedgerStore(stateRoot) {
 
   async function withLock(unit, action, {wait = true, lockMetadata = {}} = {}) {
     const files = filesFor(unit);
+    return withStateLockGuard(files.lock,'LEDGER',async guard=>{
     await mkdir(files.dir, { recursive: true });
     let lock;
     while (!lock) {
@@ -80,6 +82,7 @@ export function createLedgerStore(stateRoot) {
           catch (error) { if (error.code === 'ENOENT') return []; throw error; }
         },
         async append(record) {
+          guard.assertHeld();
           await appendFile(files.ledger, `${JSON.stringify(record)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'a' });
           const handle = await open(files.ledger, 'r+');
           try { await handle.sync(); } finally { await handle.close(); }
@@ -87,8 +90,10 @@ export function createLedgerStore(stateRoot) {
       });
     } finally {
       await lock.close();
+      guard.assertHeld();
       await rm(files.lock, { force: true });
     }
+    },undefined,{wait});
   }
 
   return Object.freeze({ withLock });

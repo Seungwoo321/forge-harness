@@ -1,5 +1,6 @@
 import { open, mkdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
+import {withStateLockGuard} from './state-lock.mjs';
 
 const schema = 'harness.unit/1';
 const activeStates = new Set([
@@ -133,6 +134,7 @@ export function createUnitStateStore(stateRoot) {
   }
 
   async function withLock(paths, action, lockMetadata = {}) {
+    return withStateLockGuard(paths.lock,'UNIT',async guard=>{
     await mkdir(paths.dir, { recursive: true });
     let lock;
     while (!lock) {
@@ -146,11 +148,13 @@ export function createUnitStateStore(stateRoot) {
     try {
       await lock.writeFile(JSON.stringify({ ...lockMetadata, pid: process.pid }));
       await lock.sync();
-      return await action();
+      return await action(()=>guard.assertHeld());
     } finally {
       await lock.close();
+      guard.assertHeld();
       await rm(paths.lock, { force: true });
     }
+    });
   }
 
   async function readUnlocked(paths, unit) {
@@ -164,7 +168,7 @@ export function createUnitStateStore(stateRoot) {
     return validateRecord(record, unit);
   }
 
-  async function writeUnlocked(paths, record) {
+  async function writeUnlocked(paths, record, assertHeld) {
     tempSequence += 1;
     const temp = `${paths.record}.tmp-${process.pid}-${tempSequence}`;
     let handle;
@@ -174,6 +178,7 @@ export function createUnitStateStore(stateRoot) {
       await handle.sync();
       await handle.close();
       handle = null;
+      assertHeld();
       await rename(temp, paths.record);
       const dir = await open(paths.dir, 'r');
       try { await dir.sync(); } finally { await dir.close(); }
@@ -192,7 +197,7 @@ export function createUnitStateStore(stateRoot) {
 
     async withLock(unit, action, { lockMetadata } = {}) {
       const paths = pathsFor(unit);
-      return await withLock(paths, async () => {
+      return await withLock(paths, async assertHeld => {
         const current = await readUnlocked(paths, unit);
         if (!current) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
         return await action(structuredClone(current));
@@ -202,21 +207,21 @@ export function createUnitStateStore(stateRoot) {
     async create(record) {
       const unit = unitPathPart(record?.unit);
       const paths = pathsFor(unit);
-      return await withLock(paths, async () => {
+      return await withLock(paths, async assertHeld => {
         if (await readUnlocked(paths, unit)) {
           const error = new Error(`unit already exists: ${unit}`);
           error.code = 'UNIT_EXISTS';
           throw error;
         }
         const next = validateRecord({ ...record, revision: 1 }, unit);
-        await writeUnlocked(paths, next);
+        await writeUnlocked(paths, next, assertHeld);
         return next;
       });
     },
 
     async update(unit, mutate, { lockMetadata } = {}) {
       const paths = pathsFor(unit);
-      return await withLock(paths, async () => {
+      return await withLock(paths, async assertHeld => {
         const current = await readUnlocked(paths, unit);
         if (!current) {
           const error = new Error(`unit not found: ${unit}`);
@@ -234,7 +239,7 @@ export function createUnitStateStore(stateRoot) {
           throw new TypeError('update must preserve the unit identity and schema');
         }
         const next = validateRecord({ ...candidate, revision: current.revision + 1 }, unit);
-        await writeUnlocked(paths, next);
+        await writeUnlocked(paths, next, assertHeld);
         return next;
       }, lockMetadata);
     },

@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm, open } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import {acquireContinuityLock} from './continuity-lock.mjs';
+const opaqueIncarnation=`opaque:${randomUUID()}`;
 
 const sessionAdapterContract = 'harness.session-adapter/1';
 const sessionAdapterCapabilities = [
@@ -87,6 +89,7 @@ export function createAdapters({ spawn = nodeSpawn, clock = () => new Date(), id
     throw new TypeError('adapter providers must be functions');
   }
 
+  let selfIdentity;
   const command = (command, args = [], options = {}) => {
       if (typeof command !== 'string' || command.length === 0 || !Array.isArray(args)
         || args.some(argument => typeof argument !== 'string')) {
@@ -256,6 +259,35 @@ export function createAdapters({ spawn = nodeSpawn, clock = () => new Date(), id
 
   return Object.freeze({
     command,
+    stateLock(file,{wait=true}={}) { return acquireContinuityLock(file,{wait,launch:spawn}); },
+    async processIdentity(pid) {
+      if (!Number.isSafeInteger(pid) || pid < 1) throw new TypeError('invalid process id');
+      if (pid === process.pid && selfIdentity) return { ...selfIdentity };
+      try {
+        const result = process.platform === 'win32'
+          ? await command('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+            `$p=Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($p) { $p.StartTime.ToUniversalTime().Ticks } else { exit 1 }`])
+          : await command('ps', ['-p', String(pid), '-o', 'lstart='], { env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } });
+        if (result.exitCode === 0 && result.stdout.trim()) {
+          const identity = { status: 'live', incarnation: `native:${result.stdout.trim()}` };
+          if (pid === process.pid) selfIdentity = identity;
+          return { ...identity };
+        }
+      } catch (error) {
+        if (!['EPERM', 'EACCES', 'ENOENT'].includes(error.code)) throw error;
+      }
+      try { process.kill(pid, 0); } catch (error) {
+        if (error.code === 'ESRCH') return { status: 'gone' };
+        if (error.code !== 'EPERM') throw error;
+        return { status: 'unknown' };
+      }
+      // Sandboxes can reject the setuid process utility. A live foreign PID remains ambiguous, never abandoned.
+      if (pid === process.pid) {
+        selfIdentity = { status: 'live', incarnation: opaqueIncarnation };
+        return { ...selfIdentity };
+      }
+      return { status: 'unknown' };
+    },
     async detach(binary, args, { cwd, logPath }) {
       const log = await open(logPath, 'a', 0o600);
       try {

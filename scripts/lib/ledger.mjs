@@ -102,7 +102,8 @@ export function createLedgerStore(stateRoot) {
 export function sessionEffectRetired(records, intent) {
   return records.some(row => (intent.effect === 'session.start' && row.event === 'session-start-recovery'
     || intent.effect === 'session.deliver' && row.event === 'delivered-rework'
-    || intent.effect === 'session.close' && row.event === 'goal-completion-recovery')
+    || intent.effect === 'session.close' && row.event === 'goal-completion-recovery'
+    || intent.effect === 'session.deliver' && row.event === 'review-finalization-recovery' && row.mode === 'exited-review-finalization' && row.unit === intent.unit)
     && row.seq === intent.seq && row.key === intent.key && row.intentDigest === effectArgsDigest(intent));
 }
 

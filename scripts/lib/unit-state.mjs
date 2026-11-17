@@ -200,7 +200,7 @@ export function createUnitStateStore(stateRoot) {
       return await withLock(paths, async assertHeld => {
         const current = await readUnlocked(paths, unit);
         if (!current) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
-        return await action(structuredClone(current));
+        return await action(structuredClone(current),assertHeld);
       }, lockMetadata);
     },
 

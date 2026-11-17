@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,realpath,mkdir,readFile,writeFile,rm} from 'node:fs/promises';
+import {mkdtemp,realpath,mkdir,readFile,writeFile,rm,open,appendFile} from 'node:fs/promises';
 import path from 'node:path';
 import {tmpdir} from 'node:os';
 import {createUnitStateStore} from './lib/unit-state.mjs';
@@ -10,7 +10,7 @@ import {snapshotGoal} from './lib/continuity-snapshot.mjs';
 import {effectArgsDigest as digest} from './lib/approvals.mjs';
 import {taskDigest} from './lib/session-task.mjs';
 import {prepareEffect} from './lib/policy.mjs';
-import {recoverExitedReviewFinalization} from './lib/review-exit-recover.mjs';
+import {recoverExitedReviewFinalization,recoverExitedReviewRecipient} from './lib/review-exit-recover.mjs';
 import {assertReviewsSettled} from './lib/continuity-custody.mjs';
 import {prepareGoalFinish} from './lib/continuity-finish.mjs';
 import {evaluateAcceptance} from './lib/evidence.mjs';
@@ -163,4 +163,90 @@ test('legacy nested startup worker and native task thread remain exactly bound',
   const rows=structuredClone(f.rows);rows[2].result.worker=f.old.worker;
   await writeFile(file,rows.map(row=>JSON.stringify(row)+'\n').join(''));await f.refreshLedger();
   assert.equal((await f.run()).mode,'exited-review-finalization');
+});
+
+
+async function liveFixture(t) {
+  const f=await fixture(t),original=f.adapters.provider.verifyExitedReviewFinalizationRecovery;
+  f.adapters.session.observe=async input=>{
+    if(input.recipient){assert.equal(input.nativeOwner,true);return structuredClone(f.old);}
+    return {...f.owner,previousOwnerExited:input.exitedOwner?.sessionId===f.recipient.sessionId};
+  };
+  f.adapters.provider.verifyExitedReviewRecipientRecovery=async input=>{
+    const {receiverExited,ownerFenced,recipientFenced,...proof}=await original(input);
+    return {...proof,receiverLive:true,receiverIdle:true,transportFenced:true};
+  };
+  f.adapters.provider.verifyExitedReviewFinalizationRecovery=()=>assert.fail('both-exited verifier used for live sender');
+  f.run=()=>recoverExitedReviewRecipient(f.inputArgs);
+  return f;
+}
+const legacyUnknown=f=>({event:'verification',unit:'review',seq:2,key:f.key,status:'unknown',verify:{code:'SESSION_OBSERVATION_INVALID',message:'cmux terminal is missing or ambiguous'},checked_at:'later'});
+
+test('live sender recovery states endpoint facts accurately and does not claim process fencing/exit or dispatch',async t=>{
+  const f=await liveFixture(t),before=await f.bytes();
+  const requestFile=path.join(f.cwd,'live-request.json');await writeFile(requestFile,JSON.stringify(f.request));
+  const raw=await runUnitCli(['unit','review-recipient-recover','review','--request',requestFile,'--user-input',f.inputArgs.userInputRef],{cwd:f.cwd,stateRoot:f.stateRoot,adapters:f.adapters});
+  const cli=JSON.parse(raw.slice(raw.lastIndexOf('RESULT ')+7));assert.equal(cli.code,0,JSON.stringify(cli));
+  assert.match(cli.summary,/live reviewer.*recipient exit/);
+  const result=cli.recovery;assert.equal(result.mode,'exited-recipient-live-reviewer');
+  assert.equal(result.proof.receiverLive,true);assert.equal(result.proof.receiverIdle,true);assert.equal(result.proof.recipientExited,true);assert.equal(result.proof.transportFenced,true);
+  assert.equal(Object.hasOwn(result.proof,'receiverExited'),false);assert.equal(Object.hasOwn(result.proof,'ownerFenced'),false);
+  assert.deepEqual(await f.bytes(),before);assert.deepEqual((await f.ledger.withLock('review',l=>l.read())).slice(0,4),f.rows);
+});
+
+test('a live original sender still cannot use the unchanged both-exited recovery',async t=>{
+  const f=await liveFixture(t);await assert.rejects(recoverExitedReviewFinalization(f.inputArgs));
+  assert.deepEqual(await f.ledger.withLock('review',l=>l.read()),f.rows);
+});
+
+test('legacy observations after live retirement are retained while current retries stay retired and replay appends nothing',async t=>{
+  const f=await liveFixture(t);await f.run();
+  const file=path.join(f.stateRoot,'units/review/ledger.ndjson');
+  // The legacy writer uses the original PID marker and knows nothing about the new audit event.
+  const marker=await open(path.join(f.stateRoot,'units/review/.ledger.lock'),'wx');
+  await marker.writeFile(JSON.stringify({pid:process.pid}));await marker.close();
+  try{await appendFile(file,JSON.stringify(legacyUnknown(f))+'\n');}finally{await rm(path.join(f.stateRoot,'units/review/.ledger.lock'));}
+  const before=await readFile(file),goal=await f.goals.read('goal');
+  await assertReviewsSettled({stateRoot:f.stateRoot,store:f.store,goal,unit:'change'});
+  await prepareGoalFinish({stateRoot:f.stateRoot,store:f.store,record:await f.store.read('change'),unit:'change',parentRuntime:f.recipient,successor:{approved:true,unit:'next'}});
+  assert.equal((await f.run()).duplicate,true);assert.deepEqual(await readFile(file),before);
+  await assert.rejects(executeEffect({unit:'review',effect:'session.deliver',args:f.args,policy:{goal:{class:'task'},delivery:'none'},context:{explicitUserInstruction:true,productOwned:true},store:f.ledger,adapter:{now:()=> 'time',execute:()=>assert.fail('obsolete route dispatched'),verify:()=>assert.fail('retired result was fabricated')}}),{code:'EFFECT_RETIRED'});
+});
+
+for(const change of ['foreign-key','foreign-unit','completed','result','intent','submission','confirmation','extra-mutation','changed-audit','duplicate-audit'])test(`live retirement rejects suffix/audit ${change}`,async t=>{
+  const f=await liveFixture(t);await f.run();const file=path.join(f.stateRoot,'units/review/ledger.ndjson');
+  let row=legacyUnknown(f);
+  if(change==='foreign-key')row.key='foreign';if(change==='foreign-unit')row.unit='foreign';if(change==='completed')row.status='completed';
+  if(['result','intent','submission','confirmation'].includes(change))row.event=change;
+  if(change==='extra-mutation')row.result={closed:true};
+  if(change==='changed-audit'){
+    const rows=await f.ledger.withLock('review',l=>l.read());rows.at(-1).proof.transportFenced=false;await writeFile(file,rows.map(row=>JSON.stringify(row)+'\n').join(''));
+  }else if(change==='duplicate-audit')row=(await f.ledger.withLock('review',l=>l.read())).at(-1);
+  if(change!=='changed-audit')await appendFile(file,JSON.stringify(row)+'\n');
+  const goal=await f.goals.read('goal');await assert.rejects(assertReviewsSettled({stateRoot:f.stateRoot,store:f.store,goal,unit:'change'}));
+  await assert.rejects(f.run());
+});
+
+for(const change of ['sender-foreign','recipient-live','active-sender','not-fenced','false-exit'])test(`live recipient recovery refuses ${change}`,async t=>{
+  const f=await liveFixture(t),observe=f.adapters.session.observe,verify=f.adapters.provider.verifyExitedReviewRecipientRecovery;
+  if(change==='sender-foreign'||change==='recipient-live')f.adapters.session.observe=async input=>{
+    const value=await observe(input);return input.recipient&&change==='sender-foreign'?{...value,worker:{...value.worker,threadId:'foreign'}}:input.exitedOwner&&change==='recipient-live'?{...value,previousOwnerExited:false}:value;
+  };
+  if(['active-sender','not-fenced','false-exit'].includes(change))f.adapters.provider.verifyExitedReviewRecipientRecovery=async input=>({...await verify(input),...(change==='active-sender'?{receiverIdle:false}:change==='not-fenced'?{transportFenced:false}:{receiverExited:true})});
+  await assert.rejects(f.run());assert.deepEqual(await f.ledger.withLock('review',l=>l.read()),f.rows);
+});
+
+for(const kind of ['.ledger.lock','.lock'])test(`original legacy ${kind} excludes recovery proof until the in-flight writer releases`,async t=>{
+  const f=await liveFixture(t),file=path.join(f.stateRoot,'units/review',kind),held=await open(file,'wx');
+  await held.writeFile(JSON.stringify({pid:process.pid}));await held.sync();await held.close();
+  let proofs=0;f.onProof(()=>{proofs++;});const pending=f.run();
+  await new Promise(resolve=>setTimeout(resolve,50));assert.equal(proofs,0);
+  assert.equal((await f.store.read('review')).revision,1);
+  await rm(file);await pending;assert.equal(proofs,1);
+});
+
+test('live retirement concurrency and mode replay cannot append a second audit or reuse exit authority',async t=>{
+  const f=await liveFixture(t);const results=await Promise.all([f.run(),f.run()]);assert.equal(results.filter(row=>row.duplicate).length,1);
+  const before=await f.ledger.withLock('review',l=>l.read());
+  await assert.rejects(recoverExitedReviewFinalization(f.inputArgs));assert.deepEqual(await f.ledger.withLock('review',l=>l.read()),before);
 });

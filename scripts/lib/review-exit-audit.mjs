@@ -14,7 +14,10 @@ const endpoint=owner=>({runtime:owner.runtime,sessionId:owner.sessionId,incarnat
 
 export function retiredReviewFinalization({reviewer,rows,goal}) {
   const index=rows.findLastIndex(row=>row.event==='review-finalization-recovery');
-  if(index<0 || index!==rows.length-1)return false;
+  if(index<0)return false;
+  const liveSender=rows[index].mode==='exited-recipient-live-reviewer';
+  if(!liveSender&&index!==rows.length-1)return false;
+  if(liveSender&&!rows.slice(index+1).every(row=>legacyRetiredObservation(row,rows[index])))return false;
   const audit=rows[index],prefix=rows.slice(0,index),request=audit.request,proof=audit.proof;
   const intent=prefix.findLast(row=>row.event==='intent'&&row.key===audit.key&&row.seq===audit.seq);
   const plan=reviewer?.sessionFinalization;
@@ -24,7 +27,7 @@ export function retiredReviewFinalization({reviewer,rows,goal}) {
   const previous=[...(goal?.adoptions??[]),...(goal?.rebindings??[]),...(goal?.handovers??[])].find(item=>digest(item)===audit.previousCustodyDigest);
   return reviewer?.kind==='review' && reviewer.state==='Closed' && plan?.mode==='review'
     && plan.owner && plan.recipient && !plan.closeReceipt && !plan.retainedOwner && !plan.sessionStart
-    && audit.mode==='exited-review-finalization' && audit.unit===reviewer.unit && audit.targetUnit===reviewer.targetUnit
+    && (liveSender||audit.mode==='exited-review-finalization') && audit.unit===reviewer.unit && audit.targetUnit===reviewer.targetUnit
     && audit.goalId===reviewer.continuity?.goalId && audit.goalId===goal?.goal.id
     && audit.unitDigest===digest(reviewer) && audit.planDigest===digest(plan) && audit.ledgerDigest===digest(prefix)
     && audit.sourceDigest===digest(goal.source) && previous?.owner && previous.unit===reviewer.targetUnit
@@ -32,13 +35,14 @@ export function retiredReviewFinalization({reviewer,rows,goal}) {
     && audit.requestDigest===digest({request,userInputRef:audit.userInputRef})
     && intent?.effect==='session.deliver' && audit.effect===intent.effect && audit.intentDigest===digest(intent) && digest(intent.args)===digest(originalReviewDeliveryArgs(reviewer))
     && !prefix.some(row=>row.key===intent.key&&row.seq===intent.seq&&['result','submission'].includes(row.event))
-    && proof?.verified===true && proof.receiverExited===true && proof.recipientExited===true && proof.ownerFenced===true && proof.recipientFenced===true
+    && proof?.verified===true && proof.recipientExited===true
+    && (liveSender?proof.receiverLive===true&&proof.receiverIdle===true&&proof.transportFenced===true&&proof.reviewerState==='live'&&proof.recipientState==='exited':proof.receiverExited===true&&proof.ownerFenced===true&&proof.recipientFenced===true)
     && receiver && proof.receiver && proof.recipient && digest(proof.receiver)===digest(receiver) && digest(proof.recipient)===digest(endpoint(previous.owner))
     && /^sha256:[a-f0-9]{64}$/.test(audit.gitTargetDigest??'') && proof.gitTargetDigest===audit.gitTargetDigest
     && proof.unit===reviewer.unit && proof.targetUnit===reviewer.targetUnit && proof.goalId===goal.goal.id && proof.userInputRef===audit.userInputRef
     && proof.goalDigest===request.goalDigest && proof.targetDigest===request.targetDigest && proof.ownerDigest===digest(request.owner)
     && proof.previousCustodyDigest===request.previousCustodyDigest && proof.provenanceDigest===request.provenance.digest
-    && !['taskNeverStarted','receiverSuspended','closed','deliveryCompleted'].some(key=>Object.hasOwn(proof,key))
+    && !['taskNeverStarted','receiverSuspended','closed','deliveryCompleted',...(liveSender?['receiverExited','ownerFenced','recipientFenced']:['receiverLive','receiverIdle','transportFenced'])].some(key=>Object.hasOwn(proof,key))
     && proof.unitDigest===audit.unitDigest && proof.intentDigest===audit.intentDigest && proof.planDigest===audit.planDigest
     && proof.argsDigest===audit.requestDigest && proof.ledgerDigest===audit.ledgerDigest
     && proof.evidenceDigest===request.provenance?.digest;
@@ -55,4 +59,15 @@ export async function verifyRetiredReviewFinalization({stateRoot,reviewer,rows,g
     const {inputDigest,...envelope}=input;
     return inputDigest===attempt.inputDigest&&digest(envelope)===inputDigest;
   }catch{return false;}
+}
+
+
+export function legacyRetiredObservation(row,audit) {
+  return row?.event==='verification'&&row.unit===audit.unit&&row.seq===audit.seq&&row.key===audit.key
+    && ['unknown','uncertain','not-applied'].includes(row.status)
+    && Object.keys(row).every(key=>['event','unit','seq','key','status','verify','checked_at'].includes(key))
+    && typeof row.checked_at==='string'&&row.checked_at.length>0
+    && row.verify?.code==='SESSION_OBSERVATION_INVALID'
+    && ['cmux terminal is missing or ambiguous','result recipient incarnation changed'].includes(row.verify.message)
+    && Object.keys(row.verify).every(key=>['code','message'].includes(key));
 }

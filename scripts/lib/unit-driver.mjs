@@ -1,4 +1,4 @@
-import {recoverExitedReviewFinalization} from './review-exit-recover.mjs';
+import {recoverExitedReviewFinalization,recoverExitedReviewRecipient} from './review-exit-recover.mjs';
 import { recoverStateLock } from './lock-recovery.mjs';
 import { retainedClarificationResume, verifyRetainedClarificationStop } from './goal-acceptance-resume.mjs';
 import { withGoalAcceptanceRecoveryLock } from './goal-acceptance-lock.mjs';
@@ -1680,14 +1680,14 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const goal = await store.create({goal:request.goal,source:request.source,policy:resolved.policy.session});
       return formatCliResult({ code: 0, summary: `Goal ${id} registered`, details: { goal } });
     }
-    if (noun !== 'unit' || !['review-exit-recover', 'lock', 'start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'session-recover', 'session-adopt', 'session-rebind', 'session-handoff', 'session-reassign', 'stopped-owner-recover', 'goal-bind', 'goal-acceptance', 'session-stop', 'session-return', 'policy', 'reopen', 'rework', 'completion-recover', 'delivered-preflight', 'delivered-fence', 'delivered-reconcile', 'delivered-continue'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen|rework|completion-recover|delivered-preflight|delivered-fence|delivered-reconcile|delivered-continue <unit> --request <file>, unit goal-acceptance clarify <unit> --request <file> --user-input <ref>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct|drop <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit session-recover <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
+    if (noun !== 'unit' || !['review-recipient-recover','review-exit-recover', 'lock', 'start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'session-recover', 'session-adopt', 'session-rebind', 'session-handoff', 'session-reassign', 'stopped-owner-recover', 'goal-bind', 'goal-acceptance', 'session-stop', 'session-return', 'policy', 'reopen', 'rework', 'completion-recover', 'delivered-preflight', 'delivered-fence', 'delivered-reconcile', 'delivered-continue'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen|rework|completion-recover|delivered-preflight|delivered-fence|delivered-reconcile|delivered-continue <unit> --request <file>, unit goal-acceptance clarify <unit> --request <file> --user-input <ref>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct|drop <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit session-recover <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
     const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
-    if (subcommand === 'review-exit-recover') {
+    if (['review-exit-recover','review-recipient-recover'].includes(subcommand)) {
       const [unit]=rest;
-      if(rest.length!==1||!unit||!parsed.options.request||!parsed.options['user-input'])usageError('unit review-exit-recover requires <review> --request <file> --user-input <ref>');
+      if(rest.length!==1||!unit||!parsed.options.request||!parsed.options['user-input'])usageError(`unit ${subcommand} requires <review> --request <file> --user-input <ref>`);
       const request=await readJsonFile(path.resolve(cwd,parsed.options.request),'exited review finalization recovery','CLI_USAGE');
-      const recovery=await recoverExitedReviewFinalization({stateRoot:effectiveRoot,store:createUnitStateStore(effectiveRoot),unit,request,userInputRef:parsed.options['user-input'],adapters,cwd});
-      return formatCliResult({code:0,summary:'Original exited review return transport retired without completion or closure',details:{unit,recovery}});
+      const recovery=await (subcommand==='review-recipient-recover'?recoverExitedReviewRecipient:recoverExitedReviewFinalization)({stateRoot:effectiveRoot,store:createUnitStateStore(effectiveRoot),unit,request,userInputRef:parsed.options['user-input'],adapters,cwd});
+      return formatCliResult({code:0,summary:subcommand==='review-recipient-recover'?'Original live reviewer return transport retired after exact original recipient exit':'Original exited review return transport retired without completion or closure',details:{unit,recovery}});
     }
     if (subcommand === 'lock') {
       const [action, unit] = rest;

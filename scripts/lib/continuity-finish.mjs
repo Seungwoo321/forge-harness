@@ -1,3 +1,5 @@
+import {verifyRetiredReviewFinalization} from './review-exit-audit.mjs';
+import {createLedgerStore} from './ledger.mjs';
 import { goalOwner } from './continuity-custody.mjs';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -27,7 +29,9 @@ export async function prepareGoalFinish({stateRoot,store,record,unit,parentRunti
       throw Object.assign(new Error('managed session ownership is not verified'), { code: 'SESSION_OWNER_MISMATCH' });
     for (const review of (continuity.reviews ?? []).filter(item => item.targetUnit === unit)) {
       const reviewed = await store.read(review.unit);
-      if (!reviewed || reviewed.state !== 'Closed' || !reviewed.sessionFinalization?.closeReceipt?.result?.closed)
+      const retired=reviewed?.state==='Closed' && !reviewed.sessionFinalization?.closeReceipt?.result?.closed
+        && await verifyRetiredReviewFinalization({stateRoot,reviewer:reviewed,rows:await createLedgerStore(stateRoot).withLock(review.unit,ledger=>ledger.read(),{wait:false}),goal:continuity});
+      if (!retired && (!reviewed || reviewed.state !== 'Closed' || !reviewed.sessionFinalization?.closeReceipt?.result?.closed))
         throw Object.assign(new Error('independent review session has not returned and closed'), {code:'SESSION_CLOSE_PENDING'});
     }
     const transfer = continuity.transfers?.find(item => item.unit === unit);

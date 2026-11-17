@@ -1,3 +1,4 @@
+import {verifyRetiredReviewFinalization} from './review-exit-audit.mjs';
 import path from 'node:path';
 import { readFile, realpath, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
@@ -64,7 +65,7 @@ export async function assertReviewsSettled({stateRoot,store,goal,unit,suspendedR
       && rows.findLast(row=>row.event === 'intent' && row.effect === 'session.start')?.key === retired.key
       && rows.some(row=>row.event === 'intent' && row.effect === 'session.start' && row.seq === retired.seq
         && row.key === retired.key && effectArgsDigest(row) === retired.intentDigest && sessionEffectRetired(rows,row));
-    if (!nonStarted && (reviewer?.state !== 'Closed' || !reviewer.sessionFinalization?.closeReceipt?.result?.closed))
+    if (!nonStarted && !await verifyRetiredReviewFinalization({stateRoot,reviewer,rows,goal}) && (reviewer?.state !== 'Closed' || !reviewer.sessionFinalization?.closeReceipt?.result?.closed))
       fail('reviewer must return and close before rebind','CUSTODY_CONFLICT');
     if (nonStarted) await verifySource(goal.source);
     if (unresolved(rows))

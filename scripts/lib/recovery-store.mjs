@@ -200,7 +200,7 @@ export function createRecoveryStore(stateRoot) {
   });
 }
 
-export async function resumeUnitFailure({ store, unit, snapshot, validateStopped, validateResolution, inspectTarget, lockMetadata }) {
+export async function resumeUnitFailure({ store, unit, snapshot, validateStopped, validateResolution, inspectTarget, lockMetadata, requireRevalidation = false }) {
   if (!store || typeof store.read !== 'function' || typeof store.update !== 'function') throw new TypeError('Unit Record store is required');
   const record = await store.read(unit);
   if (!record) throw Object.assign(new Error(`unit not found: ${unit}`), { code: 'UNIT_NOT_FOUND' });
@@ -209,8 +209,8 @@ export async function resumeUnitFailure({ store, unit, snapshot, validateStopped
   const resolution = record.retryResolutions?.at(-1);
   const pendingResolution = record.state === 'Stopped' && resolution && !record.retryResumptions?.some(item => item.requestDigest === resolution.requestDigest)
     && record.failures?.at(-1)?.digest === resolution.failureRef.digest;
-  if (pendingResolution && recovery.action === 'resume') {
-    recovery = { ...recovery, action: 'revalidate', resumeState: recovery.state, nextStage: 'gates', reason: 'verified correction of exhausted cause' };
+  if (pendingResolution && recovery.action === 'resume' || requireRevalidation && ['resume', 'rerun-gate', 'revalidate'].includes(recovery.action)) {
+    recovery = { ...recovery, action: 'revalidate', resumeState: recovery.resumeState ?? recovery.state, nextStage: requireRevalidation ? 'implement' : 'gates', reason: requireRevalidation ? 'verified external blocker resolution requires current gates and review' : 'verified correction of exhausted cause' };
   }
   const revalidate = ['rerun-gate', 'revalidate'].includes(recovery.action);
   if (recovery.action !== 'resume' && !revalidate) return { record, recovery };
@@ -264,6 +264,8 @@ export async function resumeUnitFailure({ store, unit, snapshot, validateStopped
             ...(target ? {previousTarget:{head:current.head ?? null,contentFingerprint:current.contentFingerprint ?? null},target:structuredClone(target)} : {}) }] ,
           ...(target ? {head:target.head,contentFingerprint:target.contentFingerprint,...(targetChanged ? {diff:null,handoff:null} : {})} : {}) };
         if (!beforeGates && resumed.state !== 'SelfGated') resumed = transitionRecord(resumed, 'SelfGated');
+        // The retained external owner must integrate the resolved dependency before current gates/review.
+        if (requireRevalidation) resumed = transitionRecord(resumed, 'Implementing');
       }
       return resumed;
     }, { lockMetadata }) : record;

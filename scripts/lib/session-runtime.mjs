@@ -4,7 +4,7 @@ import os from 'node:os';
 import { createCodexTaskTransport } from './codex-task.mjs';
 import { createClaudeTaskTransport } from './claude-task.mjs';
 import { observeTask, observeGoalTask, taskPackets, taskDigest } from './session-task.mjs';
-import { submitNativeGoal, classifyNativeGoalDraft } from './goal-composer.mjs';
+import { submitNativeGoal, classifyNativeGoalDraft, assertNativeGoalReady } from './goal-composer.mjs';
 import { codexComposerMatches, codexComposerWorking, submitCodexComposer } from './codex-composer.mjs';
 import { claudeComposerMatches, submitClaudeComposer } from './claude-composer.mjs';
 import { loadManagedLaunch } from './continuity-launch-io.mjs';
@@ -443,7 +443,7 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
 
   async function exactPendingGoal(input) {
     const submission=input.submission;
-    if (runtime!=='orca' || input.effect!=='session.start' || !input.args.goalPath || !submission?.attempted
+    if (!['cmux','orca'].includes(runtime) || input.effect!=='session.start' || !input.args.goalPath || !submission?.attempted
       || submission.confirmed || submission.readOnly || submission.pendingDraft) return false;
     const {argv,env,goalPrompt}=await configuredLaunch(input.args);
     if(path.basename(argv[0])!=='codex')return false;
@@ -456,8 +456,11 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     if(effectArgsDigest(binding)!==effectArgsDigest(original) || native.state!=='unmaterialized'
       || native.proof?.threadId!==original.threadId || native.proof.queueCount!==0
       || native.proof.account!==env.CODEX_HOME || !native.proof.sqliteRoot) return false;
-    const terminal=(await orca(['terminal','read','--terminal',observed.sessionId,'--screen'],observed.cwd)).terminal;
-    if(classifyNativeGoalDraft(orcaGoalScreen(terminal,observed.sessionId,true),'codex',goalPrompt)!=='exact')return false;
+    const screen=runtime==='cmux'
+      ? await invoke('cmux',['read-screen','--workspace',observed.workspaceId,'--surface',observed.sessionId,'--scrollback'],observed.cwd)
+      : orcaGoalScreen((await orca(['terminal','read','--terminal',observed.sessionId,'--screen'],observed.cwd)).terminal,observed.sessionId,true);
+    assertNativeGoalReady(screen,'codex',{preTurn:native.proof,recovery:true});
+    if(classifyNativeGoalDraft(screen,'codex',goalPrompt)!=='exact')return false;
     return JSON.stringify(await inspect(original.sessionId,input.args.cwd,argv[0]))===JSON.stringify(observed)
       && effectArgsDigest(await transport.observeGoal(request))===effectArgsDigest(native);
   }

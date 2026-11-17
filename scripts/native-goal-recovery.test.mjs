@@ -38,7 +38,7 @@ else if(binary==='lsof')out='n'+process.cwd()+'\\n';
 else if(binary==='cmux'&&args.includes('identify'))out=JSON.stringify({caller:{surface_id:'owner'}});
 else if(binary==='cmux'&&args.includes('new-workspace')){s.exists=true;s.launches++;s.title=args[args.indexOf('--name')+1];save();out='OK workspace:child'}
 else if(binary==='cmux'&&args.includes('tree'))out=JSON.stringify({windows:[{id:'window',workspaces:[{id:'parent',title:'parent',panes:[{surfaces:[{id:'owner',type:'terminal',tty:'tty1'}]}]},...(s.exists?[{id:'child',title:s.title,panes:[{surfaces:[{id:'child',type:'terminal',tty:'tty2'}]}]}]:[])]}]});
-else if(binary==='cmux'&&args.includes('read-screen')){if(s.clearPending){s.clearPending--;if(s.clearPending===0)s.draft='';save();}if(${preTurn}&&!args.includes('--scrollback'))throw Error('fresh view requires full capture');out=s.trust?(${preTurn}?' >_ OpenAI Codex (v${version})\\n':'')+(s.preview||'')+'› '+(s.draft||'Ask Codex to do anything').replaceAll('\\n','\\n  ')+'\\n model · Ready · context\\n ? for shortcuts':'Review plugin hooks and trust';}
+else if(binary==='cmux'&&args.includes('read-screen')){if(s.clearPending){s.clearPending--;if(s.clearPending===0)s.draft='';save();}if(${preTurn}&&!args.includes('--scrollback'))throw Error('fresh view requires full capture');out=s.trust?(${preTurn}?' >_ OpenAI Codex (v${version})\\n':'')+(s.preview||'')+'› '+(s.draft||'Ask Codex to do anything').replaceAll('\\n','\\n  ')+(s.footerMissing?'':('\\n model · '+(s.status||'Ready')+' · context'))+'\\n ? for shortcuts':'Review plugin hooks and trust';}
 else if(binary==='cmux'&&(args.includes('rpc')||args.includes('send-key'))){
  const rows=readFileSync(${JSON.stringify(path.join(stateRoot,'units/review/ledger.ndjson'))},'utf8').trim().split('\\n').map(JSON.parse);
  if(!rows.some(row=>row.event==='submission'&&row.seq===1))throw Error('input preceded durable submission fence');
@@ -61,7 +61,7 @@ process.stdout.write(out);
     const command=(binary,args,options)=>core.command(process.execPath,[stub,binary,...args],options);
     const transport={identity:async observed=>({threadId:observed.pid===11?'owner-thread':(await read()).thread}),
       async observeGoal(request){const s=await read();if(s.native==='wrong')throw Error('different native goal');
-        if(s.native==='absent')return preTurn?{state:'unmaterialized',threadId:s.thread,proof:{platform:`codex/${version}`,threadId:s.thread,sqliteRoot:'/test-account',queueCount:0,defaultLineEditing:s.customKeys!==true}}:{state:'absent',threadId:s.thread,fence:s.thread,notApplied:s.absence};
+        if(s.native==='absent')return preTurn?{state:'unmaterialized',threadId:s.thread,proof:{platform:`codex/${version}`,threadId:s.thread,sqliteRoot:'/test-account',account:s.account??'/test-account',queueCount:s.queueCount??0,defaultLineEditing:s.customKeys!==true}}:{state:'absent',threadId:s.thread,fence:s.thread,notApplied:s.absence};
         return {state:s.native,threadId:s.thread,goal:{threadId:s.thread,status:'active',objective:request.prompt},
           enforcement:{status:'verified',cwd,key:'hook',hash:'hash'},turnId:'turn',activityId:'read-packets',packets:request.packets};}};
     const sessionRunner=createSessionRunner({runtime:'cmux',command,parent:{...owner,workerExecutable:'codex'},launch:()=>['codex'],taskTransport:transport,pollAttempts});
@@ -71,10 +71,10 @@ process.stdout.write(out);
   const request=path.join(cwd,'start.json');await writeFile(request,JSON.stringify({cwd,handoffPath:handoff,handoffDigest:taskDigest(packet),parentRuntime:owner,waitSeconds:0}));
   const run=async()=>parse(await runUnitCli(['unit','session-start','review','--request',request],{cwd,stateRoot,adapters:create()}));
   const ledger=()=>createLedgerStore(stateRoot).withLock('review',l=>l.read());
-  const pending=async(state='slash-loss')=>{
+  const pending=async(state='slash-loss',priorMessage='native goal composer did not settle')=>{
     assert.equal((await run()).code,3);const intent=(await ledger()).find(r=>r.event==='intent'),prompt=(await loadManagedLaunch(intent.args,'cmux')).goalPrompt;
     const binding={runtime:'cmux',sessionId:'child',incarnationId:'tty2:22:START',cwd,executable:'codex',pid:22,threadId:'review-thread',promptDigest:taskDigest(prompt),goalDigest:intent.args.goalDigest,packets:(await taskPackets(intent.args)).map(({path,digest})=>({path,digest}))};
-    await createLedgerStore(stateRoot).withLock('review',async l=>{await l.append({event:'submission',seq:intent.seq,key:intent.key,binding});await l.append({event:'verification',seq:intent.seq,key:intent.key,status:'unknown',verify:{code:'SESSION_TASK_UNVERIFIED',message:'native goal composer did not settle'}});});
+    await createLedgerStore(stateRoot).withLock('review',async l=>{await l.append({event:'submission',seq:intent.seq,key:intent.key,binding});await l.append({event:'verification',seq:intent.seq,key:intent.key,status:'unknown',verify:{code:'SESSION_TASK_UNVERIFIED',message:priorMessage}});});
     const [first,...rest]=prompt.split('\n'),chars=[...` ${first}`],damaged='/goal'+chars.slice(0,128).join('').replaceAll('/','')+chars.slice(128).join('')+(rest.length?'\n'+rest.join('\n'):'');assert.notEqual(damaged,`/goal ${prompt}`);
     await edit({trust:true,draft:state==='exact'?`/goal ${prompt}`:state==='foreign'?damaged+' foreign':damaged});return prompt;
   };
@@ -216,4 +216,31 @@ test('concurrent public reconciliation retains one original intent and one nativ
  const results=await Promise.all([f.run(),f.run()]);assert.ok(results.some(r=>r.code===0),JSON.stringify(results));
  const native=await f.read(),rows=await f.ledger();assert.equal(native.launches,1);assert.equal(native.returns,1);assert.equal(rows.filter(r=>r.event==='submission').length,1);assert.equal(rows.filter(r=>r.event==='intent').length,1);
  assert.equal((await f.run()).code,0);
+});
+
+test('a public marked cmux start with only a generic prior observation verifies its exact pending draft before one Return',async t=>{
+ const f=await fixture(t,true,false,false,'0.169.0');await f.pending('exact','native goal or packet delivery has not started');
+ const results=await Promise.all([f.run(),f.run()]);assert.ok(results.every(r=>[0,3].includes(r.code)),JSON.stringify(results));
+ assert.equal((await f.run()).code,0);const s=await f.read(),rows=await f.ledger();
+ assert.equal(s.launches,1);assert.equal(s.returns,1);assert.deepEqual(s.writes,[]);
+ assert.equal(rows.filter(r=>r.event==='confirmation').length,1);
+ assert.ok(rows.some(r=>r.event==='verification'&&r.verify?.nativeRequestAbsent===true&&r.verify.exactPendingComposer===true));
+});
+
+test('verified pending cmux recovery refuses foreign or clipped drafts, changed native identity, nonempty queues and confirmation',async t=>{
+ for(const mode of ['foreign','clipped','identity','queue','account','confirmation','damaged','working','unknown','footer','modal'])await t.test(mode,async t=>{
+  const f=await fixture(t,true,false,false,'0.169.0'),prompt=await f.pending(mode==='foreign'?'foreign':mode==='damaged'?'slash-loss':'exact','native goal or packet delivery has not started');
+  if(mode==='clipped')await f.edit({draft:'/goal '+prompt.slice(30)});
+  if(mode==='identity')await f.edit({thread:'replacement-thread'});
+  if(mode==='queue')await f.edit({queueCount:1});
+  if(mode==='account')await f.edit({account:'/different-account'});
+  if(mode==='working')await f.edit({status:'Working'});
+  if(mode==='unknown')await f.edit({status:'Unknown'});
+  if(mode==='footer')await f.edit({footerMissing:true});
+  if(mode==='modal')await f.edit({preview:'Review plugin hooks and trust\n'});
+  if(mode==='confirmation')await createLedgerStore(f.stateRoot).withLock('review',async l=>{const original=(await l.read()).find(r=>r.event==='submission');await l.append({...original,event:'confirmation'});});
+  assert.equal((await f.run()).code,3);const s=await f.read();assert.equal(s.returns,0);assert.deepEqual(s.writes,[]);assert.equal(s.launches,1);
+  const rows=await f.ledger();assert.equal(rows.filter(r=>r.event==='verification'&&r.verify?.exactPendingComposer===true).length,0);
+  assert.equal(rows.filter(r=>r.event==='confirmation').length,mode==='confirmation'?1:0);
+ });
 });

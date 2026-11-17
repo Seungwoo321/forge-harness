@@ -384,7 +384,9 @@ test('rebind refuses live or unknown old owner, foreign identity, stale bindings
 
 test('concurrent exact recovery commits once; conflicting recovery remains stale',async t=>{
   const f=await restarted(t),request=await f.request();
-  const results=await Promise.all([f.rebind(request),f.rebind(request)]);
+  const file=path.join(f.cwd,`${request.id}.json`);await writeFile(file,JSON.stringify(request));
+  const rebind=()=>f.run(['session-rebind','change','--request',file,'--user-input','native-rebind-message']);
+  const results=await Promise.all([rebind(),rebind()]);
   assert.ok(results.every(r=>r.code===0),JSON.stringify(results));assert.equal((await f.goals.read('goal')).rebindings.length,1);
   assert.equal((await f.rebind({...request,id:'conflict'})).error,'CUSTODY_CONFLICT');
 });

@@ -48,7 +48,7 @@ export async function createRuntimeAdapters({ cwd, adapters, options, argv }) {
   };
   if (!adopting && (custody?.goalPath || custody?.policyDigest)) observationPolicy = await custodyPolicy(custody);
   let recipientPolicy = record.kind === 'review' ? await custodyPolicy(goalOwner(goal,record.targetUnit)) : observationPolicy;
-  if(positional[1]==='session-recover' && goal?.handovers?.some(item=>item.suspendedReviews?.some(review=>review.unit===unit))) {
+  if(positional[1]==='session-recover' && goal?.handovers?.some(item=>[...(item.suspendedReviews??[]),...(item.exitedReviews??[])].some(review=>review.unit===unit))) {
     const rows=await createLedgerStore(stateRoot).withLock(unit,ledger=>ledger.read());
     const intent=rows.findLast(row=>row.event==='intent' && row.effect==='session.start');
     if(!intent)throw new TypeError('original reviewer startup is unavailable');
@@ -70,8 +70,9 @@ export async function createRuntimeAdapters({ cwd, adapters, options, argv }) {
     return policy.provider === 'codex' ? {CODEX_HOME:policy.account} : {CLAUDE_CONFIG_DIR:policy.account};
   };
   const suspendedReviewerEnvs={};
-  const suspendedReviews=['session-handoff','session-reassign'].includes(positional[1]) ? request.suspendedReviews??[]
-    : positional[1]==='session-recover' ? goal?.handovers?.findLast(item=>item.unit===record.targetUnit)?.suspendedReviews??[] : [];
+  const reviewHandover=goal?.handovers?.findLast(item=>item.unit===record.targetUnit);
+  const suspendedReviews=['session-handoff','session-reassign'].includes(positional[1]) ? [...(request.suspendedReviews??[]),...(request.exitedReviews??[])]
+    : positional[1]==='session-recover' ? [...(reviewHandover?.suspendedReviews??[]),...(reviewHandover?.exitedReviews??[])] : [];
   for(const review of suspendedReviews){
     const rows=await createLedgerStore(stateRoot).withLock(review.unit,ledger=>ledger.read());
     const intent=rows.findLast(row=>row.event==='intent' && row.effect==='session.start');

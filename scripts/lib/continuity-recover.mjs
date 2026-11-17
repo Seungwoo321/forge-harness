@@ -74,14 +74,15 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
       const submission=rows.findLast(row=>row.event==='submission' && row.seq===intent.seq && row.key===intent.key);
       const receiver=rows.findLast(row=>row.event==='receiver' && row.seq===intent.seq && row.key===intent.key);
       const suspended=review?suspendedReviewHandoff(goal,record,intent,submission,rows):null;
-      const verifier=suspended?'verifySuspendedReviewRecovery':'verifySessionStartRecovery';
+      const exitedReview=suspended?.suspension.ownerState==='exited';
+      const verifier=suspended?(exitedReview?'verifyExitedReviewRecovery':'verifySuspendedReviewRecovery'):'verifySessionStartRecovery';
       if(typeof adapters.provider?.[verifier]!=='function')fail('trusted startup recovery verifier is required','ADAPTER_MISSING');
       const observeSuspension=async()=>{
         if(!suspended)return;
-        const observed=await adapters.session?.observe?.({cwd:intent.args.cwd,targetCwd:intent.args.cwd,suspendedOwner:suspended.suspension.owner});
+        const observed=await adapters.session?.observe?.({cwd:intent.args.cwd,targetCwd:intent.args.cwd,[exitedReview?'exitedOwner':'suspendedOwner']:suspended.suspension.owner});
         const expected=goalOwner(goal,record.targetUnit)?.owner;
         const actual=observed && nativeOwner(observed);
-        if(observed?.previousOwnerSuspended!==true || !expected || effectArgsDigest(actual)!==effectArgsDigest(expected))fail('suspended reviewer or replacement changed','SESSION_RECOVERY_UNPROVEN');
+        if(observed?.[exitedReview?'previousOwnerExited':'previousOwnerSuspended']!==true || !expected || effectArgsDigest(actual)!==effectArgsDigest(expected))fail('suspended reviewer or replacement changed','SESSION_RECOVERY_UNPROVEN');
       };
       await observeSuspension();
       if (!suspended && typeof adapters.session?.verify === 'function') {
@@ -95,7 +96,7 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
         submissionDigest:effectArgsDigest(submission ?? null),unitDigest:effectArgsDigest(record),goalDigest:effectArgsDigest(goal),
         nextArgsDigest:effectArgsDigest(nextArgs),provenanceDigest:request.provenance.digest,
         ...(settleOnly?{targetDigest:effectArgsDigest(targetRecord)}:{}),
-        ...(suspended?{suspensionDigest:effectArgsDigest(suspended.suspension),handoverDigest:effectArgsDigest(suspended.handover)}:{})};
+        ...(suspended?{[exitedReview?'reviewExitDigest':'suspensionDigest']:effectArgsDigest(suspended.suspension),handoverDigest:effectArgsDigest(suspended.handover)}:{})};
       if (previous && ['unitDigest','goalDigest','targetDigest'].some(key=>binding[key]!==previous.proof[key]))
         fail('settled reviewer or target changed','CONTINUITY_STALE');
       await verifyApprovalInput(adapters.provider,{...binding,effect:'unit.session.recover',reason:request.reason});
@@ -103,9 +104,9 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
       // It must not submit input, clear a goal, cancel work, terminate a receiver or infer success from the request.
       const proof=await adapters.provider[verifier]({...binding,request:structuredClone(request),intent:structuredClone(intent),
         submission:structuredClone(submission ?? null),original:structuredClone(original),goal:structuredClone(goal),nextArgs:structuredClone(nextArgs),
-        ...(settleOnly?{settleOnly:true,target:structuredClone(targetRecord)}:{}),...(suspended?{handover:structuredClone(suspended.handover),suspension:structuredClone(suspended.suspension)}:{})});
+        ...(settleOnly?{settleOnly:true,target:structuredClone(targetRecord)}:{}),...(suspended?{handover:structuredClone(suspended.handover),[exitedReview?'reviewExit':'suspension']:structuredClone(suspended.suspension)}:{})});
       if (proof?.verified!==true || Object.entries(binding).some(([key,value])=>proof[key]!==value)
-        || (suspended ? proof.receiverSuspended!==true || proof.taskNeverStarted!==undefined : proof.taskNeverStarted!==true || proof.receiverStopped!==true || proof.queueCancelled!==true)
+        || (suspended ? proof[exitedReview?'receiverExited':'receiverSuspended']!==true || proof.taskNeverStarted!==undefined : proof.taskNeverStarted!==true || proof.receiverStopped!==true || proof.queueCancelled!==true)
         || !text(proof.receiver?.sessionId) || !text(proof.receiver?.incarnationId) || !text(proof.receiver?.threadId)
         || !Number.isSafeInteger(proof.receiver?.pid) || proof.receiver.pid<1
         || proof.receiver.runtime!==selectExecutionPolicy(original.policy,intent.args.role).runtime
@@ -123,7 +124,7 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
       await observeSuspension();
       if (previous) {receipt={...previous,duplicate:true};return goal;}
       receipt={event:'session-start-recovery',unit,id:request.id,seq:intent.seq,key:intent.key,request:structuredClone(request),userInputRef,requestDigest,
-        ...(suspended?{mode:'suspended-handoff'}:{}),intentDigest:binding.intentDigest,proof:structuredClone(proof),sessionHistoryLength:record.sessionHistory?.length ?? 0,nextArgs,nextKey:nextArgs?prepareEffect('session.start',nextArgs).key:null,
+        ...(suspended?{mode:exitedReview?'exited-handoff':'suspended-handoff'}:{}),intentDigest:binding.intentDigest,proof:structuredClone(proof),sessionHistoryLength:record.sessionHistory?.length ?? 0,nextArgs,nextKey:nextArgs?prepareEffect('session.start',nextArgs).key:null,
         ...(settleOnly?{settled:true,nextAttempt,goalId:goal.goal.id,targetUnit:record.targetUnit,source:structuredClone(goal.source)}:{})};
       await ledger.append(receipt);
       return goal;

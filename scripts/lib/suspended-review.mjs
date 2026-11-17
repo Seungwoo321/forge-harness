@@ -12,23 +12,25 @@ const id = value => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value ?? '') && !['.','.
 const sha = value => /^sha256:[a-f0-9]{64}$/.test(value ?? '');
 
 // Startup locks a reviewer before its target. Nonblocking ledger acquisition avoids the reverse-order wait.
-export async function withSuspendedReviewLocks({stateRoot,store,entries}, action) {
-  if (!Array.isArray(entries) || new Set(entries.map(item=>item?.unit)).size!==entries.length
-    || entries.some(item=>!item || Object.keys(item).sort().join(',')!=='ledgerDigest,owner,unit,unitDigest'
-      || !id(item.unit) || !sha(item.unitDigest) || !sha(item.ledgerDigest))) fail('exact suspended reviewer inventory required');
-  const sorted=[...entries].sort((a,b)=>a.unit.localeCompare(b.unit));
+export async function withSuspendedReviewLocks({stateRoot,store,entries,exitedEntries=[]}, action) {
+  if(!Array.isArray(entries)||!Array.isArray(exitedEntries))fail('exact reviewer inventories required');
+  const listed=[...entries.map(entry=>({entry,exited:false})),...exitedEntries.map(entry=>({entry,exited:true}))];
+  if(new Set(listed.map(({entry})=>entry?.unit)).size!==listed.length
+    || listed.some(({entry})=>!entry || Object.keys(entry).sort().join(',')!=='ledgerDigest,owner,unit,unitDigest'
+      || !id(entry.unit) || !sha(entry.unitDigest) || !sha(entry.ledgerDigest)))fail('exact disjoint reviewer inventory required');
+  const sorted=listed.sort((a,b)=>a.entry.unit.localeCompare(b.entry.unit));
   const lock=async(index,locked)=> index===sorted.length ? action(locked)
-    : createLedgerStore(stateRoot).withLock(sorted[index].unit,async ledger=>store.withLock(sorted[index].unit,async record=>{
-      const rows=await ledger.read(),entry=sorted[index];
-      if(digest(record)!==entry.unitDigest || digest(rows)!==entry.ledgerDigest)fail('suspended reviewer snapshot changed');
-      return lock(index+1,[...locked,{entry,record,rows}]);
+    : createLedgerStore(stateRoot).withLock(sorted[index].entry.unit,async ledger=>store.withLock(sorted[index].entry.unit,async record=>{
+      const rows=await ledger.read(),{entry,exited}=sorted[index];
+      if(digest(record)!==entry.unitDigest || digest(rows)!==entry.ledgerDigest)fail('reviewer snapshot changed');
+      return lock(index+1,[...locked,{entry,record,rows,exited}]);
     }),{wait:false});
   return lock(0,[]);
 }
 
 export async function verifySuspendedReviews({lockedReviews,goal,target,owner,adapters}) {
   const audited=[];
-  for(const {entry,record,rows} of lockedReviews){
+  for(const {entry,record,rows,exited} of lockedReviews){
     if(record.kind!=='review' || record.state!=='InReview' || record.targetUnit!==target.unit
       || record.continuity?.goalId!==goal.goal.id || record.sessionFinalization || record.deliveryPlan
       || record.verdict || record.stages?.length || (goal.reviews??[]).some(item=>item.unit===record.unit))
@@ -57,19 +59,19 @@ export async function verifySuspendedReviews({lockedReviews,goal,target,owner,ad
     if(original.goal.id!==goal.goal.id || digest(original.source)!==digest(goal.source)
       || selectExecutionPolicy(original.policy,'review').provider!==path.basename(old.worker.executable))
       fail('suspended reviewer belongs to another goal or execution policy');
-    const observed=await adapters.session.observe({cwd:owner.cwd,targetCwd:owner.cwd,suspendedOwner:old});
-    if(observed.previousOwnerSuspended!==true || digest(nativeOwner(observed))!==digest(owner))fail('reviewer suspension or replacement changed');
+    const observed=await adapters.session.observe({cwd:owner.cwd,targetCwd:owner.cwd,[exited?'exitedOwner':'suspendedOwner']:old});
+    if(observed[exited?'previousOwnerExited':'previousOwnerSuspended']!==true || digest(nativeOwner(observed))!==digest(owner))fail('reviewer suspension or replacement changed');
     audited.push({unit:record.unit,unitDigest:entry.unitDigest,ledgerDigest:entry.ledgerDigest,owner:old,
       seq:intent.seq,key:intent.key,intentDigest:digest(intent),submissionDigest:digest(submission),
-      targetDigest:digest(target),sourceDigest:digest(goal.source)});
+      targetDigest:digest(target),sourceDigest:digest(goal.source),...(exited?{ownerState:'exited'}:{})});
   }
   return audited;
 }
 
 export function suspendedReviewHandoff(goal,record,intent,submission,rows){
   const handover=(goal.handovers??[]).findLast(item=>item.unit===record.targetUnit
-    && item.suspendedReviews?.some(review=>review.unit===record.unit));
-  const suspension=handover?.suspendedReviews.find(item=>item.unit===record.unit);
+    && [...(item.suspendedReviews??[]),...(item.exitedReviews??[])].some(review=>review.unit===record.unit));
+  const suspension=handover && [...(handover.suspendedReviews??[]),...(handover.exitedReviews??[])].find(item=>item.unit===record.unit);
   if(!suspension)return null;
   if(suspension.unitDigest!==digest(record) || suspension.ledgerDigest!==digest(rows)
     || suspension.key!==intent.key || suspension.seq!==intent.seq || suspension.intentDigest!==digest(intent)

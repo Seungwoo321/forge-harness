@@ -161,3 +161,43 @@ test('AC-8 absence, authority and native failures cannot be replaced by an exite
   assert.notEqual((await f.reassign()).code,0);assert.deepEqual(await f.goals.read('goal'),before);
  });
 });
+
+
+async function exitedReviewerFixture(t){
+ const f=exitedOwner(await suspendedReviewerFixture(t));let absent=true;
+ const observe=f.adapters.session.observe;
+ f.adapters.session.observe=async input=>input.exitedOwner?.sessionId==='old-review'?{...f.replacement,previousOwnerExited:absent}:input.suspendedOwner?.sessionId==='old-review'?{...f.replacement,previousOwnerSuspended:false}:observe(input);
+ f.request.exitedReviews=f.request.suspendedReviews;delete f.request.suspendedReviews;
+ f.adapters.provider.verifyExitedReviewRecovery=async input=>{
+  const {request,intent,submission,original,goal,nextArgs,handover,reviewExit,...scalar}=input;
+  return {...scalar,verified:true,receiverExited:true,receiver:submission.binding,evidenceDigest:request.provenance.digest};
+ };
+ return {...f,restoreReviewer:()=>{absent=false;}};
+}
+test('AC-9 distinct exited-review audit preserves actual work and reserves the same review with no suspension or non-start claim',async t=>{
+ const f=await exitedReviewerFixture(t),before=await readFile(path.join(f.stateRoot,'units/review/unit.json'));
+ const reassigned=await f.reassign();assert.equal(reassigned.code,0,JSON.stringify(reassigned));
+ const handover=(await f.goals.read('goal')).handovers[0];assert.equal(handover.suspendedReviews.length,0);assert.equal(handover.exitedReviews[0].ownerState,'exited');
+ assert.deepEqual(await f.ledger.withLock('review',l=>l.read()),f.rows);
+ const recovered=await f.recover();assert.equal(recovered.code,0,JSON.stringify(recovered));
+ const reservation=(await f.ledger.withLock('review',l=>l.read())).findLast(row=>row.event==='session-start-recovery');
+ assert.equal(reservation.mode,'exited-handoff');assert.equal(reservation.proof.receiverExited,true);assert.equal(reservation.proof.receiverSuspended,undefined);assert.equal(reservation.proof.taskNeverStarted,undefined);
+ assert.deepEqual(await readFile(path.join(f.stateRoot,'units/review/unit.json')),before);
+ assert.equal((await f.start()).code,0);assert.equal((await f.goals.read('goal')).reviews[0].attempt,2);
+});
+test('AC-10 exited-review recovery cannot reuse suspension, claim non-start, ignore resumed native work or duplicate inventory',async t=>{
+ for(const scenario of ['live-review','duplicate-inventory','missing-verifier','false-suspension','false-non-start','resumed-after-handoff','resumed-in-callback'])await t.test(scenario,async t=>{
+  const f=await exitedReviewerFixture(t);
+  if(scenario==='live-review')f.restoreReviewer();
+  if(scenario==='duplicate-inventory')f.request.suspendedReviews=f.request.exitedReviews;
+  if(['live-review','duplicate-inventory'].includes(scenario)){assert.notEqual((await f.reassign()).code,0);return;}
+  assert.equal((await f.reassign()).code,0);
+  if(scenario==='missing-verifier')delete f.adapters.provider.verifyExitedReviewRecovery;
+  if(scenario==='resumed-after-handoff')f.restoreReviewer();
+  const verify=f.adapters.provider.verifyExitedReviewRecovery;
+  if(['false-suspension','false-non-start','resumed-in-callback'].includes(scenario))f.adapters.provider.verifyExitedReviewRecovery=async input=>{
+   const proof=await verify(input);if(scenario==='false-suspension'){delete proof.receiverExited;proof.receiverSuspended=true;}else if(scenario==='false-non-start')proof.taskNeverStarted=true;else f.restoreReviewer();return proof;
+  };
+  const before=await f.ledger.withLock('review',l=>l.read());assert.notEqual((await f.recover()).code,0);assert.deepEqual(await f.ledger.withLock('review',l=>l.read()),before);
+ });
+});

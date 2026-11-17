@@ -115,7 +115,7 @@ export async function recoverStoppedOwner({stateRoot,store,unit,request,userInpu
       const before = prior ? originalGoal(goal,prior,false) : goal;
       const verified = await verifyStoppedOwner({stateRoot,store,record,goal:before,rows,request,userInputRef,adapters});
       if (prior) {receipt = {...prior,duplicate:true}; return goal;}
-      const retiredCustodyDigests = ['adoptions','rebindings','bootstraps','transfers'].flatMap(field => (goal[field] ?? [])
+      const retiredCustodyDigests = ['adoptions','rebindings','handovers','bootstraps','transfers'].flatMap(field => (goal[field] ?? [])
         .filter(item => field === 'transfers' ? item.successor === unit : item.unit === unit).map(effectArgsDigest));
       receipt = {id:request.id,unit,kind:'external-closure-observation',request:structuredClone(request),userInputRef,requestDigest,
         ...verified,retiredCustodyDigests,goalRevision:goal.revision+1,blocker:goal.goal.blocker,

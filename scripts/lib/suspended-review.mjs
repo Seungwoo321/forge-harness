@@ -1,0 +1,79 @@
+import { readFile } from 'node:fs/promises';
+import { selectExecutionPolicy } from './continuity-decision.mjs';
+import path from 'node:path';
+import { effectArgsDigest as digest } from './approvals.mjs';
+import { nativeOwner } from './continuity-custody.mjs';
+import { createLedgerStore } from './ledger.mjs';
+import { prepareEffect } from './policy.mjs';
+import { loadManagedLaunch } from './continuity-launch-io.mjs';
+
+const fail = message => { throw Object.assign(new Error(message), {code:'CUSTODY_CONFLICT'}); };
+const id = value => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value ?? '') && !['.','..'].includes(value);
+const sha = value => /^sha256:[a-f0-9]{64}$/.test(value ?? '');
+
+// Startup locks a reviewer before its target. Nonblocking ledger acquisition avoids the reverse-order wait.
+export async function withSuspendedReviewLocks({stateRoot,store,entries}, action) {
+  if (!Array.isArray(entries) || new Set(entries.map(item=>item?.unit)).size!==entries.length
+    || entries.some(item=>!item || Object.keys(item).sort().join(',')!=='ledgerDigest,owner,unit,unitDigest'
+      || !id(item.unit) || !sha(item.unitDigest) || !sha(item.ledgerDigest))) fail('exact suspended reviewer inventory required');
+  const sorted=[...entries].sort((a,b)=>a.unit.localeCompare(b.unit));
+  const lock=async(index,locked)=> index===sorted.length ? action(locked)
+    : createLedgerStore(stateRoot).withLock(sorted[index].unit,async ledger=>store.withLock(sorted[index].unit,async record=>{
+      const rows=await ledger.read(),entry=sorted[index];
+      if(digest(record)!==entry.unitDigest || digest(rows)!==entry.ledgerDigest)fail('suspended reviewer snapshot changed');
+      return lock(index+1,[...locked,{entry,record,rows}]);
+    }),{wait:false});
+  return lock(0,[]);
+}
+
+export async function verifySuspendedReviews({lockedReviews,goal,target,owner,adapters}) {
+  const audited=[];
+  for(const {entry,record,rows} of lockedReviews){
+    if(record.kind!=='review' || record.state!=='InReview' || record.targetUnit!==target.unit
+      || record.continuity?.goalId!==goal.goal.id || record.sessionFinalization || record.deliveryPlan
+      || record.verdict || record.stages?.length || (goal.reviews??[]).some(item=>item.unit===record.unit))
+      fail('only unregistered reviewers without a submitted stage can be suspended');
+    const intent=rows.findLast(row=>row.event==='intent' && row.effect==='session.start');
+    const submission=rows.findLast(row=>row.event==='submission' && row.key===intent?.key && row.seq===intent?.seq);
+    const receiver=submission?.binding;
+    const receivers=rows.filter(row=>['receiver','confirmation'].includes(row.event) && row.key===intent?.key && row.seq===intent?.seq);
+    const old=nativeOwner(entry.owner);
+    if(digest(old)!==digest(entry.owner) || old.cwd!==owner.cwd || old.sessionId===owner.sessionId
+      || old.worker.pid===owner.worker.pid || old.worker.threadId===owner.worker.threadId
+      || !intent || !submission || intent.args?.unit!==record.unit || intent.args.role!=='review'
+      || intent.args.targetDigest!==digest(target) || prepareEffect('session.start',intent.args).key!==intent.key
+      || rows.some(row=>row.event==='intent' && row!==intent)
+      || rows.some(row=>['result','session-start-recovery'].includes(row.event))
+      || ['runtime','sessionId','incarnationId','cwd'].some(key=>old[key]!==receiver[key])
+      || ['pid','threadId','executable'].some(key=>old.worker[key]!==receiver[key]))
+      fail('original reviewer startup or exact native identity changed');
+    for(const row of receivers){
+      if(['runtime','sessionId','incarnationId','cwd'].some(key=>row.binding?.[key]!==old[key])
+        || ['pid','threadId','executable'].some(key=>(row.event==='confirmation' || row.binding?.[key]!==undefined) && row.binding?.[key]!==old.worker[key]))
+        fail('original reviewer receiver or confirmation changed');
+    }
+    await loadManagedLaunch(intent.args);
+    const original=JSON.parse(await readFile(intent.args.goalPath,'utf8'));
+    if(original.goal.id!==goal.goal.id || digest(original.source)!==digest(goal.source)
+      || selectExecutionPolicy(original.policy,'review').provider!==path.basename(old.worker.executable))
+      fail('suspended reviewer belongs to another goal or execution policy');
+    const observed=await adapters.session.observe({cwd:owner.cwd,targetCwd:owner.cwd,suspendedOwner:old});
+    if(observed.previousOwnerSuspended!==true || digest(nativeOwner(observed))!==digest(owner))fail('reviewer suspension or replacement changed');
+    audited.push({unit:record.unit,unitDigest:entry.unitDigest,ledgerDigest:entry.ledgerDigest,owner:old,
+      seq:intent.seq,key:intent.key,intentDigest:digest(intent),submissionDigest:digest(submission),
+      targetDigest:digest(target),sourceDigest:digest(goal.source)});
+  }
+  return audited;
+}
+
+export function suspendedReviewHandoff(goal,record,intent,submission,rows){
+  const handover=(goal.handovers??[]).findLast(item=>item.unit===record.targetUnit
+    && item.suspendedReviews?.some(review=>review.unit===record.unit));
+  const suspension=handover?.suspendedReviews.find(item=>item.unit===record.unit);
+  if(!suspension)return null;
+  if(suspension.unitDigest!==digest(record) || suspension.ledgerDigest!==digest(rows)
+    || suspension.key!==intent.key || suspension.seq!==intent.seq || suspension.intentDigest!==digest(intent)
+    || suspension.submissionDigest!==digest(submission) || suspension.sourceDigest!==digest(goal.source))
+    fail('suspended reviewer handoff audit changed');
+  return {handover,suspension};
+}

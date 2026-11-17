@@ -14,7 +14,8 @@ const unresolved = rows => rows.some(row=>row.event === 'intent' && !sessionEffe
 export function goalOwner(goal, unit) {
   const retired = new Set((goal?.stoppedOwnerRecoveries ?? []).flatMap(item => item.retiredCustodyDigests));
   const current = item => item.unit === unit && !retired.has(effectArgsDigest(item));
-  return goal?.rebindings?.findLast(current) ?? goal?.adoptions?.findLast(current)
+  const replacements = [...(goal?.handovers ?? []),...(goal?.rebindings ?? [])].filter(current).sort((a,b)=>a.goalRevision-b.goalRevision);
+  return replacements.at(-1) ?? goal?.adoptions?.findLast(current)
     ?? goal?.bootstraps?.findLast(current) ?? goal?.transfers?.findLast(item => item.successor === unit && !retired.has(effectArgsDigest(item)));
 }
 
@@ -36,7 +37,7 @@ async function verifySource(source) {
     || `sha256:${createHash('sha256').update(await readFile(source.path)).digest('hex')}` !== source.digest)
     fail('canonical source changed', 'CUSTODY_STALE');
 }
-export async function assertReviewsSettled({stateRoot,store,goal,unit}) {
+export async function assertReviewsSettled({stateRoot,store,goal,unit,suspendedReviews=[]}) {
   const target = await store.read(unit);
   const reviews = new Set((goal.reviews ?? []).filter(item=>item.targetUnit === unit).map(item=>item.unit));
   for (const entry of await readdir(path.join(stateRoot,'units'),{withFileTypes:true})) {
@@ -45,6 +46,7 @@ export async function assertReviewsSettled({stateRoot,store,goal,unit}) {
     if (candidate?.kind === 'review' && candidate.targetUnit === unit && candidate.continuity?.goalId === goal.goal.id) reviews.add(candidate.unit);
   }
   for (const id of reviews) {
+    if (suspendedReviews.some(item=>item.unit===id)) continue;
     const reviewer = await store.read(id);
     let rows;
     try {
@@ -101,7 +103,7 @@ export async function adoptGoalSession({stateRoot,store,unit,request,userInputRe
       let previous;
       if (rebind) {
         const current = goalOwner(goal,unit);
-        previous = prior ? [...(goal.adoptions ?? []),...(goal.rebindings ?? [])].find(item=>effectArgsDigest(item) === request.previousCustodyDigest) : current;
+        previous = prior ? [...(goal.adoptions ?? []),...(goal.rebindings ?? []),...(goal.handovers ?? [])].find(item=>effectArgsDigest(item) === request.previousCustodyDigest) : current;
         if (current?.ownership !== 'existing' || previous?.ownership !== 'existing' || previous.unit !== unit
           || effectArgsDigest(previous) !== request.previousCustodyDigest)
           fail('previous existing custody changed','CUSTODY_CONFLICT');

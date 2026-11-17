@@ -40,6 +40,8 @@ If a command leaves the unit `Blocked`, keep this owning session active and do n
 
 ## Remote failure after acceptance
 
+For an operator message mistakenly recorded as the human approval of the latest delivery policy change, use public `unit policy approval-correct <unit> --request <file> --user-input <original-human-ref>`. Follow the exact request and trusted verification contract in `docs/runtime-adapters.md`. Preserve the original policy change, current policy, failed evidence and review history. Correcting provenance never creates acceptance or delivery evidence; policy value round trips are not a substitute.
+
 When a check outside the harness (remote CI, a deployment gate) fails after the unit was accepted and before it is delivered, do not fix it with a commit outside the unit. Run `scripts/unit.mjs unit reopen <unit> --request <file>` with `{"expectedRevision", "reason", "evidence"}` (evidence: the failing run's URL or log reference). The unit returns to Implementing with its acceptance cleared; open the implement stage, fix, and go through gates and independent review again. Widen the scope with `unit scope amend` if the fix touches paths outside it.
 
 ## Explicit user scope reduction

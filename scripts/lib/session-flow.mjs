@@ -1,3 +1,4 @@
+import {reconcileReviewClose} from './review-close-reconcile.mjs';
 import { verifyGoalAcceptanceClarification } from './goal-acceptance-binding.mjs';
 import { goalOwner, assertAdoptedOwner } from './continuity-custody.mjs';
 import { createHash } from 'node:crypto';
@@ -317,7 +318,7 @@ export async function finishSessionUnit({
   return prepareFinalization(started.result, started);
 }
 
-export async function finalizeSessionUnit({ stateRoot, store, unit, adapters }) {
+export async function finalizeSessionUnit({ stateRoot, store, unit, adapters, reconcileOnly = false }) {
   let record = await store.read(unit);
   const plan = record?.sessionFinalization;
   if (!plan || !['Delivered', 'Closed', 'Stopped'].includes(record.state)) throw Object.assign(new Error('no durable session finalization plan'), { code: 'INVALID_TRANSITION' });
@@ -335,6 +336,7 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters }) 
   const {deliveryReceipt, ownerRetained, closeReceipt, ...deliveryPlan} = plan;
   const deliveryArgs = { ...deliveryPlan, ...(recoveryEpoch ? {recoveryEpoch} : {}), cwd: recipient.cwd, session: recipient.sessionId, incarnation: recipient.incarnationId };
   const pending = summary => ({ code: 3, state: record.state, summary, finalizePending: true });
+  if (reconcileOnly) return reconcileReviewClose({stateRoot,store,unit,record,policy,deliveryArgs,adapters});
   const observeCustody = async () => {
     if (plan.retainedOwner) assertAdoptedOwner(plan.retainedOwner,await adapters.session.observe({cwd:plan.owner.cwd,targetCwd:plan.owner.cwd}));
     if (plan.recipientCustody) assertAdoptedOwner(plan.recipientCustody,await adapters.session.observe({recipient,nativeOwner:true}));

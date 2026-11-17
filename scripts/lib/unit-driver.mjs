@@ -1,3 +1,4 @@
+import { recoverStateLock } from './lock-recovery.mjs';
 import { retainedClarificationResume, verifyRetainedClarificationStop } from './goal-acceptance-resume.mjs';
 import { withGoalAcceptanceRecoveryLock } from './goal-acceptance-lock.mjs';
 import { acquireContinuityLock } from './continuity-lock.mjs';
@@ -235,7 +236,7 @@ async function otherActiveUnits(stateRoot, currentUnit, adapters) {
 
 function commandFailure(error) {
   const code = error.exitCode ?? (['STAGE_CONTRACT_INVALID', 'CLI_USAGE', 'PROFILE_UNSUPPORTED'].includes(error.code) ? 2
-    : ['POLICY_UNSET', 'EFFECT_DENIED', 'EFFECT_APPROVAL_REQUIRED', 'OPEN_DECISIONS', 'DELIVERY_DENIED', 'DELIVERY_PLAN_MISMATCH'].includes(error.code) ? 3
+    : ['LOCK_RECOVERY_UNVERIFIED', 'POLICY_UNSET', 'EFFECT_DENIED', 'EFFECT_APPROVAL_REQUIRED', 'OPEN_DECISIONS', 'DELIVERY_DENIED', 'DELIVERY_PLAN_MISMATCH'].includes(error.code) ? 3
       : error.code === 'REVIEW_REQUIRED' ? 20
       : ['ADAPTER_MISSING', 'ADAPTER_INVALID', 'ENOENT', 'SESSION_CONTRACT_UNSUPPORTED'].includes(error.code) ? 4 : 1);
   return { code, summary: error.message, details: { error: error.code ?? 'UNIT_FAILURE', ...(error.issues ? { issues: error.issues } : {}) } };
@@ -283,7 +284,7 @@ export function parseUnitArgs(argv) {
     const argument = argv[index];
     if (argument.startsWith('--')) {
       const key = argument.slice(2);
-      if (key === 'non-interactive') {
+      if (['non-interactive','reconcile-only'].includes(key)) {
         if (options[key] !== undefined) usageError(`duplicate option: ${argument}`);
         options[key] = true;
         continue;
@@ -1543,6 +1544,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
     const parsed = parseUnitArgs(argv);
     if (parsed.options['state-root'] && !parsed.options['project-root']) usageError('--state-root requires --project-root outside a Git checkout');
     const [noun, subcommand, ...rest] = parsed.positional;
+    if (parsed.options['reconcile-only'] && (noun !== 'unit' || subcommand !== 'finalize')) usageError('--reconcile-only is supported only by unit finalize');
     if (noun === 'evidence') {
       const [unit] = rest;
       if (subcommand !== 'rerun' || rest.length !== 1 || !unit || !parsed.options.gate) usageError('usage: evidence rerun <unit> --gate <id>');
@@ -1677,8 +1679,15 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const goal = await store.create({goal:request.goal,source:request.source,policy:resolved.policy.session});
       return formatCliResult({ code: 0, summary: `Goal ${id} registered`, details: { goal } });
     }
-    if (noun !== 'unit' || !['start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'session-recover', 'session-adopt', 'session-rebind', 'session-handoff', 'session-reassign', 'stopped-owner-recover', 'goal-bind', 'goal-acceptance', 'session-stop', 'session-return', 'policy', 'reopen', 'rework', 'completion-recover', 'delivered-preflight', 'delivered-fence', 'delivered-reconcile', 'delivered-continue'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen|rework|completion-recover|delivered-preflight|delivered-fence|delivered-reconcile|delivered-continue <unit> --request <file>, unit goal-acceptance clarify <unit> --request <file> --user-input <ref>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct|drop <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit session-recover <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
+    if (noun !== 'unit' || !['lock', 'start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'session-recover', 'session-adopt', 'session-rebind', 'session-handoff', 'session-reassign', 'stopped-owner-recover', 'goal-bind', 'goal-acceptance', 'session-stop', 'session-return', 'policy', 'reopen', 'rework', 'completion-recover', 'delivered-preflight', 'delivered-fence', 'delivered-reconcile', 'delivered-continue'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen|rework|completion-recover|delivered-preflight|delivered-fence|delivered-reconcile|delivered-continue <unit> --request <file>, unit goal-acceptance clarify <unit> --request <file> --user-input <ref>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct|drop <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit session-recover <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
     const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
+    if (subcommand === 'lock') {
+      const [action, unit] = rest;
+      if (action !== 'recover' || rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit lock recover requires <unit> --request <file> --user-input <ref>');
+      const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'lock recovery request', 'CLI_USAGE');
+      const recovery = await recoverStateLock({stateRoot:effectiveRoot, unit, request, userInputRef:parsed.options['user-input'], adapters});
+      return formatCliResult({code:0, summary:`Original lock recovered for ${unit}`, details:{unit,recovery}});
+    }
     if (subcommand === 'acceptance') {
       const [action, unit] = rest;
       if (!['correct', 'drop'].includes(action) || rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit acceptance correct|drop requires <unit> --request <file> --user-input <ref>');
@@ -1896,7 +1905,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const waitSeconds = parsed.options.wait === undefined ? 0 : Number(parsed.options.wait);
       const intervalSeconds = parsed.options.interval === undefined ? 30 : Number(parsed.options.interval);
       if (!Number.isFinite(waitSeconds) || waitSeconds < 0 || !Number.isFinite(intervalSeconds) || intervalSeconds <= 0) usageError('unit finalize --wait and --interval must be non-negative seconds');
-      const { code, summary, ...details } = await finalizeWithin(() => finalizeSessionUnit({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, adapters }), { waitSeconds, intervalSeconds });
+      const { code, summary, ...details } = await finalizeWithin(() => finalizeSessionUnit({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, adapters, reconcileOnly: parsed.options['reconcile-only'] === true }), { waitSeconds, intervalSeconds });
       return formatCliResult({ code, summary, details });
     }
     if (subcommand === 'finish') {

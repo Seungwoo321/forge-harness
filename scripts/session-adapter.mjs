@@ -18,9 +18,10 @@ export async function createRuntimeAdapters({ cwd, adapters, options, argv }) {
   if (!options['state-root'] || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(unit ?? '') || ['.','..'].includes(unit)) throw new TypeError('session adapter requires an explicit state root and unit');
   const stateRoot = path.resolve(cwd, options['state-root']);
   const record = JSON.parse(await readFile(path.join(stateRoot,'units',unit,'unit.json'),'utf8'));
-  const adopting = ['session-adopt','session-rebind','delivered-continue'].includes(positional[1]);
+  const adopting = ['session-adopt','session-rebind','session-handoff','session-reassign','delivered-continue'].includes(positional[1]);
   const goal = record.continuity?.goalId ? await createContinuityStore(stateRoot).read(record.continuity.goalId) : null;
-  let observationPolicy = goal?.policy;
+  const previousHandoffPolicy = goal?.handovers?.find(item=>item.id===request?.id)?.previousPolicy ?? goal?.policy;
+  let observationPolicy = ['session-handoff','session-reassign'].includes(positional[1]) ? request?.policy : goal?.policy;
   if (positional[1] === 'session-start' && goal) {
     const rows = await createLedgerStore(stateRoot).withLock(unit,ledger=>ledger.read());
     const recovery = rows.findLast(row=>row.event === 'session-start-recovery');
@@ -37,7 +38,7 @@ export async function createRuntimeAdapters({ cwd, adapters, options, argv }) {
   const custody = record.kind === 'review' ? (['session-start','session-recover'].includes(positional[1]) ? goalOwner(goal,record.targetUnit) : goal?.reviews?.findLast(item=>item.unit === unit)) : goalOwner(goal,unit);
   const custodyPolicy = async custody => {
     if (custody?.policyDigest) {
-      const policy = [goal?.policy,...(goal?.policyChanges ?? []).map(change=>change.previous)].find(policy=>policy && effectArgsDigest(policy) === custody.policyDigest);
+      const policy = [goal?.policy,...(goal?.policyChanges ?? []).map(change=>change.previous),...(goal?.handovers ?? []).map(item=>item.previousPolicy)].find(policy=>policy && effectArgsDigest(policy) === custody.policyDigest);
       if (!policy) throw new TypeError('registered owner execution policy is unavailable');
       return policy;
     }
@@ -46,7 +47,14 @@ export async function createRuntimeAdapters({ cwd, adapters, options, argv }) {
     return JSON.parse(packets[0].content).policy;
   };
   if (!adopting && (custody?.goalPath || custody?.policyDigest)) observationPolicy = await custodyPolicy(custody);
-  const recipientPolicy = record.kind === 'review' ? await custodyPolicy(goalOwner(goal,record.targetUnit)) : observationPolicy;
+  let recipientPolicy = record.kind === 'review' ? await custodyPolicy(goalOwner(goal,record.targetUnit)) : observationPolicy;
+  if(positional[1]==='session-recover' && goal?.handovers?.some(item=>item.suspendedReviews?.some(review=>review.unit===unit))) {
+    const rows=await createLedgerStore(stateRoot).withLock(unit,ledger=>ledger.read());
+    const intent=rows.findLast(row=>row.event==='intent' && row.effect==='session.start');
+    if(!intent)throw new TypeError('original reviewer startup is unavailable');
+    await loadManagedLaunch(intent.args);
+    recipientPolicy=JSON.parse(await readFile(intent.args.goalPath,'utf8')).policy;
+  }
   const execution = observationPolicy ? selectExecutionPolicy(observationPolicy,role) : null;
   const registeredOwner = custody?.owner ?? (custody && execution ? {...custody,runtime:execution.runtime,workerExecutable:execution.argv[0]} : null);
   const recoveryOwner = goal?.stoppedOwnerRecoveries?.findLast(item => item.unit === unit)?.request.owner;
@@ -61,8 +69,19 @@ export async function createRuntimeAdapters({ cwd, adapters, options, argv }) {
     const policy = selectExecutionPolicy(source,role);
     return policy.provider === 'codex' ? {CODEX_HOME:policy.account} : {CLAUDE_CONFIG_DIR:policy.account};
   };
+  const suspendedReviewerEnvs={};
+  const suspendedReviews=['session-handoff','session-reassign'].includes(positional[1]) ? request.suspendedReviews??[]
+    : positional[1]==='session-recover' ? goal?.handovers?.findLast(item=>item.unit===record.targetUnit)?.suspendedReviews??[] : [];
+  for(const review of suspendedReviews){
+    const rows=await createLedgerStore(stateRoot).withLock(review.unit,ledger=>ledger.read());
+    const intent=rows.findLast(row=>row.event==='intent' && row.effect==='session.start');
+    if(!intent)throw new TypeError('original reviewer startup is unavailable');
+    await loadManagedLaunch(intent.args);
+    const snapshot=JSON.parse(await readFile(intent.args.goalPath,'utf8'));
+    suspendedReviewerEnvs[effectArgsDigest(review.owner)]=envFor('review',snapshot.policy);
+  }
   const existing = adopting || custody?.ownership === 'existing' || record.sessionFinalization?.retainedOwner?.ownership === 'existing';
-  const parent = {...owner,workerExecutable:executable,closable:!existing,
-    workerEnv:owner.workerEnv ?? envFor(role),recipientEnv:owner.recipientEnv ?? envFor('implementation',recipientPolicy)};
+  const parent = {...owner,workerExecutable:executable,closable:!existing,suspendedReviewerEnvs,
+    workerEnv:owner.workerEnv ?? envFor(role),recipientEnv:owner.recipientEnv ?? envFor('implementation',['session-handoff','session-reassign'].includes(positional[1]) ? previousHandoffPolicy : recipientPolicy)};
   return {sessionRunner:createSessionRunner({runtime,command:adapters.command,parent,launch:()=>{throw new Error('goal-bound launch data is required');}})};
 }

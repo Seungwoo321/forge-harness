@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {effectArgsDigest} from './lib/approvals.mjs';
 import { createSessionRunner } from './lib/session-runtime.mjs';
 
 function fixture(mode) {
@@ -103,4 +104,64 @@ test('native recipient observation resolves the recipient account separately fro
     workerEnv:{CODEX_HOME:'/reviewer-account'},recipientEnv:{CODEX_HOME:'/owner-account'}},launch:()=>['codex'],pollAttempts:1});
   const recipient={sessionId:'recipient',incarnationId:'tty2:22:START',cwd:'/work/product',executable:'codex'};
   assert.equal((await runner.observe({recipient,nativeOwner:true})).worker.threadId,threadId);
+});
+
+test('native handoff observes exact suspended old owner twice and distinct current native caller',async t=>{
+ for(const mode of ['stopped','running','resumed-race','old-thread','old-incarnation','wrong-caller','current-thread','active-child','malformed-inventory'])await t.test(mode,async()=>{
+  const cwd='/work/product',old={runtime:'cmux',sessionId:'old',incarnationId:'tty1:11:START',cwd,worker:{executable:'claude',pid:11,incarnationId:'tty1:11:START',threadId:'old-thread'}};
+  let states=0;
+  const command=async(binary,args)=>{
+   let stdout='';
+   if(binary==='cmux')stdout=JSON.stringify(args.includes('identify')?{caller:{surface_id:mode==='wrong-caller'?'other':'new'}}:{windows:[{id:'window',workspaces:[{id:'work',panes:[{surfaces:[{id:'old',type:'terminal',tty:'tty1'},{id:'new',type:'terminal',tty:'tty2'}]}]}]}]});
+   else if(binary==='ps')stdout=args.includes('pid=,ppid=,state=')?(mode==='malformed-inventory'?'invalid':`11 1 T\n12 11 ${mode==='active-child'?'S':'T'}\n22 1 S`):args.includes('state=')?(++states===2&&mode==='resumed-race'||mode==='running'?'S':'T'):args.includes('pid=,pgid=,tpgid=,comm=')?(args.includes('tty1')?'11 11 11 claude':'22 22 22 codex'):(args.includes('11')&&mode==='old-incarnation'?'CHANGED':'START');
+   else if(binary==='lsof')stdout=`n${cwd}\n`;
+   else if(binary==='pwd')stdout=cwd;
+   else throw Error(`unexpected ${binary}`);
+   return {exitCode:0,stdout};
+  };
+  const runner=createSessionRunner({runtime:'cmux',command,parent:{sessionId:'new',incarnationId:'tty2:22:START',cwd,workerExecutable:'codex'},launch:()=>['codex'],taskTransport:{identity:async observed=>({threadId:observed.pid===11?(mode==='old-thread'?'foreign':'old-thread'):(mode==='current-thread'?'foreign':'new-thread')})}});
+  const observing=runner.observe({cwd,suspendedOwner:old});
+  if(['stopped','current-thread'].includes(mode)){const observed=await observing;assert.equal(observed.previousOwnerSuspended,true);assert.equal(states,2);assert.equal(observed.worker.threadId,mode==='current-thread'?'foreign':'new-thread');}
+  else await assert.rejects(observing,{code:'SESSION_OBSERVATION_INVALID'});
+ });
+});
+
+
+test('suspended reviewer identity uses its immutable review account instead of the implementation account',async()=>{
+ const cwd='/work/product',oldThread='11111111-1111-4111-8111-111111111111',newThread='22222222-2222-4222-8222-222222222222';
+ const old={runtime:'cmux',sessionId:'old',incarnationId:'tty1:11:START',cwd,worker:{executable:'codex',pid:11,incarnationId:'tty1:11:START',threadId:oldThread}};
+ const command=async(binary,args)=>{
+  let stdout='';
+  if(binary==='cmux')stdout=JSON.stringify(args.includes('identify')?{caller:{surface_id:'new'}}:{windows:[{id:'window',workspaces:[{id:'work',panes:[{surfaces:[{id:'old',type:'terminal',tty:'tty1'},{id:'new',type:'terminal',tty:'tty2'}]}]}]}]});
+  else if(binary==='ps')stdout=args.includes('pid=,ppid=,state=')?'11 1 T\n22 1 S':args.includes('state=')?'T':args.includes('pid=,pgid=,tpgid=,comm=')?(args.includes('tty1')?'11 11 11 codex':'22 22 22 codex'):'START';
+  else if(binary==='lsof')stdout=args.includes('cwd')?`n${cwd}\n`:args.includes('11')?`n/review-home/thread-writer-locks/${oldThread}.lock\n`:`n/new-home/thread-writer-locks/${newThread}.lock\n`;
+  else if(binary==='pwd')stdout=cwd;
+  else throw Error(`unexpected ${binary}`);
+  return {exitCode:0,stdout};
+ };
+ const create=include=>createSessionRunner({runtime:'cmux',command,parent:{sessionId:'new',incarnationId:'tty2:22:START',cwd,workerExecutable:'codex',workerEnv:{CODEX_HOME:'/new-home'},recipientEnv:{CODEX_HOME:'/implementation-home'},suspendedReviewerEnvs:include?{[effectArgsDigest(old)]:{CODEX_HOME:'/review-home'}}:{}},launch:()=>['codex']});
+ await assert.rejects(create(false).observe({cwd,suspendedOwner:old}));
+ const observed=await create(true).observe({cwd,suspendedOwner:old});assert.equal(observed.previousOwnerSuspended,true);assert.equal(observed.worker.threadId,newThread);
+});
+
+
+test('exited owner observation proves complete PID and surface absence around the exact new native caller without a close effect',async t=>{
+ for(const mode of ['absent','live-pid','live-surface','reused-surface','malformed','reappeared','wrong-caller'])await t.test(mode,async()=>{
+  const cwd='/work/product',old={runtime:'cmux',sessionId:'old',incarnationId:'tty1:11:START',cwd,worker:{executable:'claude',pid:11,incarnationId:'tty1:11:START',threadId:'old-thread'}};let inventory=0;
+  const command=async(binary,args)=>{
+   let stdout='';
+   if(binary==='cmux'){
+    if(args.includes('identify'))stdout=JSON.stringify({caller:{surface_id:mode==='wrong-caller'?'foreign':'new'}});
+    else if(args.includes('tree')){inventory++;stdout=JSON.stringify({windows:[{id:'window',workspaces:[{id:'work',panes:[{surfaces:[{id:'new',type:'terminal',tty:'tty2'},...(['live-surface','reused-surface'].includes(mode)||mode==='reappeared'&&inventory>2?[{id:'old',type:mode==='reused-surface'?'browser':'terminal',tty:'tty1'}]:[])]}]}]}]});}
+    else throw Error('no terminal mutation is allowed');
+   }else if(binary==='ps')stdout=args.includes('pid=')?(mode==='malformed'?'incomplete':mode==='live-pid'?'1\n11\n22':'1\n22'):args.includes('pid=,pgid=,tpgid=,comm=')?'22 22 22 codex':'START';
+   else if(binary==='lsof')stdout=`n${cwd}\n`;
+   else if(binary==='pwd')stdout=cwd;
+   else throw Error(`unexpected ${binary}`);
+   return {exitCode:0,stdout};
+  };
+  const runner=createSessionRunner({runtime:'cmux',command,parent:{sessionId:'new',incarnationId:'tty2:22:START',cwd,workerExecutable:'codex'},launch:()=>['codex'],taskTransport:{identity:async()=>({threadId:'new-thread'})}});
+  if(mode==='absent'){const observed=await runner.observe({cwd,exitedOwner:old});assert.equal(observed.previousOwnerExited,true);assert.equal(observed.worker.threadId,'new-thread');}
+  else await assert.rejects(runner.observe({cwd,exitedOwner:old}));
+ });
 });

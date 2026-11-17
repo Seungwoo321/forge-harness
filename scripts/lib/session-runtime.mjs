@@ -465,7 +465,38 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
   return Object.freeze({
     contractVersion: 'harness.session-adapter/1',
     capabilities: ['fix-forward', 'failure-classification-five-way', 'retry-limit', 'ops-e0-only', 'policy-review'],
-    async observe({ cwd, targetCwd = cwd, recipient, nativeOwner = false, previousOwner, closedOwner }) {
+    async observe({ cwd, targetCwd = cwd, recipient, nativeOwner = false, previousOwner, closedOwner, suspendedOwner, exitedOwner }) {
+      if(exitedOwner){
+        if(runtime!=='cmux' || exitedOwner.runtime!==runtime || exitedOwner.sessionId===parent.sessionId)throw invalid('exact distinct exited owner is required');
+        await this.observe({closedOwner:exitedOwner,cwd});
+        const current=await this.observe({cwd,targetCwd});
+        await this.observe({closedOwner:exitedOwner,cwd});
+        return {...current,previousOwnerExited:true};
+      }
+      if (suspendedOwner) {
+        if (runtime !== 'cmux' || suspendedOwner.runtime !== runtime || suspendedOwner.sessionId === parent.sessionId
+          || !suspendedOwner.worker?.executable || !suspendedOwner.worker.threadId) throw invalid('exact distinct suspended owner is required');
+        const inspectSuspended = async () => {
+          const observed = await inspect(suspendedOwner.sessionId,suspendedOwner.cwd,suspendedOwner.worker.executable);
+          const worker = await workerIdentity(observed,parent.suspendedReviewerEnvs?.[effectArgsDigest(suspendedOwner)] ?? parent.recipientEnv);
+          const identity = {runtime,sessionId:observed.sessionId,incarnationId:observed.incarnationId,cwd:observed.cwd,worker:{executable:worker.executable,pid:worker.pid,incarnationId:worker.incarnationId,threadId:worker.threadId}};
+          if (effectArgsDigest(identity) !== effectArgsDigest(suspendedOwner)
+            || !/^T/.test((await invoke('ps',['-p',String(worker.pid),'-o','state='],suspendedOwner.cwd)).trim()))
+            throw invalid('previous native owner is not exactly suspended');
+          const rows = (await invoke('ps',['-axo','pid=,ppid=,state='],suspendedOwner.cwd)).trim().split('\n').map(line=>line.trim().split(/\s+/));
+          if (!rows.length || rows.some(row=>row.length!==3 || !/^\d+$/.test(row[0]) || !/^\d+$/.test(row[1]) || !row[2])
+            || new Set(rows.map(row=>row[0])).size!==rows.length) throw invalid('suspended process inventory is incomplete');
+          const descendants = new Set([String(worker.pid)]);
+          let count;
+          do {count=descendants.size;for(const [pid,ppid] of rows)if(descendants.has(ppid))descendants.add(pid);}while(count!==descendants.size);
+          if (!rows.some(row=>row[0]===String(worker.pid)) || rows.some(([pid,,state])=>descendants.has(pid) && !state.startsWith('T')))
+            throw invalid('previous owner has running descendants');
+        };
+        await inspectSuspended();
+        const current = await this.observe({cwd,targetCwd});
+        await inspectSuspended();
+        return {...current,previousOwnerSuspended:true};
+      }
       if (closedOwner) {
         if (closedOwner.runtime !== runtime || !closedOwner.sessionId || !closedOwner.incarnationId
           || !path.isAbsolute(closedOwner.cwd ?? '') || !Number.isSafeInteger(closedOwner.worker?.pid) || closedOwner.worker.pid < 1

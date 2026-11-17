@@ -45,6 +45,9 @@ async function startLocked({stateRoot,unit,request,store,adapters,record,goal,le
   if (!goal || goal.goal.status !== 'active' || goal.goal.remaining[0] !== (review ? record.targetUnit : unit)) throw failure('unit is not outstanding in an active goal');
   const rows = await ledger.read();
   const reservation = rows.findLast(row => row.event === 'session-start-recovery');
+  const suspended=(goal.handovers??[]).flatMap(item=>item.suspendedReviews??[]).findLast(item=>item.unit===unit);
+  if(suspended && (!reservation || reservation.mode!=='suspended-handoff' || reservation.key!==suspended.key))
+    throw Object.assign(new Error('suspended reviewer requires explicit public recovery before another startup'),{code:'SESSION_RECOVERY_REQUIRED'});
   const historyLength = record.sessionHistory?.length ?? 0;
   const attempt = Math.max(historyLength + 1, reservation ? (reservation.nextArgs?.attempt ?? reservation.nextAttempt) + historyLength - reservation.sessionHistoryLength : 1);
   const currentOwner = goalOwner(goal,unit);

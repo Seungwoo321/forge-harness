@@ -1,10 +1,11 @@
 import path from 'node:path';
+import {suspendedReviewHandoff} from './suspended-review.mjs';
 import {readFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import {effectArgsDigest,verifyApprovalInput} from './approvals.mjs';
 import {createContinuityStore} from './continuity-store.mjs';
 import {createLedgerStore,sessionEffectRetired} from './ledger.mjs';
-import {goalOwner} from './continuity-custody.mjs';
+import {goalOwner,nativeOwner} from './continuity-custody.mjs';
 import {loadManagedLaunch} from './continuity-launch-io.mjs';
 import {snapshotGoal} from './continuity-snapshot.mjs';
 import {prepareEffect} from './policy.mjs';
@@ -65,7 +66,6 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
       const unchangedPolicy=!settleOnly && executionPoliciesEqual(original.policy,goal.policy);
       if (!settleOnly && intent.args.targetDigest!== (target?effectArgsDigest(targetRecord):undefined)) fail('review target changed','CONTINUITY_STALE');
       await checkFile(goal.source); await checkFile(request.provenance);
-      if (typeof adapters.provider?.verifySessionStartRecovery!=='function') fail('trusted terminal non-start verifier is required','ADAPTER_MISSING');
       const nextAttempt=intent.args.attempt+1;
       if (!Number.isSafeInteger(nextAttempt)) fail('invalid next attempt');
       const snapshot=settleOnly?null:await snapshotGoal(stateRoot,goal);
@@ -73,7 +73,18 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
       if (nextArgs) await loadManagedLaunch(nextArgs);
       const submission=rows.findLast(row=>row.event==='submission' && row.seq===intent.seq && row.key===intent.key);
       const receiver=rows.findLast(row=>row.event==='receiver' && row.seq===intent.seq && row.key===intent.key);
-      if (typeof adapters.session?.verify === 'function') {
+      const suspended=review?suspendedReviewHandoff(goal,record,intent,submission,rows):null;
+      const verifier=suspended?'verifySuspendedReviewRecovery':'verifySessionStartRecovery';
+      if(typeof adapters.provider?.[verifier]!=='function')fail('trusted startup recovery verifier is required','ADAPTER_MISSING');
+      const observeSuspension=async()=>{
+        if(!suspended)return;
+        const observed=await adapters.session?.observe?.({cwd:intent.args.cwd,targetCwd:intent.args.cwd,suspendedOwner:suspended.suspension.owner});
+        const expected=goalOwner(goal,record.targetUnit)?.owner;
+        const actual=observed && nativeOwner(observed);
+        if(observed?.previousOwnerSuspended!==true || !expected || effectArgsDigest(actual)!==effectArgsDigest(expected))fail('suspended reviewer or replacement changed','SESSION_RECOVERY_UNPROVEN');
+      };
+      await observeSuspension();
+      if (!suspended && typeof adapters.session?.verify === 'function') {
         let observed;
         try { observed=await adapters.session.verify({effect:'session.start',args:intent.args,key:intent.key,seq:intent.seq,
           submission:{attempted:Boolean(submission),binding:submission?.binding,receiver:receiver?.binding,confirmed:rows.some(row=>row.event==='confirmation' && row.key===intent.key && row.seq===intent.seq),readOnly:true,recovery:true}}); }
@@ -83,23 +94,24 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
       const binding={unit,goalId:goal.goal.id,userInputRef,argsDigest:requestDigest,intentDigest:effectArgsDigest(intent),
         submissionDigest:effectArgsDigest(submission ?? null),unitDigest:effectArgsDigest(record),goalDigest:effectArgsDigest(goal),
         nextArgsDigest:effectArgsDigest(nextArgs),provenanceDigest:request.provenance.digest,
-        ...(settleOnly?{targetDigest:effectArgsDigest(targetRecord)}:{})};
+        ...(settleOnly?{targetDigest:effectArgsDigest(targetRecord)}:{}),
+        ...(suspended?{suspensionDigest:effectArgsDigest(suspended.suspension),handoverDigest:effectArgsDigest(suspended.handover)}:{})};
       if (previous && ['unitDigest','goalDigest','targetDigest'].some(key=>binding[key]!==previous.proof[key]))
         fail('settled reviewer or target changed','CONTINUITY_STALE');
       await verifyApprovalInput(adapters.provider,{...binding,effect:'unit.session.recover',reason:request.reason});
       // The provider reads original native history/account and proves irreversible receiver/queue quiescence.
       // It must not submit input, clear a goal, cancel work, terminate a receiver or infer success from the request.
-      const proof=await adapters.provider.verifySessionStartRecovery({...binding,request:structuredClone(request),intent:structuredClone(intent),
+      const proof=await adapters.provider[verifier]({...binding,request:structuredClone(request),intent:structuredClone(intent),
         submission:structuredClone(submission ?? null),original:structuredClone(original),goal:structuredClone(goal),nextArgs:structuredClone(nextArgs),
-        ...(settleOnly?{settleOnly:true,target:structuredClone(targetRecord)}:{})});
+        ...(settleOnly?{settleOnly:true,target:structuredClone(targetRecord)}:{}),...(suspended?{handover:structuredClone(suspended.handover),suspension:structuredClone(suspended.suspension)}:{})});
       if (proof?.verified!==true || Object.entries(binding).some(([key,value])=>proof[key]!==value)
-        || proof.taskNeverStarted!==true || proof.receiverStopped!==true || proof.queueCancelled!==true
+        || (suspended ? proof.receiverSuspended!==true || proof.taskNeverStarted!==undefined : proof.taskNeverStarted!==true || proof.receiverStopped!==true || proof.queueCancelled!==true)
         || !text(proof.receiver?.sessionId) || !text(proof.receiver?.incarnationId) || !text(proof.receiver?.threadId)
         || !Number.isSafeInteger(proof.receiver?.pid) || proof.receiver.pid<1
         || proof.receiver.runtime!==selectExecutionPolicy(original.policy,intent.args.role).runtime
         || path.basename(proof.receiver.executable ?? '')!==selectExecutionPolicy(original.policy,intent.args.role).provider
         || proof.receiver.cwd!==intent.args.cwd || proof.evidenceDigest!==request.provenance.digest) fail('terminal native non-start is unproven','SESSION_RECOVERY_UNPROVEN');
-      if (unchangedPolicy && (!digest(proof.providerCorrection?.beforeDigest) || !digest(proof.providerCorrection?.afterDigest)
+      if (!suspended && unchangedPolicy && (!digest(proof.providerCorrection?.beforeDigest) || !digest(proof.providerCorrection?.afterDigest)
         || proof.providerCorrection.beforeDigest===proof.providerCorrection.afterDigest
         || proof.providerCorrection.evidenceDigest!==request.provenance.digest))
         fail('unchanged execution policy requires a verified provider correction','SESSION_RECOVERY_UNPROVEN');
@@ -108,9 +120,10 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
       if (receiver && ['runtime','sessionId','incarnationId','cwd'].some(key=>proof.receiver[key]!==receiver.binding[key]))
         fail('proof belongs to another host-created receiver','SESSION_RECOVERY_UNPROVEN');
       await checkFile(goal.source); await checkFile(request.provenance); await loadManagedLaunch(intent.args); if (nextArgs) await loadManagedLaunch(nextArgs);
+      await observeSuspension();
       if (previous) {receipt={...previous,duplicate:true};return goal;}
       receipt={event:'session-start-recovery',unit,id:request.id,seq:intent.seq,key:intent.key,request:structuredClone(request),userInputRef,requestDigest,
-        intentDigest:binding.intentDigest,proof:structuredClone(proof),sessionHistoryLength:record.sessionHistory?.length ?? 0,nextArgs,nextKey:nextArgs?prepareEffect('session.start',nextArgs).key:null,
+        ...(suspended?{mode:'suspended-handoff'}:{}),intentDigest:binding.intentDigest,proof:structuredClone(proof),sessionHistoryLength:record.sessionHistory?.length ?? 0,nextArgs,nextKey:nextArgs?prepareEffect('session.start',nextArgs).key:null,
         ...(settleOnly?{settled:true,nextAttempt,goalId:goal.goal.id,targetUnit:record.targetUnit,source:structuredClone(goal.source)}:{})};
       await ledger.append(receipt);
       return goal;

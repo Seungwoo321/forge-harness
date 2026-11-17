@@ -21,7 +21,7 @@ import {recoverStoppedOwner} from './lib/stopped-owner-recovery.mjs';
 const packet = ['목표: goal','수용 기준: done','작업관리: change','결정: approved','변경: retained','검증: source','남은 일·위험: access','다음 단위 첫 행동: resume'].join('\n');
 const fields = {title:'Stopped change',objective:'goal',acceptance:'pending',tracking:'change',decision:'blocked',changed:'retained',verification:'source',remainingRisk:'access',nextFirstAction:'resume'};
 const parse = output => JSON.parse(output.slice(output.lastIndexOf('RESULT ')+7));
-async function fixture(t, managed = false, stoppedFrom = 'Implementing', normal = false) {
+async function fixture(t, managed = false, stoppedFrom = 'Implementing', normal = false, custodyField = null) {
   const cwd = await mkdtemp(path.join(tmpdir(),'stopped-owner-'));t.after(()=>rm(cwd,{recursive:true,force:true}));
   const stateRoot = path.join(cwd,'state'), store = createUnitStateStore(stateRoot), goals = createContinuityStore(stateRoot);
   const source = path.join(cwd,'goal.md');await writeFile(source,'goal');
@@ -30,7 +30,7 @@ async function fixture(t, managed = false, stoppedFrom = 'Implementing', normal 
   const custody = managed ? {unit:'change',attempt:1,sessionId:owner.sessionId,incarnationId:owner.incarnationId,cwd}
     : {unit:'change',ownership:'existing',...owner,owner,policyDigest:digest(policy)};
   await goals.create({goal:{id:'goal',objective:'goal',criteria:['done'],remaining:['change'],status:'active'},policy,source:{path:source,digest:taskDigest('goal')}});
-  await goals.transaction('goal',g=>({...g,revision:g.revision+1,[managed?'bootstraps':'adoptions']:[custody]}));
+  await goals.transaction('goal',g=>({...g,revision:g.revision+1,[custodyField ?? (managed?'bootstraps':'adoptions')]:[custody]}));
   await mkdir(path.join(stateRoot,'units/change/failures'),{recursive:true});
   const failurePath='units/change/failures/f1.json';await writeFile(path.join(stateRoot,failurePath),'failure');
   await store.create({schema:'harness.unit/1',unit:'change',kind:'impl',state:'Stopped',stoppedFrom,continuity:{goalId:'goal'},policy:{goal:{class:'product-prelaunch'},session:policy},canon:[],
@@ -380,4 +380,14 @@ test('normal stopped startup uses native closed-owner observation from a distinc
  assert.equal(result.code,0,JSON.stringify(result));assert.equal(f.launches(),1);
  assert.deepEqual(plan.owner.worker,f.owner.worker);assert.ok(calls.length>0);
  assert.ok(calls.every(([binary,args])=>binary==='ps'||args.includes('tree')));
+});
+
+
+test('handover custody is retired after verified closure and the same unit starts with a fresh owner',async t=>{
+ const f=await fixture(t,false,'Implementing',false,'handovers');const request=await f.request();
+ assert.equal((await f.recover(request)).code,0);assert.equal(goalOwner(await f.goals.read('goal'),'change'),undefined);
+ assert.equal((await f.activate()).code,0);assert.equal((await f.resume()).code,0);
+ const handoff=path.join(f.cwd,'resume.md');await writeFile(handoff,packet);
+ const result=await f.command(['unit','session-start','change'],{cwd:f.cwd,handoffPath:handoff,handoffDigest:taskDigest(packet),parentRuntime:f.parent,waitSeconds:0});
+ assert.equal(result.code,0,JSON.stringify(result));assert.equal(goalOwner(await f.goals.read('goal'),'change').sessionId,'fresh');
 });

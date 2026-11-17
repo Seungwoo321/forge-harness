@@ -6,7 +6,7 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createAdapters } from './lib/adapters.mjs';
-import { codexComposerMatches, submitCodexComposer } from './lib/codex-composer.mjs';
+import { codexComposerMatches, codexComposerWorking, submitCodexComposer } from './lib/codex-composer.mjs';
 import { createSessionRunner } from './lib/session-runtime.mjs';
 import { createLedgerStore, executeEffect } from './lib/ledger.mjs';
 
@@ -563,6 +563,27 @@ test('expanded footer rejects Working, unknown status/footer, modal and hidden o
     let mutations=0;
     await assert.rejects(submitCodexComposer({prompt,read:async()=>view,verify:async()=>{},paste:async()=>{mutations++;},enter:async()=>{mutations++;}}));
     assert.equal(mutations,0);
+  }
+});
+
+test('busy delivery observes Working across native footer wraps without making the composer Ready',async()=>{
+  const view = '› Ask Codex to do anything\n \n'
+    + '  GPT-6.1-Sol high · ~/work/product · fix/a-long-\n'
+    + '  branch · Working · Context 24% left · 475K window · 533K used · Main [default]\n'
+    + '  ← for agents · ? for shortcuts                  Pursuing goal (48m) · ⚠ 1 warning · f2 to view\n';
+  for (const screen of [view, view.replace('long-\n  branch', 'long-branch'), view.replace('Working', 'Work\n  ing')]) {
+    assert.equal(codexComposerWorking(screen), true);
+    let inputs = 0;
+    await assert.rejects(submitCodexComposer({prompt:'Read /work/result',read:async()=>screen,
+      verify:async()=>{},paste:async()=>{inputs++;},enter:async()=>{inputs++;}}));
+    assert.equal(inputs, 0);
+  }
+  for (const screen of [view.replace('Working', 'Ready'), view.replace('Working', 'Unknown'),
+    view.replace('Working', 'Ready').replace('Ask Codex to do anything', 'draft · Working · text'),
+    view.replace('Working', 'Ready').replace('Pursuing goal (48m)', 'hint · Working · text'),
+    view.replace('GPT-6.1-Sol high', 'unrecognized'),
+    view.replace('branch · Working', 'branch\nforeign · Working'), view + '› another draft\n']) {
+    assert.equal(codexComposerWorking(screen), false);
   }
 });
 

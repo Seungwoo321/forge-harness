@@ -22,8 +22,14 @@ function composer(screen) {
 export function codexComposerWorking(screen) {
   const lines = screen.split('\n').map(line => line.trimEnd());
   const start = lines.findLastIndex(line => /^ ?› /.test(line));
-  const footer = lines.slice(start + 1).findLast(line => /^ {2}GPT-[A-Za-z0-9.-]+ (?:low|medium|high|xhigh|max) · /.test(line));
-  return start >= 0 && /· Working ·/.test(footer ?? '');
+  const footer = lines.findLastIndex((line, index) => index > start && /^ {2}GPT-[A-Za-z0-9.-]+ (?:low|medium|high|xhigh|max) · /.test(line));
+  if (start < 0 || footer < 0) return false;
+  const status = [];
+  for (const line of lines.slice(footer)) {
+    if (!/^ {2}\S/.test(line) || /\? for shortcuts|tab to queue message/.test(line)) break;
+    status.push(line);
+  }
+  return /^GPT-[A-Za-z0-9.-]+(?:low|medium|high|xhigh|max)·(?:~\/|\/)[^·]+·(?:[A-Za-z0-9._/-]+·)?Working·/.test(status.join('').replace(/\s/g, ''));
 }
 
 export function codexComposerMatches(screen, prompt) { return composerTextMatches(composer(screen), prompt); }

@@ -77,3 +77,67 @@ export async function changeUnitPolicy({ stateRoot, store, unit, request, userIn
   } catch (error) { if (error !== duplicate) throw error; }
   return receipt;
 }
+
+// Correct only the authority attribution; retain the original change and every execution result.
+export async function correctPolicyApproval({ stateRoot, store, unit, request, userInputRef, adapters }) {
+  const invalid = message => failure('POLICY_APPROVAL_CORRECTION_INVALID', message);
+  if (!request || Object.keys(request).sort().join(',') !== 'change,expectedRevision,id,reason'
+    || !identifier(request.id) || !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 1
+    || Object.keys(request.change ?? {}).sort().join(',') !== 'digest,index'
+    || !Number.isSafeInteger(request.change.index) || request.change.index < 0
+    || !/^sha256:[a-f0-9]{64}$/.test(request.change.digest ?? '')
+    || typeof request.reason !== 'string' || !request.reason.trim()
+    || typeof userInputRef !== 'string' || !userInputRef.trim()) throw invalid('exact change, revision, reason and original human input are required');
+  if (typeof adapters.git?.inspectUnit !== 'function') throw failure('ADAPTER_MISSING', 'live target inspection is required');
+  const requestDigest = effectArgsDigest({ request, userInputRef });
+  const duplicate = new Error('policy approval already corrected');
+  let receipt;
+  try {
+    await createLedgerStore(stateRoot).withLock(unit, async ledger => {
+      const rows = await ledger.read();
+      await store.update(unit, async record => {
+        const previous = (record.policyApprovalCorrections ?? []).find(item => item.id === request.id);
+        if (previous) {
+          if (previous.requestDigest !== requestDigest) throw invalid('correction id binds another request');
+          receipt = { ...previous, duplicate: true }; throw duplicate;
+        }
+        if (record.revision !== request.expectedRevision || !['SelfGated', 'InReview'].includes(record.state)
+          || ['review', 'ops'].includes(record.kind) || record.accepted || record.deliveryPlan || record.deliveryResult || record.sessionFinalization
+          || (record.stages ?? []).some(stage => attemptsFor(record, stage.name).some(attempt => !attempt.endedAt))) {
+          throw failure('POLICY_APPROVAL_CORRECTION_STALE', 'correction requires the current submitted, unaccepted and undelivered change unit');
+        }
+        const original = record.policyChanges?.[request.change.index];
+        const effective = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true }).policy;
+        if (!original || request.change.index !== record.policyChanges.length - 1 || effectArgsDigest(original) !== request.change.digest
+          || original.unit !== unit || original.previousPolicy?.delivery !== original.before
+          || !identifier(original.id) || !Number.isSafeInteger(original.expectedRevision) || original.expectedRevision < 1
+          || original.revision !== original.expectedRevision + 1 || original.revision > record.revision
+          || original.requestDigest !== effectArgsDigest({ request: { id: original.id, expectedRevision: original.expectedRevision,
+            delivery: original.delivery, reason: original.reason }, userInputRef: original.userInputRef })
+          || original.userInputRef === userInputRef || !deliveries.has(original.before) || !deliveries.has(original.after)
+          || original.delivery !== original.after || original.before === original.after || effective.delivery !== original.after
+          || (record.policyApprovalCorrections ?? []).some(item => item.request.change.index === request.change.index)) {
+          throw invalid('the latest delivery change or approval no longer matches');
+        }
+        if (rows.some(row => {
+          if (row.event !== 'intent' || sessionEffectRetired(rows, row)) return false;
+          const result = rows.findLast(done => done.event === 'result' && done.seq === row.seq && done.key === row.key);
+          return !result || ['unknown', 'uncertain'].includes(result.result?.status);
+        })) throw failure('EFFECT_UNCERTAIN', 'reconcile uncertain effects first');
+        const target = structuredClone(await adapters.git.inspectUnit({ unit, record }));
+        if (!target?.head || !target.contentFingerprint) throw invalid('current target is unavailable');
+        const targetDigest = effectArgsDigest(target);
+        await verifyApprovalInput(adapters.provider, { unit, userInputRef, effect: 'unit.policy.approval.correct', argsDigest: requestDigest,
+          unitDigest: effectArgsDigest(record), policyChangeDigest: request.change.digest, previousUserInputRef: original.userInputRef,
+          targetDigest, reason: request.reason });
+        if (effectArgsDigest(await adapters.git.inspectUnit({ unit, record })) !== targetDigest) {
+          throw failure('POLICY_APPROVAL_CORRECTION_STALE', 'target changed during approval verification');
+        }
+        receipt = { id: request.id, request: structuredClone(request), requestDigest, userInputRef, original: structuredClone(original),
+          target: structuredClone(target), targetDigest, revision: record.revision + 1, correctedAt: adapters.now() };
+        return { ...record, policyApprovalCorrections: [...(record.policyApprovalCorrections ?? []), receipt] };
+      });
+    });
+  } catch (error) { if (error !== duplicate) throw error; }
+  return receipt;
+}

@@ -50,7 +50,7 @@ import { continueDeliveredGoal } from './delivered-continuation.mjs';
 import { recoverMissingGoalBinding } from './goal-bind-recovery.mjs';
 import { prepareSessionReturn } from './continuity-return.mjs';
 import { stopGoalSession } from './continuity-stop.mjs';
-import { changeUnitPolicy } from './unit-policy-change.mjs';
+import { changeUnitPolicy, correctPolicyApproval } from './unit-policy-change.mjs';
 import { attemptsFor } from './stage-attempts.mjs';
 import { withGitHeadLock } from './git-head-lock.mjs';
 import { capturedGateReport, executeCapturedGate, persistCapturedReport } from './gate-execution.mjs';
@@ -1706,6 +1706,13 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
     }
     if (subcommand === 'policy') {
       const [action, unit] = rest;
+      if (action === 'approval-correct') {
+        if (rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit policy approval-correct requires <unit> --request <file> --user-input <ref>');
+        const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'unit policy approval correction', 'CLI_USAGE');
+        const receipt = await correctPolicyApproval({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit,
+          request, userInputRef: parsed.options['user-input'], adapters });
+        return formatCliResult({ code: 0, summary: `Policy approval corrected for ${unit}`, details: { unit, receipt } });
+      }
       if (action !== 'change' || rest.length !== 2 || !unit || !parsed.options.request || !parsed.options['user-input']) usageError('unit policy change requires <unit> --request <file> --user-input <ref>');
       const request = await readJsonFile(path.resolve(cwd, parsed.options.request), 'unit policy change request', 'CLI_USAGE');
       const change = await changeUnitPolicy({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, request, userInputRef: parsed.options['user-input'], adapters });

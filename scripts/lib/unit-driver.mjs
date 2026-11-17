@@ -1,6 +1,6 @@
 import {recoverExitedReviewFinalization,recoverExitedReviewRecipient} from './review-exit-recover.mjs';
 import { recoverStateLock } from './lock-recovery.mjs';
-import { retainedClarificationResume, verifyRetainedClarificationStop } from './goal-acceptance-resume.mjs';
+import { retainedOwnerResume, verifyRetainedClarificationStop } from './goal-acceptance-resume.mjs';
 import { withGoalAcceptanceRecoveryLock } from './goal-acceptance-lock.mjs';
 import { acquireContinuityLock } from './continuity-lock.mjs';
 import { clarifyGoalAcceptance, validateInitialGoalAcceptance } from './goal-acceptance-binding.mjs';
@@ -983,7 +983,7 @@ async function runResume({ stateRoot, unit, options, adapters }) {
   let liveContinuation;
   if (existing?.continuity?.goalId) {
     const goal = await createContinuityStore(stateRoot).read(existing.continuity.goalId);
-    liveContinuation = retainedClarificationResume(goal, unit);
+    liveContinuation = retainedOwnerResume(goal, unit);
     if (!goal || goal.goal.status !== 'active' || !goal.goal.remaining.includes(unit)) throw Object.assign(new Error('goal must be resumed before its unit'), {code:'GOAL_BLOCKED'});
   }
   const store = createUnitStateStore(stateRoot);
@@ -1010,6 +1010,7 @@ async function runResume({ stateRoot, unit, options, adapters }) {
     let retainedGoalLock;
     try {
       return await resumeUnitFailure({store,unit,lockMetadata,snapshot:{...snapshot,ledger:rows},
+        requireRevalidation: current.state === 'Stopped' && Boolean(liveContinuation?.request.externalResolution),
         ...(typeof adapters.git?.inspectUnit === 'function' ? {inspectTarget: record => adapters.git.inspectUnit({unit,record})} : {}),
         validateResolution: (record, receipt) => verifyRetryResolution({ stateRoot, record, receipt, adapters }),
         validateStopped: async (record, { recovery }) => {

@@ -10,10 +10,14 @@ const invalid = message => Object.assign(new Error(message),{code:'GATE_SNAPSHOT
 const signature = stat => [stat.dev,stat.ino,stat.mode,stat.size,stat.ctimeNs].join(':');
 const macSystemRoots=['/System','/usr','/bin','/sbin','/dev','/Library/Apple','/private/preboot','/private/var/db/dyld','/opt/homebrew/Cellar','/opt/homebrew/opt'];
 const subpaths=roots=>roots.map(root=>`(subpath ${JSON.stringify(root)})`).join(' ');
+// Opening a directory handle needs file-read-data on that exact directory, so secure dirfd traversal to an allowed
+// root needs each ancestor as a literal. Literals grant no access to sibling contents below those ancestors.
+const ancestors=roots=>[...new Set(roots.flatMap(root=>{const found=[];for(let dir=path.dirname(root);dir!==path.dirname(dir);dir=path.dirname(dir))found.push(dir);return found;}))]
+  .map(dir=>`(literal ${JSON.stringify(dir)})`).join(' ');
 function macProfile({source,root,tools,boundaries=[]}) {
   const roots=[root,...tools];
-  return `(version 1)(allow default)(deny file-read-data file-write*)(allow file-read-data (literal "/") ${subpaths(roots)})(allow file-write* (literal "/dev/null") (subpath ${JSON.stringify(root)}))(deny file-read* file-write* (subpath ${JSON.stringify(source)}))`
-    + boundaries.map(boundary=>`(deny file-read-data (require-not (require-any (literal "/") ${subpaths([boundary.root,...boundary.tools])})))(deny file-write* (require-not (require-any (literal "/dev/null") ${subpaths(boundary.outputs)})))(deny file-read* file-write* (subpath ${JSON.stringify(boundary.source)}))(deny file-read* file-write* file-link (literal ${JSON.stringify(boundary.secret)}))`).join('');
+  return `(version 1)(allow default)(deny file-read-data file-write*)(allow file-read-data (literal "/") ${ancestors(roots)} ${subpaths(roots)})(allow file-write* (literal "/dev/null") (subpath ${JSON.stringify(root)}))(deny file-read* file-write* (subpath ${JSON.stringify(source)}))`
+    + boundaries.map(boundary=>`(deny file-read-data (require-not (require-any (literal "/") ${ancestors([boundary.root,...boundary.tools])} ${subpaths([boundary.root,...boundary.tools])})))(deny file-write* (require-not (require-any (literal "/dev/null") ${subpaths(boundary.outputs)})))(deny file-read* file-write* (subpath ${JSON.stringify(boundary.source)}))(deny file-read* file-write* file-link (literal ${JSON.stringify(boundary.secret)}))`).join('');
 }
 
 export async function executeCapturedGate({gate,directory,sourceRoot,command,platform=process.platform}) {

@@ -82,6 +82,10 @@ test('requires an upstream writer and a non-null prepared value for every read',
   assert.equal(validateReadiness(contract, ready).ok, true);
   assert.deepEqual(validateReadiness(contract, { upstreamWriters: {}, preparedValues: { request: 'x' } }).issues.map(x => x.keyword), ['writer']);
   assert.equal(validateReadiness(contract, { upstreamWriters: { request: ['scope'] }, preparedValues: { request: null } }).issues[0].keyword, 'prepared');
+  const nullable = { ...contract, input: schema('object', { ...contract.input.properties, data: schema('object', { request: { type: ['string', 'null'] } }, ['request']) }, contract.input.required) };
+  assert.equal(validateReadiness(nullable, { upstreamWriters: { request: ['scope'] }, preparedValues: { request: null } }).ok, true);
+  assert.equal(validateReadiness(nullable, { upstreamWriters: { request: ['scope'] }, preparedValues: {} }).issues[0].keyword, 'prepared');
+  assert.equal(validateReadiness(nullable, { upstreamWriters: { request: ['scope'] }, preparedValues: { request: undefined } }).issues[0].keyword, 'prepared');
 });
 
 test('constructs input from authoritative prepared data and rejects caller drift', () => {

@@ -10,6 +10,8 @@ import { runUnitCli as runCoreUnitCli } from './lib/unit-driver.mjs';
 import { runPolicyCli } from './policy.mjs';
 import { createRecoveryStore } from './lib/recovery-store.mjs';
 import { createAdapters } from './lib/adapters.mjs';
+import { runPublicUnitCli } from './lib/runtime-adapters.mjs';
+import { formatCliResult } from './lib/report.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -50,6 +52,59 @@ function result(output) {
   assert.match(line, /^RESULT /);
   return JSON.parse(line.slice('RESULT '.length));
 }
+
+test('AC-1 multiline adapter failures retain their code and complete diagnostic', async t => {
+  const { stateRoot, unit, adapters } = await fixture(t);
+  for (const separator of ['\n', '\r', '\r\n']) {
+    const message = `native tool error${separator}second diagnostic line`;
+    adapters.checkpoint.createCheckpoint = async () => {
+      throw Object.assign(new Error(message), { code: 'NATIVE_TOOL_ERROR' });
+    };
+    const output = await runUnitCli(['unit', 'stage', 'open', unit, 'scope'], {
+      stateRoot, contractsDir: path.join(repo, 'skills'), adapters,
+    });
+    const failure = result(output);
+    assert.equal(failure.code, 1);
+    assert.equal(failure.error, 'NATIVE_TOOL_ERROR');
+    assert.equal(failure.message, message);
+    assert.equal(failure.summary, 'native tool error second diagnostic line');
+    assert.equal(output.split('\n').length, 2);
+  }
+});
+
+test('AC-2 public CLI preserves command failures and single-line error metadata', async t => {
+  const { root, stateRoot, unit, store } = await fixture(t);
+  await prepareAcceptanceRecord(store, unit);
+  for (const message of ['native tool error\nsecond diagnostic line', 'native tool error']) {
+    const provider = path.join(root, `provider-${message.includes('\n') ? 'multiline' : 'single'}.mjs`);
+    await writeFile(provider, `export function createRuntimeAdapters() {
+      return {git: {inspectUnit() {throw Object.assign(new Error(${JSON.stringify(message)}),
+        {code: 'NATIVE_TOOL_ERROR', exitCode: 3, issues: ['original issue']});}}, gates: {describe() {}}};
+    }`);
+    const failure = result(await runPublicUnitCli(['unit', 'accept', unit,
+      '--state-root', stateRoot, '--project-root', root, '--adapters', provider], { cwd: root }));
+    assert.equal(failure.code, 3);
+    assert.equal(failure.error, 'NATIVE_TOOL_ERROR');
+    assert.equal(failure.message, message);
+    assert.deepEqual(failure.issues, ['original issue']);
+    assert.equal(failure.summary, message.replace('\n', ' '));
+  }
+});
+
+test('AC-3 blank adapter diagnostics use a fallback without weakening summary validation', async t => {
+  const { stateRoot, unit, adapters } = await fixture(t);
+  for (const message of ['', '\r\n  \t']) {
+    adapters.checkpoint.createCheckpoint = async () => { throw new Error(message); };
+    const failure = result(await runUnitCli(['unit', 'stage', 'open', unit, 'scope'], {
+      stateRoot, contractsDir: path.join(repo, 'skills'), adapters,
+    }));
+    assert.equal(failure.code, 1);
+    assert.equal(failure.error, 'UNIT_FAILURE');
+    assert.equal(failure.message, message);
+    assert.equal(failure.summary, 'Unit command failed');
+  }
+  assert.throws(() => formatCliResult({ code: 1, summary: 'first\nsecond' }), /single line/);
+});
 
 function acceptanceAdapters({ kind = 'impl', coverage = true, pendingGate = null, liveTargets = null } = {}) {
   const gatesRun = [];
@@ -806,6 +861,20 @@ test('handoff prose cannot bypass verified session finalization', async t => {
   await writeFile(output, JSON.stringify({ inputDigest: input.inputDigest, attempt: input.attempt, submissionId: 'handoff-draft', status: 'done', summary: 'Prepared result draft', handoff: {} }));
   assert.equal(result(await runUnitCli(['unit', 'stage', 'submit', f.unit, 'handoff', '--output', output], context)).code, 0);
   assert.equal((await f.store.read(f.unit)).state, 'Delivered');
+});
+
+test('a final unit with no successor opens and submits handoff with next null', async t => {
+  const f = await fixture(t);
+  await f.store.update(f.unit, record => ({ ...record, state: 'Delivered', acceptance: [], evidence: [], changedPaths: [], assumptions: [], next: null }));
+  const context = { stateRoot: f.stateRoot, contractsDir: path.join(repo, 'skills'), adapters: f.adapters };
+  const opened = result(await runUnitCli(['unit', 'stage', 'open', f.unit, 'handoff'], context));
+  assert.equal(opened.code, 0, JSON.stringify(opened));
+  const input = JSON.parse(await readFile(opened.input, 'utf8'));
+  assert.equal(input.data.next, null);
+  const output = path.join(f.root, 'handoff-final.json');
+  await writeFile(output, JSON.stringify({ inputDigest: input.inputDigest, attempt: input.attempt, submissionId: 'handoff-final', status: 'done', summary: 'Final handoff', handoff: {} }));
+  assert.equal(result(await runUnitCli(['unit', 'stage', 'submit', f.unit, 'handoff', '--output', output], context)).code, 0);
+  assert.equal((await f.store.read(f.unit)).next, null);
 });
 
 test('acceptance cannot commit a policy snapshot superseded during gates', async t => {

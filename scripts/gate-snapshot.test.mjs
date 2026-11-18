@@ -87,6 +87,20 @@ test('snapshot command cannot read the mutable live source tree',async t=>{
  assert.equal(result.exitCode,0);assert.match(result.stdout,/^(EACCES|EPERM|ENOENT)$/);
 });
 
+test('a macOS snapshot command can securely traverse its own root ancestors but not read siblings',{skip:process.platform!=='darwin'},async t=>{
+ const directory=await mkdtemp(path.join(os.tmpdir(),'gate-ancestors-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+ const sourceRoot=path.join(directory,'source'),snapshots=path.join(directory,'snapshots');await mkdir(sourceRoot);await mkdir(snapshots);
+ const secret=path.join(directory,'secret');await writeFile(secret,'sibling');
+ const script=`import {openSync,closeSync,readFileSync,constants} from 'node:fs'; import path from 'node:path';
+const parts=process.cwd().split(path.sep).filter(Boolean);let dir='/';
+for(const part of ['',...parts]){dir=path.join(dir,part);try{closeSync(openSync(dir,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW));}catch(error){process.stdout.write(JSON.stringify({traverse:error.code,dir}));process.exit(0);}}
+try{readFileSync(${JSON.stringify(secret)});process.stdout.write('read');}catch(error){process.stdout.write(error.code);}`;
+ const gate={id:'check',command:[process.execPath,'check.mjs'],files:[{path:'check.mjs',content:script}]};
+ await writeFile(path.join(sourceRoot,'check.mjs'),script);
+ const result=await executeCapturedGate({gate,directory:snapshots,sourceRoot,command:createAdapters().command});
+ assert.equal(result.exitCode,0,result.stderr);assert.match(result.stdout,/^(EACCES|EPERM)$/);
+});
+
 test('a live input changed and restored during execution cannot alter captured input',async t=>{
  const directory=await mkdtemp(path.join(os.tmpdir(),'gate-race-'));t.after(()=>rm(directory,{recursive:true,force:true}));
  const sourceRoot=path.join(directory,'source'),snapshots=path.join(directory,'snapshots');let coord;

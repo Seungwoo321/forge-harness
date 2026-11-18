@@ -137,7 +137,7 @@ function readinessFor(contract, record, contracts) {
     const writers = contracts.filter(item => item.writes.includes(field)).map(item => item.stage);
     if (controlPlaneFields.has(field)) writers.push('control-plane');
     upstreamWriters[field] = writers;
-    if (record[field] !== undefined && record[field] !== null) preparedValues[field] = record[field];
+    if (record[field] !== undefined) preparedValues[field] = record[field];
   }
   return { upstreamWriters, preparedValues };
 }
@@ -242,7 +242,9 @@ function commandFailure(error) {
     : ['LOCK_RECOVERY_UNVERIFIED', 'POLICY_UNSET', 'EFFECT_DENIED', 'EFFECT_APPROVAL_REQUIRED', 'OPEN_DECISIONS', 'DELIVERY_DENIED', 'DELIVERY_PLAN_MISMATCH'].includes(error.code) ? 3
       : error.code === 'REVIEW_REQUIRED' ? 20
       : ['ADAPTER_MISSING', 'ADAPTER_INVALID', 'ENOENT', 'SESSION_CONTRACT_UNSUPPORTED'].includes(error.code) ? 4 : 1);
-  return { code, summary: error.message, details: { error: error.code ?? 'UNIT_FAILURE', ...(error.issues ? { issues: error.issues } : {}),
+  const message = typeof error.message === 'string' ? error.message : '';
+  const summary = message.replace(/\s*[\r\n]+\s*/g, ' ').trim() || 'Unit command failed';
+  return { code, summary, details: { error: error.code ?? 'UNIT_FAILURE', message, ...(error.issues ? { issues: error.issues } : {}),
     ...(error.execution ? {execution:error.execution} : {}), ...(error.reportPath ? {reportPath:error.reportPath} : {}),
     ...(error.cleanupError ? {cleanupError:{code:error.cleanupError.code,message:error.cleanupError.message,...(error.cleanupError.cleanupResult ? {result:error.cleanupError.cleanupResult} : {})}} : {}),
     ...(error.cleanupResult ? {cleanupResult:error.cleanupResult} : {}),

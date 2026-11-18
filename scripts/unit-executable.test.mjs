@@ -177,7 +177,7 @@ test('wrong worker cwd preserves unresolved intent and cannot close or relaunch'
   assert.equal(f.run('finish').code, 3);
   assert.equal(f.run('finish').code, 3);
   assert.equal((await f.rows()).filter(row => row.event === 'execute').length, 1);
-  assert.deepEqual((await f.ledger()).map(row => row.event), ['intent', 'verification']);
+  assert.deepEqual((await f.ledger()).map(row => row.event), ['intent', 'execution-error', 'verification']);
   assert.equal((await f.store.read('unit-a')).state, 'Delivered');
 });
 
@@ -210,7 +210,7 @@ for (const runtime of ['cmux', 'orca']) {
     assert.equal(f.run('finish').code, 3);
     const launches = (await f.rows()).filter(row => row.binary === runtime && row.args.includes(runtime === 'cmux' ? 'new-workspace' : 'create'));
     assert.equal(launches.length, 1);
-    assert.deepEqual((await f.ledger()).map(row => row.event), ['intent', 'verification']);
+    assert.deepEqual((await f.ledger()).map(row => row.event), ['intent', 'execution-error', 'verification']);
     assert.equal((await f.store.read('unit-a')).state, 'Delivered');
   });
 }
@@ -355,7 +355,7 @@ test('Orca process incarnation change preserves uncertainty and never relaunches
   assert.equal(f.run('finish').code, 3);
   assert.equal(f.run('finish').code, 3);
   assert.equal((await f.rows()).filter(row => row.args?.includes('create')).length, 1);
-  assert.deepEqual((await f.ledger()).map(row => row.event), ['intent', 'verification']);
+  assert.deepEqual((await f.ledger()).map(row => row.event), ['intent', 'execution-error', 'verification']);
   assert.equal((await f.store.read('unit-a')).state, 'Delivered');
 });
 

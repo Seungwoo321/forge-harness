@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, realpath, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -78,11 +78,14 @@ async function fixture(t,state = 'InReview',runtime = 'cmux') {
     unitDigest:effectArgsDigest(await store.read('change')),goalDigest:effectArgsDigest(await goals.read('goal')),targetDigest:effectArgsDigest(target),owner,
     provenance:{ref:authority,digest:hash(permission)},reason:'User authorized this exact existing native owner',...extra});
   const adopt = async body=>{const file = path.join(cwd,`${body.id}.json`);await writeFile(file,JSON.stringify(body));return run(['session-adopt','change','--request',file,'--user-input','native-user-message']);};
+  // Concurrent starts each publish their own request files; the shared handoff path is replaced atomically.
+  let reviewCalls=0;
   const prepareReview = async()=>{
-    const file=path.join(cwd,'review-unit.json');await writeFile(file,JSON.stringify({kind:'review',targetUnit:'change',goalId:'goal',policyOverrides:{session:execution},request:{text:'Independent review',userInputRef:'review-permission'}}));
+    const call=++reviewCalls;
+    const file=path.join(cwd,`review-unit-${call}.json`);await writeFile(file,JSON.stringify({kind:'review',targetUnit:'change',goalId:'goal',policyOverrides:{session:execution},request:{text:'Independent review',userInputRef:'review-permission'}}));
     const started=await run(['start','review','--request',file,'--non-interactive']);assert.equal(started.code,0,JSON.stringify(started));
-    const handoffPath=path.join(cwd,'handoff.md');await writeFile(handoffPath,packet);
-    const launch=path.join(cwd,'launch.json');await writeFile(launch,JSON.stringify({cwd,handoffPath,handoffDigest:hash(packet),parentRuntime:owner,waitSeconds:0}));
+    const handoffPath=path.join(cwd,'handoff.md');await writeFile(`${handoffPath}.${call}`,packet);await rename(`${handoffPath}.${call}`,handoffPath);
+    const launch=path.join(cwd,`launch-${call}.json`);await writeFile(launch,JSON.stringify({cwd,handoffPath,handoffDigest:hash(packet),parentRuntime:owner,waitSeconds:0}));
     return launch;
   };
   const startReview = async()=>run(['session-start','review','--request',await prepareReview()]);

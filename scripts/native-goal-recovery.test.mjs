@@ -124,7 +124,7 @@ test('a renamed receiver cannot replace the thread of a marked pending goal',asy
 test('the first pre-Return execution failure survives later generic polling observations',async t=>{
  const f=await fixture(t,true,false,false,'0.169.0',2);await f.edit({trust:true,mode:'crash-before-write'});
  assert.equal((await f.run()).code,3);const rows=await f.ledger();
- assert.ok(rows.some(row=>row.event==='verification'&&row.verify?.message==='cmux observation or launch failed'));
+ assert.ok(rows.some(row=>row.event==='verification'&&row.verify?.message?.startsWith('cmux observation or launch failed (')));
  assert.equal((await f.run()).code,3);assert.deepEqual((await f.read()).writes,[]);assert.equal((await f.read()).launches,1);
  assert.equal((await f.ledger()).filter(row=>row.event==='submission').length,1);
 });

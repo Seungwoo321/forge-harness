@@ -371,9 +371,10 @@ test('a legacy completed start is reobserved and supplemented without replacing 
   await finishSessionUnit(input);
   const ledger = createLedgerStore(f.stateRoot);
   const prior = await ledger.withLock('unit-finish', async store => {
-    const [intent] = await store.read();
+    const rows = await store.read(); const [intent] = rows;
+    assert.deepEqual(rows.map(row => row.event), ['intent', 'execution-error']);
     const legacy = { event: 'result', unit: intent.unit, seq: intent.seq, key: intent.key, result: { sessionId: 'child', cwd: '/work/next' }, done_at: f.adapters.now() };
-    await store.append(legacy); return [intent, legacy];
+    await store.append(legacy); return [...rows, legacy];
   });
   const record = await f.store.read('unit-finish');
   const originalResult = await readFile(record.resultRef.path);
@@ -392,7 +393,7 @@ test('a legacy completed start is reobserved and supplemented without replacing 
   }
   assert.equal((await finishSessionUnit(input)).code, 3);
   const rows = await ledger.withLock('unit-finish', store => store.read());
-  assert.deepEqual(rows.slice(0, 2), prior);
+  assert.deepEqual(rows.slice(0, prior.length), prior);
   assert.equal(rows.at(-1).result.task.schema, 'harness.task-receipt/1');
   assert.equal(rows.filter(row => row.event === 'intent').length, 1);
   assert.equal(starts, 1); assert.equal(observations, 1);

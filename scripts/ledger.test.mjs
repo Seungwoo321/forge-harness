@@ -108,6 +108,27 @@ test('intent without result is verified and never blindly retried', async () => 
   } finally { await f.cleanup(); }
 });
 
+test('an initial execution error is retained as bounded diagnostics without permitting replay', async () => {
+  const f = await fixture();
+  try {
+    let calls = 0;
+    f.adapter.execute = async () => { calls += 1; throw Object.assign(new Error(`command rejected ${'x'.repeat(3000)}`), { code: 'COMMAND_REJECTED', exitCode: 2 }); };
+    f.adapter.verify = async () => { throw Object.assign(new Error('terminal is missing'), { code: 'SESSION_OBSERVATION_INVALID' }); };
+    const input = { unit: 'UNIT-9', effect: 'git.commit', args: commitArgs, policy: taskPolicy, context: { inScope: true }, store: f.store, adapter: f.adapter };
+    const first = await executeEffect(input);
+    assert.equal(first.status, 'uncertain');
+    assert.equal(first.verification.code, 'COMMAND_REJECTED');
+    assert.equal(first.verification.exitCode, 2);
+    assert.equal(first.verification.message.length, 2000);
+    assert.equal((await executeEffect(input)).status, 'uncertain');
+    assert.equal(calls, 1);
+    const rows = await f.store.withLock('UNIT-9', ledger => ledger.read());
+    assert.deepEqual(rows.map(row => row.event), ['intent', 'execution-error', 'verification']);
+    assert.equal(rows[1].error.code, 'COMMAND_REJECTED');
+    assert.equal(rows[1].error.exitCode, 2);
+  } finally { await f.cleanup(); }
+});
+
 test('registered verifier can reconcile a completed uncertain effect', async () => {
   const f = await fixture();
   try {
@@ -140,6 +161,7 @@ test('uncertain PR reconciliation accepts only the exact open repository branch 
     const rows = await f.store.withLock(input.unit, ledger => ledger.read());
     assert.equal(rows.filter(row => row.event === 'intent').length, 1);
     assert.equal(rows.filter(row => row.event === 'verification').length, 4);
+    assert.equal(rows.filter(row => row.event === 'execution-error').length, 1);
   } finally { await f.cleanup(); }
 });
 

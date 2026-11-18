@@ -76,12 +76,14 @@ export async function runPolicyCli(argv, { cwd = process.cwd(), adapters = creat
     return formatCliResult({ code: 0, summary: 'Policy resolved', details: result });
   } catch (error) {
     const code = error.exitCode ?? (error.code === 'POLICY_UNSET' ? 3 : error.code === 'ENOENT' ? 2 : 2);
-    return formatCliResult({ code, summary: error.message, details: { error: error.code ?? 'POLICY_INVALID' } });
+    const message = typeof error.message === 'string' ? error.message : '';
+    const summary = message.replace(/\s*[\r\n]+\s*/g, ' ').trim() || 'Policy command failed';
+    return formatCliResult({ code, summary, details: { error: error.code ?? 'POLICY_INVALID', message } });
   }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const result = await runPolicyCli(process.argv.slice(2));
   process.stdout.write(`${result}\n`);
-  process.exitCode = JSON.parse(result.slice(result.lastIndexOf('RESULT ') + 7)).code;
+  process.exitCode = JSON.parse(result.split(/\r?\n/).findLast(line => line.startsWith('RESULT ')).slice(7)).code;
 }

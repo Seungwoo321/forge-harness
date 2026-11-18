@@ -115,6 +115,17 @@ export function unresolvedEffect(records) {
   });
 }
 
+function executionFailure(error, effect) {
+  const message = typeof error?.message === 'string' && error.message.trim() ? error.message.slice(0, 2000)
+    : effect.startsWith('session.') ? 'native session execution failed' : 'effect execution failed';
+  return {
+    code: typeof error?.code === 'string' && error.code ? error.code : effect.startsWith('session.') ? 'SESSION_EXECUTION_FAILED' : 'EFFECT_EXECUTION_FAILED',
+    message,
+    ...(Number.isInteger(error?.exitCode) ? { exitCode: error.exitCode } : {}),
+    ...(typeof error?.signal === 'string' && error.signal ? { signal: error.signal } : {}),
+  };
+}
+
 export async function executeEffect({
   unit,
   effect,
@@ -318,12 +329,17 @@ export async function executeEffect({
       await ledger.append({ event: 'result', unit, seq, key: prepared.key, result, done_at: doneAt, verify: result?.verify ?? null });
       return { status: 'completed', key: prepared.key, result, seq };
     } catch (error) {
+      // The failed execution is not proof of non-application, so the intent stays uncertain; the bounded diagnostic
+      // keeps the original cause visible to later reconciliation without permitting another execution.
+      const verification = executionFailure(error, effect);
+      // Native goal startup already treats this failure as its first observation. Other effects record it as its own
+      // event so verification-count retry budgets keep counting only observations.
       if (effect === 'session.start' && args.goalPath) {
-        const verification={code:error?.code ?? 'SESSION_EXECUTION_FAILED',message:error?.message ?? 'native session execution failed'};
         await ledger.append({event:'verification',unit,seq,key:prepared.key,status:'unknown',verify:verification,checked_at:adapter.now()});
-        return {status:'uncertain',key:prepared.key,seq,verification};
+      } else {
+        await ledger.append({event:'execution-error',unit,seq,key:prepared.key,error:verification,failed_at:adapter.now()});
       }
-      return { status: 'uncertain', key: prepared.key, seq, verification: null };
+      return {status:'uncertain',key:prepared.key,seq,verification};
     }
     };
     return typeof adapter.fence === 'function' ? adapter.fence(perform) : perform();

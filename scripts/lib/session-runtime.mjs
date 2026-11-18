@@ -25,7 +25,7 @@ function terminals(tree) {
     (workspace.panes ?? []).flatMap(pane => (pane.surfaces ?? []).map(surface => ({ ...surface, workspaceId: workspace.id, windowId: window.id })))));
 }
 
-export function createSessionRunner({ runtime, command, parent, launch, runtimeRpc, taskTransport, taskPrompt, pollAttempts = 30 }) {
+export function createSessionRunner({ runtime, command, parent, launch, runtimeRpc, taskTransport, taskPrompt, pollAttempts = 30, now = () => performance.now() }) {
   if (!['cmux', 'orca'].includes(runtime) || typeof command !== 'function' || typeof launch !== 'function'
     || !parent || typeof parent.sessionId !== 'string' || !parent.sessionId || typeof parent.incarnationId !== 'string' || !parent.incarnationId
     || typeof parent.cwd !== 'string' || !path.isAbsolute(parent.cwd)
@@ -119,9 +119,9 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       throw invalid('Orca terminal identity is unavailable');
     }
     const processEvidence = async () => {
-      const requestedAt = performance.now();
+      const requestedAt = now();
       const response = await runtimeRpc('terminal.inspectProcess', { terminal: sessionId, expectedIncarnationId: terminal.incarnationId, scanChildProcesses: true });
-      const receiveDelay = Math.max(0, performance.now() - requestedAt);
+      const receiveDelay = Math.max(0, now() - requestedAt);
       if (response?.ok === false) throw invalid('Orca process inspection failed');
       const evidence = (response?.result ?? response)?.process?.foregroundProcessEvidence;
       const fence = evidence?.fence;

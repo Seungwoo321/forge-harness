@@ -629,3 +629,19 @@ test('AC-2 unsupported fresh platform proof cannot cross the durable submission 
   assert.equal(marks,0);assert.equal(writes,0);
  }
 });
+
+test('Main default Ready footer resumes the exact pending packet once and rejects foreign drafts',async()=>{
+ const prompt='Read /work/result (sha256:exact); follow its referenced handoffs.';
+ const footer='GPT-6.1-Sol low · ~/project · fix/desktop · Ready · Context 30% left · weekly 56% left · 475K window · 3.16M used · Main [default]';
+ for(const width of [40,240]) {
+  const rows=[];for(let offset=0;offset<footer.length;offset+=width)rows.push('  '+footer.slice(offset,offset+width));
+  const render=draft=>`› ${draft.replaceAll('\n','\n  ')}\n \n${rows.join('\n')}\n  ⚠ 6 warnings · f2 to view\n`;
+  let pastes=0,enters=0;
+  await submitCodexComposer({prompt,read:async()=>render(prompt),verify:async()=>{},paste:async()=>{pastes++;},enter:async()=>{enters++;}});
+  assert.equal(pastes,0);assert.equal(enters,1);
+  for(const draft of ['foreign draft',prompt+' foreign',prompt+'\nforeign tail']) {
+   await assert.rejects(submitCodexComposer({prompt,read:async()=>render(draft),verify:async()=>{},paste:async()=>{pastes++;},enter:async()=>{enters++;}}));
+  }
+  assert.equal(pastes,0);assert.equal(enters,1);
+ }
+});

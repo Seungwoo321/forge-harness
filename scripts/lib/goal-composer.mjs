@@ -1,5 +1,7 @@
 import { taskError, taskDigest } from './session-task.mjs';
 
+export const codexReadyFooter = /^GPT-[A-Za-z0-9.-]+(?:low|medium|high|xhigh|max)·(?:~\/|\/)[^·]+·(?:[A-Za-z0-9._/-]+·)?Ready·Context(?:100|[1-9]?\d)%left(?:·(?:weekly|daily)(?:100|[1-9]?\d)%left)?(?:·\d+(?:\.\d+)?[KMB]?window·\d+(?:\.\d+)?[KMB]?used)?(?:·Main\[default\])?(?:⚠[1-9]\d*warnings?·f2toview)?$/u;
+
 export function nativeComposerContents(screen, provider) {
   if (typeof screen?.renderedDraft === 'string') return screen.renderedDraft;
   if (typeof screen?.draft === 'string') return screen.draft;
@@ -20,9 +22,9 @@ export function nativeComposerContents(screen, provider) {
     }
     while (end > start && !lines[end].trim()) end -= 1;
     // Match the complete terminal status block across soft wraps; never normalize draft text.
-    const readyFooter = /^GPT-[A-Za-z0-9.-]+(?:low|medium|high|xhigh|max)·(?:~\/|\/)[^·]+·(?:[A-Za-z0-9._/-]+·)?Ready·Context(?:100|[1-9]?\d)%left(?:·(?:weekly|daily)(?:100|[1-9]?\d)%left)?(?:·\d+(?:\.\d+)?[KMB]?window·\d+(?:\.\d+)?[KMB]?used)?(?:⚠[1-9]\d*warnings?·f2toview)?$/u;
+
     const statusStart = lines.findLastIndex((line,index)=>index>start && index<=end && /^ {2}GPT-/.test(line)
-      && readyFooter.test(lines.slice(index,end+1).join('').replace(/\s/g,'')));
+      && codexReadyFooter.test(lines.slice(index,end+1).join('').replace(/\s/g,'')));
     if (statusStart > start) end = statusStart;
     else if (end <= start || !/\S.* · /.test(lines[end]) || shortcuts <= start && statusRow > start && statusRow !== end) throw taskError('native goal composer footer is ambiguous');
   }

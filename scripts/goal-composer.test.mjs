@@ -230,3 +230,12 @@ test('recovery requires rendered Ready and rechecks the composer after native id
   write:async(_text,check)=>{draft='foreign draft';await check();writes++;},enter:async()=>{}}),/another draft/);
  assert.equal(writes,0);
 });
+
+test('Main default Ready profiles preserve exact draft bytes across wraps and warning-only rows',()=>{
+ const footer=statusFooter+' · 475K window · 3.16M used · Main [default]';
+ for(const width of [40,80,240])for(const draft of ['Ask Codex to do anything','/goal finish ','/goal finish\n\n','foreign draft']) {
+  const view=wrappedStatusScreen(draft,width,footer).replace('  ← for agents · ? for shortcuts','  ⚠ 6 warnings · f2 to view');
+  assert.equal(nativeComposerContents(view,'codex'),draft);
+  assert.equal(classifyNativeGoalDraft(view,'codex','finish'), 'other');
+ }
+});

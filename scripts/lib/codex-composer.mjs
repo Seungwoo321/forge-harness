@@ -1,5 +1,5 @@
 import { taskError } from './session-task.mjs';
-import { nativeComposerContents, composerTextMatches } from './goal-composer.mjs';
+import { nativeComposerContents, composerTextMatches, codexReadyFooter } from './goal-composer.mjs';
 
 const placeholders = new Set(['Ask Codex to do anything', 'Explain this codebase', 'Summarize recent commits',
   'Implement {feature}', 'Find and fix a bug in @filename', 'Write tests for @filename']);
@@ -9,6 +9,9 @@ function composer(screen) {
   const start = lines.findLastIndex(line => /^ ?› /.test(line));
   if (start < 0 || lines.slice(start+1).some(line=>/· Working ·/.test(line))) throw taskError('supported Codex composer is unavailable');
   let end = lines.findLastIndex(line=>line.trim().length > 0);
+  const complete = lines.findLastIndex((line,index)=>index>start && /^ {2}GPT-/.test(line)
+    && codexReadyFooter.test(lines.slice(index,end+1).join('').replace(/\s/g,'')));
+  if (complete > start) return nativeComposerContents(screen, 'codex');
   // Codex 0.167.0 can omit the hint row when its configured status line fills the viewport.
   const footer = /^ {2}GPT-[A-Za-z0-9.-]+ (?:low|medium|high|xhigh|max) · (?:~\/|\/)[^·\n]+ · (?:[A-Za-z0-9._/-]+ · )?Ready ·(?:…| Context (?:100|[1-9]?\d)% left · [A-Za-z0-9._/-]+…)(?:  ⚠ [1-9]\d* warnings? · f2 to view)?$/u;
   if (/^ {2,}⚠ [1-9]\d* warnings? · f2 to view$/u.test(lines[end] ?? '') && footer.test(lines[end - 1] ?? '')) end -= 1;

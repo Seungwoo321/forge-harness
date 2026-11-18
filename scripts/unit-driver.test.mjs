@@ -863,6 +863,20 @@ test('handoff prose cannot bypass verified session finalization', async t => {
   assert.equal((await f.store.read(f.unit)).state, 'Delivered');
 });
 
+test('a final unit with no successor opens and submits handoff with next null', async t => {
+  const f = await fixture(t);
+  await f.store.update(f.unit, record => ({ ...record, state: 'Delivered', acceptance: [], evidence: [], changedPaths: [], assumptions: [], next: null }));
+  const context = { stateRoot: f.stateRoot, contractsDir: path.join(repo, 'skills'), adapters: f.adapters };
+  const opened = result(await runUnitCli(['unit', 'stage', 'open', f.unit, 'handoff'], context));
+  assert.equal(opened.code, 0, JSON.stringify(opened));
+  const input = JSON.parse(await readFile(opened.input, 'utf8'));
+  assert.equal(input.data.next, null);
+  const output = path.join(f.root, 'handoff-final.json');
+  await writeFile(output, JSON.stringify({ inputDigest: input.inputDigest, attempt: input.attempt, submissionId: 'handoff-final', status: 'done', summary: 'Final handoff', handoff: {} }));
+  assert.equal(result(await runUnitCli(['unit', 'stage', 'submit', f.unit, 'handoff', '--output', output], context)).code, 0);
+  assert.equal((await f.store.read(f.unit)).next, null);
+});
+
 test('acceptance cannot commit a policy snapshot superseded during gates', async t => {
   const {stateRoot,unit,store}=await fixture(t);
   await prepareAcceptanceRecord(store,unit,{review:{mode:'none',by:'session',triggers:[]}});

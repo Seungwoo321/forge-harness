@@ -153,6 +153,10 @@ export function validateSchema(schema, value) {
   return { ok: issues.length === 0, issues };
 }
 
+function allowsNull(schema) {
+  return schema?.type === 'null' || Array.isArray(schema?.type) && schema.type.includes('null');
+}
+
 export function validateReadiness(contract, { upstreamWriters, preparedValues } = {}) {
   const contractResult = validateStageContract(contract);
   if (!contractResult.ok) return contractResult;
@@ -163,7 +167,8 @@ export function validateReadiness(contract, { upstreamWriters, preparedValues } 
   for (const field of contract.reads) {
     const writers = upstreamWriters[field];
     if (!Array.isArray(writers) || writers.length === 0 || writers.some(writer => typeof writer !== 'string' || writer.length === 0)) issues.push(issue(`$.reads.${field}`, 'writer', 'no upstream writer is declared'));
-    if (!Object.hasOwn(preparedValues, field) || preparedValues[field] === null || preparedValues[field] === undefined) {
+    const value = Object.hasOwn(preparedValues, field) ? preparedValues[field] : undefined;
+    if (value === undefined || value === null && !allowsNull(contract.input?.properties?.data?.properties?.[field])) {
       issues.push(issue(`$.data.${field}`, 'prepared', 'a non-null prepared value is required'));
     }
   }

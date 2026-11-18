@@ -137,7 +137,7 @@ function readinessFor(contract, record, contracts) {
     const writers = contracts.filter(item => item.writes.includes(field)).map(item => item.stage);
     if (controlPlaneFields.has(field)) writers.push('control-plane');
     upstreamWriters[field] = writers;
-    if (record[field] !== undefined && record[field] !== null) preparedValues[field] = record[field];
+    if (record[field] !== undefined) preparedValues[field] = record[field];
   }
   return { upstreamWriters, preparedValues };
 }

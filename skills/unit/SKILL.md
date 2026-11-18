@@ -38,6 +38,8 @@ For a demonstrated mismatch that recorded an external observation or delivery ob
 
 If a command leaves the unit `Blocked`, keep this owning session active and do not write a terminal result. Supervise the bounded resolver path, wait for its completed root-cause submission, then run `unit resume` and continue at the returned original stage in this same session.
 
+For an operator instruction misattributed as human authority in an existing adoption or goal amendment, use public `unit session-approval-correct` or `goal approval-correct` with `docs/authority-correction.md`. Require the trusted contextual verifier, actual original human source and current native owner. For a fully Closed final target under a complete goal, require the explicit immutable completionProof and trusted historical target/native verifier instead of live observation; preserve completion and execution rights. Keep original receipts and custody intact; adoption replay, rebind and same-value goal amendments cannot correct approval provenance.
+
 ## Remote failure after acceptance
 
 For an operator message mistakenly recorded as the human approval of the latest delivery policy change, use public `unit policy approval-correct <unit> --request <file> --user-input <original-human-ref>`. Follow the exact request and trusted verification contract in `docs/runtime-adapters.md`. Preserve the original policy change, current policy, failed evidence and review history. Correcting provenance never creates acceptance or delivery evidence; policy value round trips are not a substitute.

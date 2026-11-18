@@ -16,7 +16,7 @@ test('packaged adapter reads the exact owner from the durable request or finaliz
   await assert.rejects(createRuntimeAdapters({...args,options:{...args.options,request:'request.json'}}),/worker executable/);
 });
 
-test('public CLI loads the packaged adoption observer, uses current goal account and never grants managed close authority',async t=>{
+test('AC-3 public CLI loads the packaged adoption observer, uses current goal account and never grants managed close authority',async t=>{
   const {realpath,readFile}=await import('node:fs/promises');
   const {spawnSync}=await import('node:child_process');
   const {fileURLToPath}=await import('node:url');
@@ -58,7 +58,9 @@ export async function createRuntimeAdapters(input){
  const command=(binary,args,options)=>input.adapters.command(process.execPath,[${JSON.stringify(stub)},binary,...args],options);
  const result=await packaged({...input,adapters:{...input.adapters,command}});
  return {...result,git:{inspectUnit:async()=>({head:'head',contentFingerprint:'content'})},provider:{
- verifyUserInput:async binding=>({...binding,verified:binding.userInputRef==='actual-message'&&binding.effect==='unit.session.adopt'}),
+ verifyUserInput:async binding=>({...binding,verified:binding.userInputRef==='actual-message'&&binding.effect==='unit.session.adopt'
+ ||binding.userInputRef==='corrected-human'&&['unit.session.approval.correct','goal.approval.correct'].includes(binding.effect)}),
+ verifyAuthorityCorrection:async binding=>({...binding,verified:binding.userInputRef==='corrected-human'&&binding.goalId==='g'}),
  verifySessionAdoption:async ({request,record,goal,target,...binding})=>({...binding,verified:goal.policy.account==='/current-account'&&record.policy.session.account==='/historical-account'
  &&'sha256:'+createHash('sha256').update(await readFile(request.provenance.ref)).digest('hex')===request.provenance.digest})}};
 }
@@ -72,6 +74,22 @@ export async function createRuntimeAdapters(input){
   const core=createAdapters({repositoryRoot:root});const command=(binary,args,options)=>core.command(process.execPath,[stub,binary,...args],options);
   const args={cwd:root,adapters:{command},options:{'state-root':stateRoot,request:requestFile},argv:['unit','session-adopt','u']};
   assert.equal((await (await createRuntimeAdapters(args)).sessionRunner.observe({cwd:root,targetCwd:root})).closable,false);
+  // Both public correction commands resolve the unit's current native custody, including the goal-level verb.
+  for (const kind of ['adoption','amendment']) {
+    if (kind === 'amendment') await goals.transaction('g',goal=>({...goal,revision:goal.revision+1,
+      amendments:[{previous:{objective:'previous',criteria:['previous']},userInputRef:'operator',reason:'original change'}]}));
+    const current=await goals.read('g'),original=current[kind==='adoption'?'adoptions':'amendments'][0];
+    const correction={id:`correct-${kind}`,unit:'u',expectedRevision:unit.revision,expectedGoalRevision:current.revision,
+      unitDigest:effectArgsDigest(unit),goalDigest:effectArgsDigest(current),targetDigest:effectArgsDigest(target),
+      original:{index:0,digest:effectArgsDigest(original)},provenance:{ref:authority,digest:hash(await readFile(authority))},reason:'Contextually verified correction'};
+    const file=path.join(root,`correct-${kind}.json`);await writeFile(file,JSON.stringify(correction));
+    const verb=kind==='adoption'?['unit','session-approval-correct','u']:['goal','approval-correct','g'];
+    const corrected=spawnSync(process.execPath,[cli,...verb,'--request',file,'--user-input','corrected-human',
+      '--state-root',stateRoot,'--project-root',root,'--adapters',providers],{cwd:root,encoding:'utf8'});
+    assert.equal(corrected.status,0,corrected.stdout+corrected.stderr);
+    assert.deepEqual(await readFile(path.join(stateRoot,'units/u/unit.json')),before);
+  }
+  assert.equal((await goals.read('g')).authorityCorrections.length,2);
   // Stage submission has a nested verb and obtains its managed reviewer from goal custody without a new request file.
   await store.create({schema:'harness.unit/1',unit:'review',kind:'review',state:'InReview',targetUnit:'u',continuity:{goalId:'g'}});
   const unregistered=await createRuntimeAdapters({...args,options:{'state-root':stateRoot},argv:['unit','session-recover','review']});

@@ -117,3 +117,7 @@ Codex 0.167.0·0.167.1·0.168.0의 첫 입력 전 rollout은 아직 파일이 �
 ## Submitted stage integration and post-delivery scope
 
 Scope recheck retains the provider's live `base`/`baseRef` and verifies that observation against Git. If the approved branch already contains the unit HEAD, it derives `comparisonBase` from the first real two-parent target introduction; the provider cannot supply an arbitrary historical base. The receipt preserves both bases, the introduction merge and `inheritedStagePaths`. Actual current changes and unit-exclusive history are evaluated against that recovered comparison base. A fast-forward/ambiguous introduction, changed full tree, conflict/edited merge, altered checkpoint or unbound stage cannot obtain the clean-integration exclusion. Original stages/findings/evidence remain unchanged; ordinary acceptance, review and finalization remain separate public operations.
+
+Adoption과 목표 변경의 승인 출처 정정은 [승인 출처 정정](authority-correction.md)의 필수 읽기 전용 `provider.verifyAuthorityCorrection`과 `verifyUserInput`을 함께 사용한다. 원 잘못된 귀속과 실제 원 사람의 권한·현재 native 소유권·정확한 대상 결속을 검증하며 기존 소유권과 이력을 바꾸지 않는다.
+
+완전히 종료된 목표의 최종 단위는 같은 계약의 필수 `provider.verifyCompletedAuthorityTarget`으로 원 accepted 대상과 native 처분의 불변 이력을 검증한다. live 경로의 Git·native 검증을 대체할 수 없으며 완료 상태나 현재 프로세스 부재만으로 통과시키지 않는다.

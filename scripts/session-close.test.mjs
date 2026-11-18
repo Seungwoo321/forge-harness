@@ -1,95 +1,195 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {effectArgsDigest} from './lib/approvals.mjs';
+import {mkdtemp,rm} from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { createSessionRunner } from './lib/session-runtime.mjs';
+import {createLedgerStore,executeEffect} from './lib/ledger.mjs';
 
-function fixture(mode) {
-  let present = true;
+function fixture(options = {}) {
+  let present = options.present ?? true;
+  let workspacePresent = true;
+  let stale = 0;
+  let attempted = false;
+  let marked = false;
   let closes = 0;
-  let placeholder = false;
-  let unrelated = false;
-  let workspaceClosed = 0;
-  const solo = mode === 'solo-race' || mode === 'solo-handoff' || mode === 'solo-user';
-  const title = mode === 'solo-handoff' || mode === 'solo-race' ? `handoff-${'a'.repeat(64)}` : mode === 'solo-user' ? 'my workspace' : undefined;
-  const owner = { sessionId: 'owner', cwd: '/work/product', incarnationId: 'tty1:11:START', tty: 'tty1',
-    worker: { executable: 'worker', incarnationId: 'tty1:11:START', pid: 11, threadId: 'native-owner' } };
-  const recipient = { sessionId: 'receiver', cwd: '/work/product', incarnationId: 'tty2:22:START', executable: 'worker' };
-  const input = { effect: 'session.close', key: 'close-key', args: { owner, recipient, session: 'owner', incarnation: owner.incarnationId } };
-  const command = async (binary, args) => {
+  let workspaceCloses = 0;
+  let trees = 0;
+  const title = options.foreign ? 'my workspace' : `handoff-${'a'.repeat(64)}`;
+  const owner = {sessionId:'owner',workspaceId:'workspace',cwd:'/work/product',incarnationId:'tty1:11:START',tty:'tty1',
+    worker:{executable:'worker',incarnationId:'tty1:11:START',pid:11,threadId:'native-owner'}};
+  const recipient = {sessionId:'receiver',cwd:'/work/product',incarnationId:'tty2:22:START',executable:'worker'};
+  const submission = {async mark(binding) { this.binding=structuredClone(binding); this.attempted=true; marked=true; }};
+  const input = {effect:'session.close',key:'close-key',args:{owner,recipient,session:'owner',incarnation:owner.incarnationId},submission};
+  const others = [...(options.others ?? [])];
+  const command = async (binary,args) => {
     let stdout = '';
-    if (binary === 'cmux' && args.includes('tree')) stdout = JSON.stringify({ windows: [{ id: 'window', workspaces: [{ id: 'workspace', title, panes: [{ surfaces: [
-      ...(present ? [{ id: 'owner', type: 'terminal', tty: 'tty1' }] : []), ...(placeholder ? [{id:'placeholder',type:'terminal',tty:'tty3'}] : []),
-      ...(solo?[]:[{ id: 'receiver', type: 'terminal', tty: 'tty2' }]),
-      ...(unrelated?[{id:'user-shell',type:'terminal',tty:'tty4'}]:[]),
-    ] }] }, ...(solo?[{id:'receiver-workspace',panes:[{surfaces:[{id:'receiver',type:'terminal',tty:'tty2'}]}]}]:[])] }] });
-    else if (binary === 'cmux' && args.includes('new-surface')) { placeholder = true; stdout = JSON.stringify({ surface_id: 'placeholder', workspace_id: 'workspace' }); }
-    else if (binary === 'cmux' && args.includes('close-workspace')) { workspaceClosed += 1; }
-    else if (binary === 'cmux' && args.includes('close-surface')) {
-      if(mode==='solo-race') unrelated = true;
-      assert.equal(args[args.indexOf('--workspace') + 1], 'workspace');
-      closes += 1; if (mode === 'failed') return { exitCode: 1 }; present = false; if (mode === 'lost') return { exitCode: 1 };
-    }
-    else if (binary === 'ps') {
-      if (args.includes('tty=')) stdout = mode === 'caller' ? 'tty1' : '??';
-      else if (args.includes('pid=,pgid=,tpgid=,comm=')) stdout = args.includes('tty2') ? '22 22 22 worker\n' : '11 11 11 worker\n';
-      else stdout = mode === 'reused' && args.includes('11') ? 'CHANGED' : mode === 'recipient-drift' && args.includes('22') ? 'CHANGED' : 'START';
-    } else if (binary === 'lsof') stdout = 'p11\nn/work/product\n';
-    else throw new Error(`unexpected ${binary} ${args.join(' ')}`);
-    return { exitCode: 0, stdout };
+    if (binary === 'cmux' && args.includes('tree')) {
+      trees++;
+      if (options.malformed) return {exitCode:0,stdout:JSON.stringify(options.malformed)};
+      if (attempted && stale-- <= 0 && !options.failed) { present=false; if (workspaceCloses && !options.residual) workspacePresent=false; }
+      const surfaces = [...(present?[{id:'owner',type:'terminal',tty:'tty1'}]:[]),...others,
+        ...(marked && options.race?[{id:'user-added',type:options.race}]:[])];
+      const routeChanged = marked && options.routeDrift;
+      stdout=JSON.stringify({windows:[{id:routeChanged?'other-window':'window',workspaces:[
+        ...(workspacePresent?[{id:'workspace',title:marked && options.titleDrift?'changed title':title,panes:[{surfaces,
+          ...(options.badCount?{surface_count:surfaces.length+1}:{})}]}]:[]),
+        {id:'receiver-workspace',panes:[{surfaces:[{id:'receiver',type:'terminal',tty:'tty2'}]}]},
+      ]}]});
+    } else if (binary === 'cmux' && (args.includes('close-workspace') || args.includes('close-surface'))) {
+      assert.equal(args[args.indexOf('--workspace')+1],'workspace');
+      attempted=true; stale=options.stale ?? 0;
+      if (args.includes('close-workspace')) workspaceCloses++; else {closes++;assert.equal(args[args.indexOf('--surface')+1],'owner');}
+      if (options.failed || options.lost) return {exitCode:1,stdout:''};
+    } else if (binary === 'ps') {
+      if (args.includes('tty=')) stdout=options.caller?'tty1':'??';
+      else if (args.includes('pid=,pgid=,tpgid=,comm=')) stdout=args.includes('tty2')?'22 22 22 worker\n':'11 11 11 worker\n';
+      else stdout=(options.reused || marked && options.processDrift) && args.includes('11')
+        || options.recipientDrift && args.includes('22')?'CHANGED':'START';
+    } else if (binary === 'lsof') stdout='p11\nn/work/product\n';
+    else throw Error(`unexpected ${binary} ${args.join(' ')}`);
+    return {exitCode:0,stdout};
   };
-  const runner = createSessionRunner({ runtime: 'cmux', command, parent: { ...owner, closable: mode !== 'orchestrator' },
-    launch: () => ['worker'], pollAttempts: 1, taskTransport: { async identity() { return { threadId: mode === 'thread-drift' ? 'another-thread' : 'native-owner' }; } } });
-  return { runner, input, closes: () => closes, placeholder: () => placeholder, unrelated: () => unrelated, workspaceClosed: () => workspaceClosed };
+  const makeRunner = () => createSessionRunner({runtime:'cmux',command,parent:{...owner,closable:!options.orchestrator},
+    launch:()=>['worker'],pollAttempts:options.pollAttempts ?? 1,
+    taskTransport:{async identity(){return {threadId:options.threadDrift || marked && options.lateThreadDrift?'changed-thread':'native-owner'};}}});
+  return {runner:makeRunner(),makeRunner,input,submission,others,
+    state:()=>({present,workspacePresent,closes,workspaceCloses,trees})};
 }
 
-for (const mode of ['orchestrator', 'caller', 'reused', 'recipient-drift', 'thread-drift']) {
-  test(`native close rejects ${mode} before touching a surface`, async () => {
-    const f = fixture(mode);
-    await assert.rejects(f.runner.execute(f.input));
-    assert.equal(f.closes(), 0);
+for (const key of ['orchestrator','caller','reused','recipientDrift','threadDrift','processDrift','lateThreadDrift','routeDrift','titleDrift']) {
+  test(`native close rejects ${key} before mutation (AC-2)`,async()=>{
+    const f=fixture({[key]:true}); await assert.rejects(f.runner.execute(f.input));
+    assert.equal(f.state().closes+f.state().workspaceCloses,0);
   });
 }
 
-test('native close verifies disappearance and lost response reconciles without another close', async () => {
-  for (const mode of ['success', 'lost']) {
-    const f = fixture(mode);
-    if (mode === 'lost') await assert.rejects(f.runner.execute(f.input));
-    else assert.equal((await f.runner.execute(f.input)).closed, true);
-    const checked = await f.runner.verify(f.input);
-    assert.equal(checked.status, 'completed');
-    assert.equal(checked.result.incarnationId, f.input.args.owner.incarnationId);
-    assert.equal(f.closes(), 1);
+test('exclusive managed workspace closes directly without a replacement shell (AC-1)',async()=>{
+  const f=fixture(); const result=await f.runner.execute(f.input);
+  assert.equal(result.closed,true); assert.equal(result.closure.target.kind,'workspace');
+  assert.equal(f.submission.attempted,true);
+  assert.equal(f.state().workspacePresent,false); assert.equal(f.state().workspaceCloses,1); assert.equal(f.state().closes,0);
+  assert.equal((await f.makeRunner().verify({...f.input,submission:undefined,priorResult:result})).status,'completed');
+});
+
+for (const type of ['terminal','browser','dock','unknown']) {
+  test(`shared ${type} content is preserved through exact surface closure and replay (AC-2 AC-3)`,async()=>{
+    const others=[{id:'user-content',type,tty:'tty4'}]; const f=fixture({others});
+    assert.equal((await f.runner.execute(f.input)).closed,true);
+    assert.equal(f.state().workspacePresent,true);assert.equal(f.state().workspaceCloses,0);assert.equal(f.state().closes,1);
+    assert.deepEqual(f.others,others);assert.equal((await f.makeRunner().verify(f.input)).status,'completed');
+  });
+}
+
+test('foreign last-surface workspace is preserved without creating a surface (AC-2)',async()=>{
+  const f=fixture({foreign:true});assert.equal((await f.runner.execute(f.input)).closed,true);
+  assert.equal(f.state().workspaceCloses,0);assert.equal(f.state().workspacePresent,true);assert.equal(f.state().closes,1);
+});
+
+test('new shared content before mutation rejects workspace closure (AC-2)',async()=>{
+  const f=fixture({race:'browser'});await assert.rejects(f.runner.execute(f.input));
+  assert.equal(f.state().workspaceCloses+f.state().closes,0);assert.equal((await f.runner.verify(f.input)).status,'unknown');
+});
+
+for (const malformed of [{},{windows:[]},{windows:[{}]},{windows:[{id:'w',workspaces:[{id:'x',panes:[{}]}]}]},
+  {windows:[{id:'w',workspaces:[{id:'x',panes:[{surfaces:[{id:'x',type:'browser'},{id:'x',type:'terminal'}]}]}]}]}]) {
+  test('incomplete or ambiguous close inventory cannot authorize mutation or success (AC-2)',async()=>{
+    const f=fixture({malformed});await assert.rejects(f.runner.execute(f.input));assert.equal((await f.runner.verify(f.input)).status,'unknown');
+    assert.equal(f.state().closes+f.state().workspaceCloses,0);
+  });
+}
+
+test('inconsistent surface count rejects close (AC-2)',async()=>{
+  const f=fixture({badCount:true});await assert.rejects(f.runner.execute(f.input));assert.equal(f.state().workspaceCloses,0);
+});
+
+test('permanent malformed inventory fails immediately without disappearance polling (AC-2 AC-4)',async()=>{
+  const f=fixture({malformed:{},pollAttempts:3});
+  assert.equal((await f.runner.verify(f.input)).status,'unknown');
+  assert.equal(f.state().trees,1);assert.equal(f.state().workspaceCloses+f.state().closes,0);
+});
+
+test('permanent owner identity failures are not polled as delayed disappearance (AC-2)',async()=>{
+  const once=fixture({reused:true,pollAttempts:1}),bounded=fixture({reused:true,pollAttempts:3});
+  assert.equal((await once.runner.verify(once.input)).status,'unknown');
+  assert.equal((await bounded.runner.verify(bounded.input)).status,'unknown');
+  assert.equal(bounded.state().trees,once.state().trees);
+});
+
+test('delayed inventory is polled until actual workspace disappearance (AC-1 AC-3)',async()=>{
+  const f=fixture({stale:1,pollAttempts:2});assert.equal((await f.runner.execute(f.input)).closed,true);
+  assert.equal(f.state().workspacePresent,false);assert.equal(f.state().workspaceCloses,1);
+});
+
+test('remaining workspace never proves full cleanup after owner disappears (AC-3)',async()=>{
+  const f=fixture({residual:true});await assert.rejects(f.runner.execute(f.input));
+  assert.equal(f.state().present,false);assert.equal(f.state().workspacePresent,true);
+  assert.equal((await f.makeRunner().verify(f.input)).status,'unknown');
+  assert.equal((await f.makeRunner().verify({...f.input,submission:undefined})).status,'unknown');
+  assert.equal(f.state().workspaceCloses,1);
+});
+
+test('unbound legacy owner disappearance with a residual managed workspace is unknown (AC-3)',async()=>{
+  const f=fixture({present:false});assert.equal((await f.runner.verify(f.input)).status,'unknown');
+  assert.equal(f.state().workspaceCloses+f.state().closes,0);
+});
+
+test('attempted failed closure stays unknown and never repeats a destructive command (AC-3)',async()=>{
+  const f=fixture({failed:true});await assert.rejects(f.runner.execute(f.input));
+  assert.equal((await f.runner.verify(f.input)).status,'unknown');await assert.rejects(f.runner.execute(f.input));
+  assert.equal(f.state().workspaceCloses,1);
+});
+
+test('changed original close arguments reject saved target proof (AC-2 AC-3)',async()=>{
+  const f=fixture();await f.runner.execute(f.input);
+  assert.equal((await f.runner.verify({...f.input,args:{...f.input.args,resultDigest:'another-result'}})).status,'unknown');
+});
+
+test('foreign workspace bindings and prior results never prove original cleanup (AC-2 AC-3)',async()=>{
+  for (const kind of ['workspace','surface']) {
+    const f=fixture({present:false});
+    const closure={runtime:'cmux',argsDigest:effectArgsDigest(f.input.args),target:{kind,
+      id:kind==='workspace'?'foreign-workspace':'owner',workspaceId:'foreign-workspace',windowId:'window',title:`handoff-${'a'.repeat(64)}`}};
+    for (const proof of [{submission:{attempted:true,binding:closure}},{submission:undefined,priorResult:{closed:true,closure}}]) {
+      assert.equal((await f.runner.verify({...f.input,...proof})).status,'unknown');
+      await assert.rejects(f.runner.execute({...f.input,...proof}));
+    }
+    assert.equal(f.state().workspaceCloses+f.state().closes,0);
   }
 });
 
-test('native failed close remains unknown while the exact session still exists', async () => {
-  const f = fixture('failed');
-  await assert.rejects(f.runner.execute(f.input));
-  assert.equal((await f.runner.verify(f.input)).status, 'not-applied');
-  assert.equal(f.closes(), 1);
+test('ledger rejects a close target for another workspace before mutation (AC-2 AC-3)',async t=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),'session-close-binding-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const f=fixture();const store=createLedgerStore(root);let mutations=0;
+  const input={unit:'forged',effect:'session.close',args:f.input.args,
+    policy:{goal:{class:'task'},authority:{allow:[],deny:[]},delivery:'none'},context:{explicitUserInstruction:true,productOwned:true},store,
+    adapter:{now:()=> '2026-01-01T00:00:00.000Z',verify:async()=>({status:'unknown'}),async execute(effect){
+      await effect.submission.mark({runtime:'cmux',argsDigest:effectArgsDigest(effect.args),target:{kind:'workspace',
+        id:'foreign-workspace',workspaceId:'foreign-workspace',windowId:'window',title:`handoff-${'a'.repeat(64)}`}});
+      mutations++;return {closed:true};
+    }}};
+  assert.equal((await executeEffect(input)).status,'uncertain');assert.equal(mutations,0);
+  assert.equal((await store.withLock('forged',l=>l.read())).filter(row=>row.event==='submission').length,0);
 });
 
-
-test('last-surface closure uses an exited placeholder and never closes concurrently added surfaces', async () => {
-  const f = fixture('solo-race');
-  assert.equal((await f.runner.execute(f.input)).closed, true);
-  assert.equal(f.placeholder(), true);
-  assert.equal(f.unrelated(), true);
-  assert.equal(f.closes(), 1);
+test('focused closure regression reconciles lost responses through the ledger in a new runner (AC-3 AC-4)',async t=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),'session-close-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  for (const shared of [false,true]) {
+    const f=fixture({lost:true,others:shared?[{id:'user-browser',type:'browser'}]:[],stale:1,pollAttempts:2});
+    const store=createLedgerStore(root);let runner=f.runner;
+    const effect={unit:shared?'shared':'exclusive',effect:'session.close',args:f.input.args,
+      policy:{goal:{class:'task'},authority:{allow:[],deny:[]},delivery:'none'},context:{explicitUserInstruction:true,productOwned:true},store,
+      adapter:{now:()=> '2026-01-01T00:00:00.000Z',execute:input=>runner.execute(input),verify:input=>runner.verify(input)}};
+    assert.equal((await executeEffect(effect)).status,'uncertain'); runner=f.makeRunner();
+    const reconciled=await executeEffect(effect);assert.equal(reconciled.status,'reconciled');assert.equal(reconciled.result.closed,true);
+    assert.equal((await executeEffect(effect)).status,'duplicate');
+    assert.equal(f.state().workspaceCloses+f.state().closes,1);
+    const rows=await store.withLock(effect.unit,l=>l.read());
+    assert.equal(rows.filter(row=>row.event==='intent').length,1);assert.equal(rows.filter(row=>row.event==='submission').length,1);
+    assert.equal(rows.find(row=>row.event==='submission').binding.target.kind,shared?'surface':'workspace');
+  }
 });
-
-test('a harness-created workspace left with only its placeholder is closed; other workspaces are kept', async () => {
-  const handoff = fixture('solo-handoff');
-  assert.equal((await handoff.runner.execute(handoff.input)).closed, true);
-  assert.equal(handoff.workspaceClosed(), 1);
-  const user = fixture('solo-user');
-  assert.equal((await user.runner.execute(user.input)).closed, true);
-  assert.equal(user.workspaceClosed(), 0);
-  const race = fixture('solo-race');
-  assert.equal((await race.runner.execute(race.input)).closed, true);
-  assert.equal(race.workspaceClosed(), 0);
-});
-
 test('native recipient observation resolves the recipient account separately from the reviewer account',async()=>{
   const threadId='11111111-1111-4111-8111-111111111111';
   const command=async(binary,args)=>{

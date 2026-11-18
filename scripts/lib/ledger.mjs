@@ -146,7 +146,7 @@ export async function executeEffect({
   return await store.withLock(unit, async ledger => {
     const submissionInput = async (input, recovery) => {
       const goalStart = effect === 'session.start' && input.args.goalPath;
-      if (!goalStart && effect !== 'session.deliver') return input;
+      if (!goalStart && effect !== 'session.deliver' && effect !== 'session.close') return input;
       const rows = await ledger.read();
       const previous = rows.findLast(row => row.event === 'submission' && row.seq === input.seq && row.key === input.key);
       const receiver = rows.findLast(row => row.event === 'receiver' && row.seq === input.seq && row.key === input.key);
@@ -187,7 +187,14 @@ export async function executeEffect({
           if (submission.readOnly || submission.attempted || (await ledger.read()).some(row => row.event === 'submission' && row.seq === input.seq && row.key === input.key))
             throw errorWithCode('EFFECT_UNCERTAIN',goalStart ? 'native goal input was already attempted' : 'native result input was already attempted');
           const packets = ['handoff','result','goal'].filter(name=>input.args[`${name}Path`] !== undefined).map(name=>({path:input.args[`${name}Path`],digest:input.args[`${name}Digest`]}));
-          if (!binding || !['cmux','orca'].includes(binding.runtime) || !Number.isSafeInteger(binding.pid) || binding.pid < 1 || !binding.executable
+          if (effect === 'session.close') {
+            if (binding?.runtime !== 'cmux' || binding.argsDigest !== effectArgsDigest(input.args)
+              || !['workspace','surface'].includes(binding.target?.kind) || !binding.target.workspaceId || !binding.target.windowId
+              || binding.target.workspaceId !== input.args.owner?.workspaceId
+              || binding.target.kind === 'surface' && binding.target.id !== input.args.owner?.sessionId
+              || binding.target.kind === 'workspace' && (binding.target.id !== binding.target.workspaceId || !/^handoff-[a-f0-9]{64}$/.test(binding.target.title ?? '')))
+              throw errorWithCode('LEDGER_VERIFY_INVALID','native close target binding is incomplete');
+          } else if (!binding || !['cmux','orca'].includes(binding.runtime) || !Number.isSafeInteger(binding.pid) || binding.pid < 1 || !binding.executable
             || submission.receiver && ['runtime','sessionId','incarnationId','cwd'].some(key=>binding[key]!==submission.receiver[key])
             || effectArgsDigest(binding.packets) !== effectArgsDigest(packets) || binding.cwd !== input.args.cwd || binding.goalDigest !== input.args.goalDigest
             || !binding.threadId || !binding.sessionId || !binding.incarnationId || !binding.promptDigest || !Array.isArray(binding.packets)

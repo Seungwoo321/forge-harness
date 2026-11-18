@@ -425,6 +425,8 @@ LLM 이 제어면의 결정을 우회하지 못하도록 두 가지를 둔다: �
 
 전체 목표 완료 또는 수신자가 없는 실제 차단·사용자 일시중지에는 successor나 returnTo를 만들지 않는다. 목표 완료 근거 또는 Stopped 상태·원인·객관적인 재개 조건과 결과를 영속 기록해 사용자에게 보고한다. 수신자가 없으므로 native 수신·목표 활성·착수 영수증을 요구하지 않는다. 허용된 관리 worker의 자동 종료가 요청된 경우에만 생존 제어면이 정확한 소유자의 소멸을 별도로 확인한다. 허용되지 않은 셸·오케스트레이터와 사용자 소유 terminal은 유지한다.
 
+cmux 종료는 모든 surface 유형을 포함하는 완전한 목록과 정확한 소유자·수신자·경로를 다시 확인한다. 전용 관리 workspace는 지원되는 `close-workspace`로 직접 닫고 대체 surface를 생성하지 않는다. 공유·외부 workspace는 정확한 소유자 surface만 닫는다. 원장은 파괴 명령 전에 선택한 종료 대상을 원 close 인자에 결속해 저장한다. 응답 유실 뒤에는 같은 대상만 재관찰하며 이미 시도한 명령을 반복하지 않는다. 선택한 workspace 또는 surface가 실제 목록에서 사라져야 완료한다. 지연된 목록은 제한 안에서 재관찰하고, 소유자가 사라져도 관리 workspace의 정리가 증명되지 않으면 완료를 확정하지 않는다. [ADR 0063](adr/0063-managed-workspace-closure.md)를 따른다.
+
 ### 7.3 단계 계약 (공통 봉투)
 
 stage 열거값은 `scope | implement | gates | root-cause | review | handoff`다. CLI·stages[].name·파일·체크포인트·Failure Record는 같은 이름을 사용한다. Scoped→scope, Implementing→implement, SelfGated→gates, InReview→review, Delivered 종료 준비→handoff다. gates는 제어면 단계이며 LLM StageOutput을 받지 않는다. root-cause는 실패 때 삽입하며 원 상태를 보존한다. Accepted·Delivering·Closed에는 LLM 단계가 없다.

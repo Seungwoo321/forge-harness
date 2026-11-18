@@ -40,6 +40,10 @@ If a command leaves the unit `Blocked`, keep this owning session active and do n
 
 For an operator instruction misattributed as human authority in an existing adoption or goal amendment, use public `unit session-approval-correct` or `goal approval-correct` with `docs/authority-correction.md`. Require the trusted contextual verifier, actual original human source and current native owner. For a fully Closed final target under a complete goal, require the explicit immutable completionProof and trusted historical target/native verifier instead of live observation; preserve completion and execution rights. Keep original receipts and custody intact; adoption replay, rebind and same-value goal amendments cannot correct approval provenance.
 
+## Immutable packet reads
+
+Read each immutable handoff, goal and result packet unfiltered. Use either a bare `cat <path>` that the runtime recognizes as a file read, with complete output equal to the file, or one successful command whose complete output contains the whole file followed by its `shasum -a 256 <absolute path>` line. Run an output compactor or wrapper in its raw mode; summarized or truncated output and a hash from a separate unrecognized command are not read proof. If verification reports `immutable packet read proof is incomplete`, re-read only the named packets this way inside the existing goal; never resubmit the goal or start another owner.
+
 ## Remote failure after acceptance
 
 For an operator message mistakenly recorded as the human approval of the latest delivery policy change, use public `unit policy approval-correct <unit> --request <file> --user-input <original-human-ref>`. Follow the exact request and trusted verification contract in `docs/runtime-adapters.md`. Preserve the original policy change, current policy, failed evidence and review history. Correcting provenance never creates acceptance or delivery evidence; policy value round trips are not a substitute.

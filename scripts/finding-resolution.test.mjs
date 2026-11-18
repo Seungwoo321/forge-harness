@@ -14,7 +14,7 @@ const finding = (id, kind = 'review') => ({ id, kind, severity: 'must-fix', site
   claim: 'Output is incorrect', case: 'Boundary input produces wrong output', fix: 'Correct output and verify boundary',
   classification: 'harness', resolvedAt: null });
 
-async function fixture(t, { separate = false, extraFindings = [], goalClass = 'task', legacyCli, outside = false } = {}) {
+async function fixture(t, { separate = false, originalSeparate = false, extraFindings = [], goalClass = 'task', legacyCli, outside = false, legacy = false, rejectKinds = false } = {}) {
   let executable = legacyCli ?? cli;
   const filesRoot = await mkdtemp(path.join(os.tmpdir(), 'finding-resolution-'));
   const cwd = path.join(filesRoot, 'product');
@@ -38,11 +38,15 @@ export function createRuntimeAdapters({ cwd, adapters }) {
   return {
     provider: { async verifyUserInput(input) {
       const auth = JSON.parse(await readFile(${JSON.stringify(approvalFile)}, 'utf8'));
+      const report = JSON.parse(await readFile(auth.evidencePath, 'utf8'));
       const verified = (Array.isArray(auth.input) ? auth.input : [auth.input]).some(item => isDeepStrictEqual(input, item))
-        && input.reviewer === 'independent-reviewer' && input.independent === true && (await files())[0].content === 'fixed';
+        && input.reviewer === 'independent-reviewer' && input.independent === true && (await files())[0].content === 'fixed'
+        && report.result === 'passed' && report.reviewer === input.reviewer
+        && auth.findingIds.every(id => report.fixes.includes(id));
       if (auth.mutate === 'source') await writeFile(path.join(cwd, 'app.txt'), 'drift');
       if (auth.mutate === 'evidence') await writeFile(auth.evidencePath, 'changed');
       if (auth.mutate === 'output') await writeFile(auth.outputPath, '{}');
+      if (auth.mutate === 'original-output') await writeFile(auth.originalOutputPath, '{}');
       return { ...input, verified };
     } },
     git: { async inspectUnit() { return { head: (await adapters.command('git', ['rev-parse', 'HEAD'], { cwd })).stdout.trim(),
@@ -71,7 +75,7 @@ export function createRuntimeAdapters({ cwd, adapters }) {
     assert.equal(run(['unit', 'start', name, '--request', file, '--non-interactive']).code, 0);
   };
   const open = (stage, name = unit) => run(['unit', 'stage', 'open', name, stage]);
-  const submit = async (stage, fields, name = unit) => {
+  const submit = async (stage, fields, name = unit, expectedCode = 0) => {
     const attempt = (await record(name)).stages.find(item => item.name === stage).attempts.at(-1);
     const input = await read(path.join(root, 'units', name, attempt.inputPath));
     const outputPath = path.join(filesRoot, name+'-'+stage+'-'+attempt.n+'.json');
@@ -79,7 +83,7 @@ export function createRuntimeAdapters({ cwd, adapters }) {
       submissionId: name+'-'+stage+'-'+attempt.n, status: 'done', summary: stage+' done',
       ...(stage === 'review' ? { reviewedHead: input.head } : {}), ...fields }));
     const result = run(['unit', 'stage', 'submit', name, stage, '--output', outputPath]);
-    assert.equal(result.code, 0, JSON.stringify(result)); return outputPath;
+    assert.equal(result.code, expectedCode, JSON.stringify(result)); return outputPath;
   };
   const implement = async value => {
     assert.equal(open('implement').code, 0);
@@ -92,19 +96,51 @@ export function createRuntimeAdapters({ cwd, adapters }) {
   // The initial smoke gate misses the boundary defect found by review.
   await implement('broken');
   assert.equal(run(['unit', 'accept', unit]).code, 20);
-  assert.equal(open('review').code, 0);
-  await submit('review', { verdict: 'fix', findings: [finding('F-1'), finding('F-2', 'coverage'), ...extraFindings] });
+  const originalUnit = originalSeparate ? 'original-review' : unit;
+  if (originalSeparate) await start(originalUnit, 'review');
+  assert.equal(open('review', originalUnit).code, 0);
+  const originalFindings = [finding('F-1'), finding('F-2', 'coverage'), ...extraFindings];
+  const originalOutputPath = await submit('review', { verdict: 'fix', findings: legacy && !legacyCli
+    ? originalFindings.map(item => ({ ...item, kind: ['review', 'coverage'].includes(item.kind) ? item.kind : 'review' })) : originalFindings }, originalUnit);
+  if (legacy && !legacyCli) {
+    // Historical accepted fixture; the optional published CLI exercises the same snapshot through public submission.
+    const output = { ...await read(originalOutputPath), findings: originalFindings };
+    await writeFile(originalOutputPath, JSON.stringify(output));
+    const historical = await record();
+    historical.findings = originalFindings;
+    const reviewer = originalSeparate ? await record(originalUnit) : historical;
+    reviewer.stages.find(stage => stage.name === 'review').attempts.at(-1).outputDigest = effectArgsDigest(output);
+    if (originalSeparate) await writeFile(path.join(root, 'units', originalUnit, 'unit.json'), JSON.stringify(reviewer));
+    await writeFile(path.join(root, 'units', unit, 'unit.json'), JSON.stringify(historical));
+  }
+  const originalAttempt = (await record(originalUnit)).stages.find(stage => stage.name === 'review').attempts.at(-1);
+  const originalReview = { unit: originalUnit, attempt: originalAttempt.n, outputPath: originalOutputPath, outputDigest: originalAttempt.outputDigest };
   await implement('fixed');
   assert.equal(run(['unit', 'accept', unit]).code, 20);
   const reviewUnit = separate ? 'review-a' : unit;
   if (separate) await start(reviewUnit, 'review');
   assert.equal(open('review', reviewUnit).code, 0);
+  if (rejectKinds) {
+    const before = await record(); const reviewerBefore = await record(reviewUnit);
+    for (const kind of ['scope-guard', 'shared-path', 'diagnosis']) {
+      await submit('review', { verdict: 'fix', findings: [finding('unsupported', kind)] }, reviewUnit, 2);
+      assert.deepEqual(await record(), before);
+      assert.deepEqual(await record(reviewUnit), reviewerBefore);
+    }
+    for (const field of ['id', 'site', 'claim', 'case', 'fix']) {
+      await submit('review', { verdict: 'fix', findings: [{ ...finding('blank'), [field]: '  ' }] }, reviewUnit, 2);
+      assert.deepEqual(await record(), before);
+      assert.deepEqual(await record(reviewUnit), reviewerBefore);
+    }
+  }
   const outputPath = await submit('review', { verdict: 'ship', findings: [] }, reviewUnit);
-  // Published acceptance cleared ship; the repaired command preserves it.
-  assert.equal(run(['unit', 'accept', unit]).code, legacyCli ? 20 : 1);
+  // Older releases cleared ship; both historical rejections retain the unresolved findings.
+  const rejectedAcceptance = run(['unit', 'accept', unit]);
+  if (legacyCli) assert.ok([1, 20].includes(rejectedAcceptance.code), JSON.stringify(rejectedAcceptance));
+  else assert.equal(rejectedAcceptance.code, 1);
   executable = cli;
   const evidencePath = path.join(filesRoot, 'independent-verification.json');
-  await writeFile(evidencePath, JSON.stringify({ result: 'passed', reviewer: 'independent-reviewer', fixes: ['F-1', 'F-2'] }));
+  await writeFile(evidencePath, JSON.stringify({ result: 'passed', reviewer: 'independent-reviewer', fixes: originalFindings.map(item => item.id) }));
   const prepare = async (extra = {}, authorized = true, mutate = null) => {
     const current = await record();
     const attempt = (await record(reviewUnit)).stages.find(item => item.name === 'review').attempts.at(-1);
@@ -119,7 +155,7 @@ export function createRuntimeAdapters({ cwd, adapters }) {
     await writeFile(approvalFile, JSON.stringify({ input: authorized ? { unit, userInputRef: 'original-authority', effect: 'finding.resolve',
       argsDigest: effectArgsDigest({ request, userInputRef: 'original-authority' }), head: request.head,
       contentFingerprint: request.contentFingerprint, reviewer: request.reviewer, independent: true, reason: request.reason } : {},
-    mutate, outputPath, evidencePath }));
+    mutate, outputPath, evidencePath, originalOutputPath, findingIds: request.findings.map(item => current.findings[item.index]?.id) }));
     return ['unit', 'finding', 'resolve', unit, '--request', file, '--user-input', 'original-authority'];
   };
   const concurrent = argsList => Promise.all(argsList.map(args => new Promise((resolve, reject) => {
@@ -130,7 +166,7 @@ export function createRuntimeAdapters({ cwd, adapters }) {
       try { resolve(parse({ stdout, stderr, status })); } catch (error) { reject(error); }
     });
   })));
-  return { cwd, filesRoot, root, unit, read, record, run, prepare, open, start, submit, implement, concurrent, outputPath, reviewUnit, evidencePath, approvalFile, provider };
+  return { cwd, filesRoot, root, unit, read, record, run, prepare, open, start, submit, implement, concurrent, outputPath, reviewUnit, evidencePath, approvalFile, provider, originalReview };
 }
 
 for (const separate of [false, true]) test(`public fix-review-resolve-accept preserves history (${separate ? 'separate' : 'same-unit'} review)`, async t => {
@@ -224,8 +260,8 @@ test('concurrent exact requests serialize with one receipt and one mutation', as
   assert.equal((await f.record()).findingResolutions.length, 1);
 });
 
-test('scope and shared-path findings retain their own resolution owners', async t => {
-  const f = await fixture(t, { extraFindings: [finding('scope', 'scope-guard'), finding('shared', 'shared-path')] });
+test('legacy kinds require original immutable reviewer provenance', async t => {
+  const f = await fixture(t, { legacy: true, extraFindings: [finding('scope', 'scope-guard'), finding('shared', 'shared-path')] });
   const before = await f.record();
   for (const index of [2, 3]) {
     assert.equal(f.run(await f.prepare({ findings: [{ index, digest: effectArgsDigest(before.findings[index]) }] })).error, 'FINDING_RESOLUTION_INVALID');
@@ -233,13 +269,83 @@ test('scope and shared-path findings retain their own resolution owners', async 
   }
 });
 
-test('concurrent different resolutions reject stale revision without partial mutation', async t => {
-  const f = await fixture(t); const before = await f.record();
-  const first = await f.prepare({ id: 'first', findings: [{ index: 0, digest: effectArgsDigest(before.findings[0]) }] });
+for (const separate of [false, true]) test(`AC-1 public review rejects unsupported resolution owners before mutation (${separate})`, async t => {
+  await fixture(t, { separate, rejectKinds: true });
+});
+
+test('AC-1 AC-2 AC-3 legacy recovery preserves provenance and kinds; exact concurrent replay mutates once', async t => {
+  const f = await fixture(t, { legacy: true, separate: true, originalSeparate: true,
+    legacyCli: process.env.FINDING_RECOVERY_CLI,
+    extraFindings: ['scope-guard', 'shared-path', 'diagnosis'].map(kind => finding(kind, kind)) });
+  const before = await f.record();
+  const originalReviewer = await f.record(f.originalReview.unit);
+  const findings = before.findings.map((item, index) => ({ index, digest: effectArgsDigest(item),
+    originalReview: { ...f.originalReview, findingIndex: index } }));
+  const args = await f.prepare({ findings });
+  const results = await f.concurrent([args, args]);
+  assert.ok(results.every(item => item.code === 0), JSON.stringify(results));
+  assert.equal(results.filter(item => item.resolution.duplicate).length, 1);
+  const after = await f.record();
+  assert.equal(after.revision, before.revision + 1);
+  assert.equal(after.findingResolutions.length, 1);
+  assert.deepEqual(after.findings.map(({ resolutionRef, ...item }) => ({ ...item, resolvedAt: null })), before.findings);
+  assert.deepEqual(after.stages, before.stages); assert.deepEqual(after.evidence, before.evidence);
+  assert.deepEqual(await f.record(f.originalReview.unit), originalReviewer);
+  const receipt = after.findingResolutions[0];
+  assert.deepEqual(receipt.originalReviews.map(item => item.finding), before.findings);
+  assert.ok(receipt.originalReviews.every(item => item.inputDigest && item.outputDigest === f.originalReview.outputDigest));
+  assert.equal(f.run(await f.prepare({ findings, reason: 'different' })).error, 'FINDING_RESOLUTION_CONFLICT');
+  assert.equal(f.run(['unit', 'accept', f.unit]).code, 0);
+});
+
+test('AC-2 AC-3 legacy recovery rejects invalid original provenance, authority and stale source atomically', async t => {
+  const f = await fixture(t, { legacy: true, extraFindings: [finding('scope', 'scope-guard')] });
+  const before = await f.record();
+  const item = { index: 2, digest: effectArgsDigest(before.findings[2]), originalReview: { ...f.originalReview, findingIndex: 2 } };
+  for (const originalReview of [
+    { ...item.originalReview, unit: 'missing' }, { ...item.originalReview, attempt: 2 },
+    { ...item.originalReview, outputDigest: effectArgsDigest({}) }, { ...item.originalReview, outputPath: 'missing' },
+    { ...item.originalReview, findingIndex: 0 }, { ...item.originalReview, findingIndex: -1 },
+    { ...item.originalReview, extra: true },
+  ]) {
+    assert.notEqual(f.run(await f.prepare({ findings: [{ ...item, originalReview }] })).code, 0);
+    assert.deepEqual(await f.record(), before);
+  }
+  for (const extra of [{ expectedRevision: before.revision - 1 }, { head: 'stale' }, { reviewer: 'implementation-author' }]) {
+    assert.notEqual(f.run(await f.prepare({ findings: [item], ...extra })).code, 0);
+    assert.deepEqual(await f.record(), before);
+  }
+  assert.equal(f.run(await f.prepare({ findings: [item] }, false)).error, 'EFFECT_APPROVAL_REQUIRED');
+  const reportBytes = await readFile(f.evidencePath);
+  for (const report of [
+    { result: 'failed', reviewer: 'independent-reviewer', fixes: ['scope'] },
+    { result: 'passed', reviewer: 'independent-reviewer', fixes: ['F-1'] },
+    { result: 'passed', reviewer: 'implementation-author', fixes: ['scope'] },
+  ]) {
+    await writeFile(f.evidencePath, JSON.stringify(report));
+    assert.equal(f.run(await f.prepare({ findings: [item] })).error, 'EFFECT_APPROVAL_REQUIRED');
+    assert.deepEqual(await f.record(), before);
+  }
+  await writeFile(f.evidencePath, reportBytes);
+  const originalInput = path.join(f.root, 'units', f.unit, before.stages.find(stage => stage.name === 'review').attempts[0].inputPath);
+  const bytes = await readFile(originalInput);
+  await writeFile(originalInput, JSON.stringify({ ...JSON.parse(bytes), targetUnit: 'different-target' }));
+  assert.equal(f.run(await f.prepare({ findings: [item] })).error, 'FINDING_RESOLUTION_INVALID');
+  await writeFile(originalInput, bytes);
+  assert.deepEqual(await f.record(), before);
+  assert.equal(f.run(await f.prepare({ findings: [item] }, true, 'original-output')).error, 'FINDING_RESOLUTION_INVALID');
+  assert.deepEqual(await f.record(), before);
+});
+
+for (const legacy of [false, true]) test(`concurrent different resolutions reject stale revision without partial mutation (${legacy})`, async t => {
+  const f = await fixture(t, { legacy, extraFindings: legacy ? [finding('scope', 'scope-guard')] : [] }); const before = await f.record();
+  const selected = index => ({ index, digest: effectArgsDigest(before.findings[index]),
+    ...(legacy ? { originalReview: { ...f.originalReview, findingIndex: index } } : {}) });
+  const first = await f.prepare({ id: 'first', findings: [selected(0)] });
   const auth = await f.read(f.approvalFile);
-  const second = await f.prepare({ id: 'second', findings: [{ index: 1, digest: effectArgsDigest(before.findings[1]) }] });
+  const second = await f.prepare({ id: 'second', findings: [selected(legacy ? 2 : 1)] });
   const other = await f.read(f.approvalFile);
-  await writeFile(f.approvalFile, JSON.stringify({ input: [auth.input, other.input] }));
+  await writeFile(f.approvalFile, JSON.stringify({ ...other, input: [auth.input, other.input], findingIds: [...auth.findingIds, ...other.findingIds] }));
   const results = await f.concurrent([first, second]);
   assert.equal(results.filter(item => item.code === 0).length, 1, JSON.stringify(results));
   assert.equal(results.filter(item => item.error === 'FINDING_RESOLUTION_STALE').length, 1);
@@ -255,6 +361,13 @@ test('prelaunch public scope respects exact paths and real out-of-scope findings
     const generated = before.findings.filter(item => item.kind === 'scope-guard');
     assert.equal(generated.length > 0, outside);
     for (const item of generated) assert.deepEqual(item.paths, ['outside.txt']);
+    for (const item of generated) {
+      const index = before.findings.indexOf(item);
+      const result = f.run(await f.prepare({ findings: [{ index, digest: effectArgsDigest(item),
+        originalReview: { ...f.originalReview, findingIndex: 0 } }] }));
+      assert.equal(result.error, 'FINDING_RESOLUTION_INVALID');
+      assert.deepEqual(await f.record(), before);
+    }
     const checked = f.run(['unit', 'scope', 'recheck', f.unit]);
     assert.equal(checked.code, 0, JSON.stringify(checked));
     assert.deepEqual(checked.recheck.resolved, []);
@@ -292,8 +405,8 @@ test('published prelaunch findings and cleared ship recover using public command
   assert.equal(after.state, 'Accepted');
 });
 
-test('a subsequent fix and implementation cannot be resolved with an older ship review', async t => {
-  const f = await fixture(t, { separate: true });
+for (const legacy of [false, true]) test(`a subsequent fix and implementation cannot be resolved with an older ship review (${legacy})`, async t => {
+  const f = await fixture(t, { separate: true, legacy, extraFindings: legacy ? [finding('scope', 'scope-guard')] : [] });
   await f.start('review-b', 'review');
   assert.equal(f.open('review', 'review-b').code, 0);
   await f.submit('review', { verdict: 'fix', findings: [] }, 'review-b');
@@ -301,6 +414,8 @@ test('a subsequent fix and implementation cannot be resolved with an older ship 
   await f.implement('fixed');
   assert.equal(f.run(['unit', 'accept', f.unit]).code, 20);
   const before = await f.record();
-  assert.equal(f.run(await f.prepare()).error, 'FINDING_RESOLUTION_STALE');
+  const findings = before.findings.map((item, index) => ({ index, digest: effectArgsDigest(item),
+    ...(legacy ? { originalReview: { ...f.originalReview, findingIndex: index } } : {}) }));
+  assert.equal(f.run(await f.prepare({ findings })).error, 'FINDING_RESOLUTION_STALE');
   assert.deepEqual(await f.record(), before);
 });

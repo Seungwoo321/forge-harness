@@ -67,7 +67,7 @@ test('root-cause and review findings accept documented null metadata', async () 
     const contractFile = new URL(`../skills/${stage}/contract.json`, import.meta.url);
     const declared = JSON.parse(await readFile(contractFile, 'utf8'));
     const findingSchema = declared.output.properties.findings.items;
-    assert.equal(validateSchema(findingSchema, finding).ok, true, stage);
+    assert.equal(validateSchema(findingSchema, { ...finding, kind: stage === 'review' ? 'review' : 'diagnosis' }).ok, true, stage);
   }
 });
 

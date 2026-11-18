@@ -6,6 +6,6 @@ Snapshot cleanup must restore permissions on copied read-only output descendants
 
 ## Decision
 
-The host broker accepts a separate cleanup request containing only a canonical root and its original device/inode identity. The root must be strictly below a captured writable output, and cannot contain any ancestor capability file. The host runs the fixed cleanup implementation in its own snapshot-confined OS sandbox and verifies the root identity before removing it. Requests supply no cleanup code, filesystem operation or sandbox profile.
+The host broker accepts a separate cleanup request containing only a canonical root and its original device/inode identity. The root must be strictly below a captured writable output, and cannot contain any ancestor capability file. The host runs the fixed cleanup implementation in its own snapshot-confined OS sandbox and clears its descendants. The caller verifies the original root identity again before removing that exact empty directory. Requests supply no cleanup code, filesystem operation or sandbox profile.
 
 Cleanup requests use the same capability lifetime and shutdown draining as execution requests. Invalid roots, identities and unavailable broker support fail closed. Cleanup errors retain the original command outcome and primary error; cleanup never supplies passing gate evidence.

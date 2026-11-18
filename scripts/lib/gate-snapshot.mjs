@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, open, readFile, readlink, chmod, lstat, realpath, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, open, readFile, readlink, rmdir, chmod, lstat, realpath, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import { createAdapters } from './adapters.mjs';
 import {cleanupGateSnapshot} from './gate-cleanup.mjs';
@@ -51,6 +51,10 @@ export async function createGateSnapshot({ directory, files, outputDirectories =
     if (platform==='darwin' && process.env[gateBrokerEnvironment]) {
       await requestBrokerCleanup(await readFile(process.env[gateBrokerEnvironment],'utf8'),request);
     } else await cleanupGateSnapshot({root,identity:request,command,platform});
+    // The host clears descendants; the caller owns removal of its exact empty root.
+    const current=await lstat(root,{bigint:true});
+    if(!current.isDirectory() || current.dev!==identity.dev || current.ino!==identity.ino) throw invalid('snapshot cleanup root changed');
+    await rmdir(root);
   };
   try {
     for (const entry of entries) {

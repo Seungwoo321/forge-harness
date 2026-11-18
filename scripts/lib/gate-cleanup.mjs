@@ -1,4 +1,4 @@
-import {lstat,realpath,open,rmdir} from 'node:fs/promises';
+import {lstat,realpath,open} from 'node:fs/promises';
 import {constants} from 'node:fs';
 import path from 'node:path';
 const invalid=message=>Object.assign(new Error(message),{code:'GATE_SNAPSHOT_INVALID'});
@@ -47,8 +47,4 @@ try {
       let diagnostic;try { diagnostic=JSON.parse(result.stderr.trim()); } catch {}
       throw Object.assign(new Error(diagnostic?.message ?? 'isolated snapshot cleanup failed'),{code:diagnostic?.code ?? 'GATE_SNAPSHOT_CLEANUP_FAILED',cleanupResult:result});
     }
-    // The isolated process removes descendants; the host only removes the same empty root.
-    current=await lstat(root,{bigint:true});
-    if (!current.isDirectory() || current.dev.toString()!==identity.dev || current.ino.toString()!==identity.ino) throw invalid('snapshot cleanup root changed');
-    await rmdir(root);
 }

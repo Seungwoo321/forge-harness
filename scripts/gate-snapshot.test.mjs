@@ -226,7 +226,13 @@ fs[${JSON.stringify(boundary)}]=async function(directory,...rest){
  }});
  t.after(async()=>{await snapshot.cleanup();await chmod(path.join(external,'victim'),0o700);await rm(directory,{recursive:true,force:true});});
  await mkdir(path.join(snapshot.root,'output/victim'));await writeFile(path.join(snapshot.root,'output/victim/keep'),'snapshot');
- await assert.rejects(snapshot.cleanup(),error=>['EACCES','EPERM','ENOENT'].includes(error.code));
+ if(process.env.FORGE_GATE_BROKER){
+  // A nested caller cannot inject host code; exercise the escape at its request boundary.
+  await chmod(snapshot.root,0o700);
+  await fs.rename(path.join(snapshot.root,'output'),path.join(snapshot.root,'output-moved'));
+  await symlink(external,path.join(snapshot.root,'output'));
+  await snapshot.cleanup();
+ } else await assert.rejects(snapshot.cleanup(),error=>['EACCES','EPERM','ENOENT'].includes(error.code));
  assert.equal((await stat(path.join(external,'victim'))).mode & 0o777,0o500);
  assert.equal(await readFile(path.join(external,'victim/keep'),'utf8'),'outside');
 });
@@ -235,11 +241,13 @@ for (const replacement of ['symlink','directory']) test('AC-1 root replacement c
  const directory=await mkdtemp(path.join(os.tmpdir(),'gate-cleanup-root-race-'));
  const external=path.join(directory,'external');await mkdir(path.join(external,'victim'),{recursive:true});await writeFile(path.join(external,'victim/keep'),'outside');await chmod(path.join(external,'victim'),0o500);
  let snapshot,replaced=false;const command=createAdapters().command;
+ const replace=async()=>{replaced=true;await chmod(snapshot.root,0o700);await fs.rename(snapshot.root,snapshot.root+'-moved');if(replacement==='symlink')await symlink(external,snapshot.root);else await fs.rename(external,snapshot.root);};
  snapshot=await createGateSnapshot({directory,files:[{path:'input',content:'captured'}],command:async(binary,args,options)=>{
-  if(!replaced){replaced=true;await chmod(snapshot.root,0o700);await fs.rename(snapshot.root,snapshot.root+'-moved');if(replacement==='symlink')await symlink(external,snapshot.root);else await fs.rename(external,snapshot.root);}
+  if(!replaced)await replace();
   return command(binary,args,options);
  }});
  t.after(async()=>{if(replacement==='symlink')await fs.unlink(snapshot.root);else await fs.rename(snapshot.root,external);await fs.rename(snapshot.root+'-moved',snapshot.root);await snapshot.cleanup();await chmod(path.join(external,'victim'),0o700);await rm(directory,{recursive:true,force:true});});
+ if(process.env.FORGE_GATE_BROKER)await replace();
  await assert.rejects(snapshot.cleanup());
  const kept=replacement==='symlink'?external:snapshot.root;
  assert.equal((await stat(path.join(kept,'victim'))).mode & 0o777,0o500);

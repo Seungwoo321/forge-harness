@@ -85,6 +85,91 @@ test('AC-1 sibling TAP scopes have independent plans and reject incomplete or fa
   assert.equal(parse('TAP version 13\n    ok 1 - AC-1 first\n    1..1\n1..1\n    ok 1 - AC-2 second\n    1..1\nok 1 - parent\n').ok, false);
 });
 
+test('AC-1 TAP numbering rejects duplicates, gaps, reordering and absent numbers in every scope without coverage', () => {
+  const malformed = [
+    ['ok 1 - AC-1 first', 'ok 1 - AC-2 duplicate'],
+    ['ok 1 - AC-1 first', 'ok 3 - AC-2 gap'],
+    ['ok 2 - AC-1 reordered', 'ok 1 - AC-2 reordered'],
+    ['ok 0 - AC-1 zero', 'ok 1 - AC-2 first'],
+    ['ok 1 - AC-1 first', 'ok 1 - AC-2 duplicate # SKIP platform'],
+    ['ok 1 - AC-1 first', 'ok 3 - AC-2 gap # TODO later'],
+    ['ok 1 - AC-1 first', 'not ok 1 - AC-2 duplicate'],
+    ['ok 1 - AC-1 first', 'ok - AC-2 unnumbered'],
+    ['ok 1 - AC-1 first', 'ok AC-2 unnumbered'],
+    ['ok 1 - AC-1 first', 'not ok - AC-2 unnumbered'],
+  ];
+  for (const points of malformed) {
+    for (const nested of [false, true]) {
+      for (const exit of [0, 1]) {
+        const body = [...points, '1..2'];
+        const report = ['TAP version 13', ...(nested ? [...body.map(line => `    ${line}`), 'ok 1 - parent', '1..1'] : body)].join('\n');
+        const parsed = parseGateReport({ format: 'tap', report, reportPath: 'numbers.tap', acPattern: 'AC-\\d+', result: { exit } });
+        assert.equal(parsed.ok, false, report);
+        assert.deepEqual(parsed.covers ?? [], [], report);
+        assert.ok(parsed.reason, report);
+      }
+    }
+  }
+  for (const nested of [false, true]) {
+    const body = ['ok 1 - AC-1 valid', 'ok - AC-2 hidden extra', '1..1'];
+    const report = ['TAP version 13', ...(nested ? [...body.map(line => `    ${line}`), 'ok 1 - parent', '1..1'] : body)].join('\n');
+    const parsed = parseGateReport({ format: 'tap', report, reportPath: 'numbers.tap', acPattern: 'AC-\\d+', result: { exit: 0 } });
+    assert.equal(parsed.ok, false, report);
+    assert.deepEqual(parsed.covers ?? [], [], report);
+  }
+});
+
+test('AC-2 sequential skip and TODO points count toward independent sibling numbering without coverage', () => {
+  const report = [
+    'TAP version 13',
+    '    1..3',
+    '    ok 1 - AC-4 first',
+    '    ok 2 - AC-5 skipped # SKIP platform',
+    '    ok 3 - AC-6 pending # TODO later',
+    'ok 1 - first suite',
+    '    ok 1 - AC-7 sibling',
+    '    ok 2 - AC-8 sibling second',
+    '    1..2',
+    'ok 2 - second suite',
+    '1..2',
+  ].join('\n');
+  const parse = report => parseGateReport({ format: 'tap', report, reportPath: 'siblings.tap', acPattern: 'AC-\\d+', result: { exit: 0 } });
+  assert.equal(parse(report).ok, true);
+  assert.deepEqual(parse(report).covers, ['AC-4', 'AC-7', 'AC-8']);
+  const duplicate = parse(report.replace('ok 2 - AC-8', 'ok 1 - AC-8'));
+  assert.equal(duplicate.ok, false);
+  assert.deepEqual(duplicate.covers ?? [], []);
+});
+
+test('AC-3 TAP numbering preserves pending, failed and incomplete evidence boundaries', () => {
+  const parse = (report, result) => parseGateReport({ format: 'tap', report, reportPath: 'boundaries.tap', acPattern: 'AC-\\d+', result });
+  const report = 'TAP version 13\nok 1 - AC-4 first\nok 2 - AC-5 second\n1..2\n';
+  const pending = parse(report, { exit: 0, judge: { status: 'pending' } });
+  assert.equal(pending.pending, true);
+  assert.deepEqual(pending.covers, []);
+  const failed = parse(report.replace('ok 2 -', 'not ok 2 -'), { exit: 1, failureClass: 'product' });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.failureClass, 'product');
+  assert.deepEqual(failed.covers, []);
+  for (const incomplete of [report.replace('1..2\n', ''), report.replace('1..2', '1..3')]) {
+    const parsed = parse(incomplete, { exit: 0 });
+    assert.equal(parsed.ok, false);
+    assert.deepEqual(parsed.covers ?? [], []);
+  }
+});
+
+test('a valid zero-test TAP plan parses without inventing tests or coverage', () => {
+  const parse = (report, exit = 0) => parseGateReport({ format: 'tap', report, reportPath: 'empty.tap', acPattern: 'AC-\\d+', result: { exit } });
+  const empty = parse('TAP version 13\n1..0\n');
+  assert.equal(empty.ok, true);
+  assert.deepEqual(empty.tests, []);
+  assert.deepEqual(empty.covers, []);
+  assert.equal(parse('TAP version 13\n1..0\n', 1).ok, false);
+  assert.equal(parse('TAP version 13\nok 1 - AC-1\n1..0\n').ok, false);
+  assert.equal(parse('TAP version 13\n').ok, false);
+  assert.equal(parse('TAP version 13\n1..x\n').ok, false);
+});
+
 test('complete failing TAP is comparable product evidence while malformed reports are excluded', async () => {
   const stored = [];
   const adapter = {

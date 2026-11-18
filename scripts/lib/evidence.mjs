@@ -76,7 +76,7 @@ function testCasesFromTap(report, acPattern) {
   let incomplete = false;
   const closeScope = () => {
     const scope = scopes.pop();
-    if (scope.plan === null || !scope.points || scope.points !== scope.plan || scope.pending.length) incomplete = true;
+    if (scope.plan === null || scope.points !== scope.plan || scope.pending.length) incomplete = true;
     if (scopes.length) {
       if (scopes.at(-1).pending.length) incomplete = true;
       scopes.at(-1).pending.push({ tests: scope.tests, cases: scope.cases });
@@ -88,6 +88,7 @@ function testCasesFromTap(report, acPattern) {
     lineNo += 1;
     const plan = line.match(/^(\s*)1\.\.(\d+)\s*$/);
     const point = line.match(/^(\s*)(ok|not ok)\s+(\d+)\s+-\s+(.*)$/i);
+    if (!point && /^\s*(?:not\s+)?ok(?:\s|$)/i.test(line)) throw new Error('TAP test point number is missing or invalid');
     if (!plan && !point) continue;
     const indent = (plan ?? point)[1].length;
     while (scopes.length > 1 && scopes.at(-1).indent > indent) {
@@ -107,6 +108,7 @@ function testCasesFromTap(report, acPattern) {
       continue;
     }
     scope.points += 1;
+    if (Number(point[3]) !== scope.points) throw new Error('TAP test point numbers must be sequential from one');
     const nameAndDirective = point[4].match(/^(.*?)(?:\s+#\s*(SKIP|TODO)\b.*)?$/i);
     const name = nameAndDirective[1].trim();
     const passed = point[2].toLowerCase() === 'ok';

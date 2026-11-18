@@ -588,7 +588,7 @@ test('busy delivery observes Working across native footer wraps without making t
 });
 
 test('AC-2 unsupported fresh platform proof cannot cross the durable submission boundary',async()=>{
- for(const platform of ['codex/0.169.1','codex/0.170.0','codex/0.169.0-custom']) {
+ for(const platform of ['codex/0.169.2','codex/0.170.0','codex/0.169.0-custom','codex/0.169.1-custom']) {
   let marks=0,writes=0;
   const submission={async mark(){marks++;}};
   await assert.rejects(observeGoalTask({observed,input,prompt:'finish',packets,submission,

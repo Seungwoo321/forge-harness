@@ -10,7 +10,7 @@ import { createUnitStateStore } from './lib/unit-state.mjs';
 import { runUnitCli } from './lib/unit-driver.mjs';
 import { effectArgsDigest } from './lib/approvals.mjs';
 
-async function fixture(t, { overlap = false, outside = false, projection = false } = {}) {
+async function fixture(t, { overlap = false, outside = false, projection = false, integrateAfterOpen = false, delivered = false, editedMerge = false } = {}) {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstream-scope-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const git = (...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -96,18 +96,28 @@ async function fixture(t, { overlap = false, outside = false, projection = false
   if (overlap) await writeFile(path.join(cwd, 'shared'), 'upstream overlap\n');
   git('add', '.'); git('commit', '-qm', 'upstream integration');
   const base = git('rev-parse', 'HEAD'); git('checkout', '-q', branch);
+  let reopened;
+  if (integrateAfterOpen) reopened = await open('demo', 'implement');
   if (overlap) {
-    try { git('merge', '--no-ff', '-m', 'integrate approved base', 'upstream-base'); } catch {
-      await writeFile(path.join(cwd, 'shared'), 'upstream overlap\n'); git('add', 'shared'); git('commit', '-qm', 'resolve overlap to upstream');
+    try { git('merge', '--no-ff', ...(integrateAfterOpen ? ['--no-commit'] : ['-m', 'integrate approved base']), 'upstream-base'); } catch {
+      await writeFile(path.join(cwd, 'shared'), 'upstream overlap\n'); git('add', 'shared');
+      if (!integrateAfterOpen) git('commit', '-qm', 'resolve overlap to upstream');
     }
-  } else git('merge', '--no-ff', '-qm', 'integrate approved base', 'upstream-base');
-  const currentHead = git('rev-parse', 'HEAD');
-  const prior = (await store.read('demo')).stages.find(s => s.name === 'implement').attempts.at(-1);
-  assert.equal((await request(['unit', 'stage', 'restart', 'demo', 'implement'], {
-    attempt: prior.n, inputDigest: prior.inputDigest, checkpointHead: prior.checkpointHead, newHead: currentHead })).code, 0);
-  const reopened = await open('demo', 'implement');
+  } else git('merge', '--no-ff', ...(integrateAfterOpen ? ['--no-commit'] : ['-qm', 'integrate approved base']), 'upstream-base');
+  let currentHead = git('rev-parse', 'HEAD');
+  if (!integrateAfterOpen) {
+    const prior = (await store.read('demo')).stages.find(s => s.name === 'implement').attempts.at(-1);
+    assert.equal((await request(['unit', 'stage', 'restart', 'demo', 'implement'], {
+      attempt: prior.n, inputDigest: prior.inputDigest, checkpointHead: prior.checkpointHead, newHead: currentHead })).code, 0);
+    reopened = await open('demo', 'implement');
+  }
+  if (editedMerge) {
+    await writeFile(path.join(cwd, 'upstream'), 'unit-edited merge result\n');
+    git('add', '.'); if (!integrateAfterOpen) git('commit', '--amend', '--no-edit', '-q');
+  }
   if (outside) await writeFile(path.join(cwd, 'outside'), 'actual drift\n');
   await submit('demo', 'implement', reopened, { changedPaths: [], coverage: [{ acceptanceRef: 'AC-1', evidenceHint: 'source test' }] });
+  if (integrateAfterOpen) { git('commit', '-qm', 'integrate approved base'); currentHead = git('rev-parse', 'HEAD'); }
   const initialAcceptance = await call(['unit', 'accept', 'demo']);
   assert.ok([1, 20].includes(initialAcceptance.code), JSON.stringify(initialAcceptance));
   await start('review-current', 'review');
@@ -117,6 +127,11 @@ async function fixture(t, { overlap = false, outside = false, projection = false
   const before = await store.read('demo');
   assert.ok(before.findings.some(f => f.kind === 'scope-guard' && f.paths.includes('upstream')));
   assert.deepEqual((await call(['unit', 'scope', 'recheck', 'demo'], { git: undefined })).recheck.resolved, []);
+  if (delivered) {
+    git('checkout', '-q', 'upstream-base');
+    git('merge', ...(delivered === 'ff' ? ['--ff-only'] : ['--no-ff', '-qm', 'actual delivered unit']), branch);
+    git('checkout', '-q', branch);
+  }
   runner = runUnitCli;
   return { cwd, git, core, adapters, call, store, before, base, currentHead, originalHead, observe,
     ignoreFile, ignoredTracked, policyExcluded };
@@ -213,7 +228,8 @@ test('HEAD, branch and base locks protect scope recheck and prevent concurrent G
   }
   const blocked = new Set();
   const result = await f.call(['unit', 'scope', 'recheck', 'demo'], { command: async (binary, args, options) => {
-    if (args[0] === 'merge-base' && args[1] === '--all') for (const ref of ['HEAD', 'refs/heads/upstream-base']) {
+    const actual = args[0] === '--no-replace-objects' ? args.slice(1) : args;
+    if (actual[0] === 'merge-base' && actual[1] === '--all') for (const ref of ['HEAD', 'refs/heads/upstream-base']) {
       const write = await f.core.command('git', ['update-ref', ref, f.originalHead], { cwd: f.cwd });
       if (write.exitCode !== 0) blocked.add(ref);
     }
@@ -221,4 +237,49 @@ test('HEAD, branch and base locks protect scope recheck and prevent concurrent G
   } });
   assert.equal(result.code, 0, JSON.stringify(result)); assert.deepEqual([...blocked].sort(), ['HEAD', 'refs/heads/upstream-base']);
   assert.equal(f.git('rev-parse', 'HEAD'), f.currentHead); assert.equal(f.git('rev-parse', 'upstream-base'), f.base);
+});
+
+test('a checkpoint opened before a clean base merge attributes inherited stage paths, before and after real delivery', async t => {
+  for (const delivered of [false, true]) await t.test(`delivered=${delivered}`, async t => {
+    const f = await fixture(t, { integrateAfterOpen: true, delivered });
+    const result = await f.call(['unit', 'scope', 'recheck', 'demo']);
+    assert.equal(result.code, 0, JSON.stringify(result)); assert.ok(result.recheck.resolved.length);
+    const a = result.recheck.attribution;
+    assert.equal(a.comparisonBase, f.base); assert.deepEqual(a.changedPaths, ['source']);
+    assert.deepEqual(a.inheritedStagePaths, ['upstream']);
+    assert.ok(a.unitPaths.includes('source')); assert.ok(!a.unitPaths.includes('upstream'));
+    if (delivered) { assert.equal(a.base, f.currentHead); assert.ok(a.introduction); }
+    const after = await f.store.read('demo');
+    for (const key of ['stages', 'scopePaths', 'changedPaths', 'evidence', 'failures', 'reviewDecision', 'verdict', 'head', 'contentFingerprint'])
+      assert.deepEqual(after[key], f.before[key], key);
+    assert.equal((await f.call(['unit', 'accept', 'demo'])).code, 0);
+  });
+});
+
+test('stage integration cannot excuse actual outside edits, authored overlap, or an edited merge tree after delivery', async t => {
+  for (const options of [{ outside: true }, { overlap: true }, { editedMerge: true }]) await t.test(JSON.stringify(options), async t => {
+    const f = await fixture(t, { integrateAfterOpen: true, delivered: true, ...options });
+    const result = await f.call(['unit', 'scope', 'recheck', 'demo']);
+    assert.equal(result.code, 0, JSON.stringify(result)); assert.deepEqual(result.recheck.resolved, []);
+    assert.deepEqual(await f.store.read('demo'), f.before);
+  });
+});
+
+test('post-delivery attribution requires a real two-parent introduction, not a fast-forward guess', async t => {
+  const f = await fixture(t, { integrateAfterOpen: true, delivered: 'ff' });
+  const result = await f.call(['unit', 'scope', 'recheck', 'demo']);
+  assert.equal(result.error, 'STAGE_STALE'); assert.deepEqual(await f.store.read('demo'), f.before);
+});
+
+test('dirty upstream-to-allowed rename retains the original path even when provider and recorded attempt name only destination', async t => {
+  const f = await fixture(t);
+  f.git('mv', 'upstream', 'allowed');
+  const target = await f.observe();
+  await f.store.update('demo', r => ({ ...r, head: target.head, contentFingerprint: target.contentFingerprint, scopePaths: ['source', 'allowed'],
+    stages: r.stages.map(s => ({ ...s, attempts: s.attempts.map(a => ({ ...a, changedPaths: ['source', 'allowed'] })) })) }));
+  const before = await f.store.read('demo');
+  assert.deepEqual([...target.changedPaths].sort(), ['allowed', 'source'], 'rename-detecting provider omits the upstream original');
+  const result = await f.call(['unit', 'scope', 'recheck', 'demo']);
+  assert.equal(result.code, 0, JSON.stringify(result)); assert.deepEqual(result.recheck.resolved, []);
+  assert.deepEqual(await f.store.read('demo'), before);
 });

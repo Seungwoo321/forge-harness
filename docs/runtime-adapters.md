@@ -113,3 +113,7 @@ Codex 0.167.0·0.167.1·0.168.0의 첫 입력 전 rollout은 아직 파일이 �
 실행 중인 Codex 수신자에게 결과를 반환할 때는 실제 native thread의 활성 턴 또는 검증된 terminal의 지원되는 Working 상태 행을 확인하고 원 intent의 submission·confirmation 경계 뒤 native queue에 한 번 전달한다. 경계마다 동일 수신자·thread·대기열·불변 패킷을 다시 확인한다. 전송 후에는 실제 메시지 처리와 결과 패킷 읽기가 확인될 때만 수신으로 판정한다. 턴이 유휴이면 기존 composer 계약을 유지한다.
 
 기존 전달 의도의 제출 기록이 없고 과거 동일 문구의 실제 요청이 관찰되면 서로 다른 효과를 구별할 수 없으므로 자동 재전송하거나 수신 완료로 판정하지 않는다. queue 경로의 제출 경계만 기록되고 confirmation은 없는 경우에는 동일 route·thread·패킷과 요청 부재를 다시 검증한 뒤 confirmation부터 이어간다.
+
+## Submitted stage integration and post-delivery scope
+
+Scope recheck retains the provider's live `base`/`baseRef` and verifies that observation against Git. If the approved branch already contains the unit HEAD, it derives `comparisonBase` from the first real two-parent target introduction; the provider cannot supply an arbitrary historical base. The receipt preserves both bases, the introduction merge and `inheritedStagePaths`. Actual current changes and unit-exclusive history are evaluated against that recovered comparison base. A fast-forward/ambiguous introduction, changed full tree, conflict/edited merge, altered checkpoint or unbound stage cannot obtain the clean-integration exclusion. Original stages/findings/evidence remain unchanged; ordinary acceptance, review and finalization remain separate public operations.

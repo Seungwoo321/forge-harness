@@ -11,7 +11,7 @@ const generated = finding => finding.kind === 'scope-guard' && finding.severity 
 
 async function inspectAttribution({ record, adapters, cwd, observed, baseRef }) {
   const git = async args => {
-    const result = await adapters.command('git', args, { cwd });
+    const result = await adapters.command('git', ['--no-replace-objects', ...args], { cwd });
     if (result.exitCode !== 0) throw stale('cannot verify current Git scope attribution');
     return result.stdout.trim();
   };
@@ -35,19 +35,63 @@ async function inspectAttribution({ record, adapters, cwd, observed, baseRef }) 
     || await git(['rev-parse', `${first.checkpointCommit}^`]) !== first.checkpointHead) throw stale('current repository, branch, base or checkpoint differs');
   await git(['merge-base', '--is-ancestor', first.checkpointHead, observed.base]);
   await git(['merge-base', '--is-ancestor', observed.base, head]);
+  const ancestor = async (a, b) => {
+    const result = await adapters.command('git', ['--no-replace-objects', 'merge-base', '--is-ancestor', a, b], { cwd });
+    if (![0, 1].includes(result.exitCode)) throw stale('cannot verify scope ancestry');
+    return result.exitCode === 0;
+  };
+  const parents = async commit => (await git(['show', '-s', '--format=%P', commit])).split(' ').filter(Boolean);
+  let comparisonBase = observed.base, introduction = null;
+  if (comparisonBase === head) {
+    // The approved target already contains this delivery. Recover its actual pre-merge base, not a guessed ancestor.
+    for (const commit of (await git(['rev-list', '--first-parent', '--reverse', `${first.checkpointHead}..${baseRef}`])).split('\n').filter(Boolean)) {
+      const p = await parents(commit);
+      if (p.length < 2 || await ancestor(head, p[0])) continue;
+      if ((await Promise.all(p.slice(1).map(parent => ancestor(head, parent)))).some(Boolean)) {
+        if (p.length !== 2) throw stale('octopus delivery attribution is unsupported');
+        comparisonBase = await git(['merge-base', '--all', head, p[0]]);
+        introduction = { commit, parents: p };
+        break;
+      }
+    }
+    if (!introduction || !oid(comparisonBase)) throw stale('verified target merge introduction is required after delivery');
+    await git(['merge-base', '--is-ancestor', first.checkpointHead, comparisonBase]);
+  }
   const changes = await adapters.checkpoint.inspectChanges({ checkpoint: first.checkpointCommit,
     firstCheckpoint: observed.base, head, exclude: record.policy?.checkpoint?.exclude ?? [] });
   if (changes.head !== head || changes.contentTree !== observed.tree) throw stale('current scope content differs from submitted evidence');
-  const changedPaths = attemptChangedPaths((await git(['diff', '--name-only', '-z', observed.base, changes.contentTree])).split('\0').filter(Boolean));
-  if (effectArgsDigest(changedPaths) !== effectArgsDigest(attemptChangedPaths(observed.changedPaths))) throw stale('provider unit diff differs from Git');
-  const currentPaths = (await git(['diff', '--no-renames', '--name-only', '-z', observed.base, observed.tree])).split('\0').filter(Boolean);
-  const upstreamPaths = attemptChangedPaths((await git(['diff', '--no-renames', '--name-only', '-z', first.checkpointCommit, observed.base])).split('\0').filter(Boolean));
-  if (await git(['rev-list', '--min-parents=3', `${observed.base}..${head}`])) throw stale('octopus merge attribution is unsupported');
-  const committedPaths = (await git(['log', '--format=', '--name-only', '-z', '--no-renames', '--diff-merges=remerge', `${observed.base}..${head}`])).split('\0').filter(Boolean);
-  const unitPaths = attemptChangedPaths([...currentPaths, ...committedPaths, ...attempts.flatMap(attempt => attempt.changedPaths ?? [])]);
+  const paths = async args => (await git(args)).split('\0').filter(Boolean);
+  const providerPaths = attemptChangedPaths(await paths(['diff', '--name-only', '-z', observed.base, changes.contentTree]));
+  if (effectArgsDigest(providerPaths) !== effectArgsDigest(attemptChangedPaths(observed.changedPaths))) throw stale('provider unit diff differs from Git');
+  const changedPaths = attemptChangedPaths(await paths(['diff', '--name-only', '-z', comparisonBase, changes.contentTree]));
+  const currentPaths = await paths(['diff', '--no-renames', '--name-only', '-z', comparisonBase, changes.contentTree]);
+  const upstreamPaths = attemptChangedPaths(await paths(['diff', '--no-renames', '--name-only', '-z', first.checkpointCommit, comparisonBase]));
+  if (await git(['rev-list', '--min-parents=3', `${comparisonBase}..${head}`])) throw stale('octopus merge attribution is unsupported');
+  const committedPaths = await paths(['log', '--format=', '--name-only', '-z', '--no-renames', '--diff-merges=remerge', `${comparisonBase}..${head}`]);
+  const last = attempts.filter(attempt => attempt.changedPaths?.length && Number.isSafeInteger(attempt.inputRevision))
+    .sort((a, b) => a.inputRevision - b.inputRevision).at(-1);
+  const p = await parents(head), inheritedStagePaths = [];
+  if (last?.endedAt && last.result === 'done' && last.changedPaths?.length && oid(last.checkpointCommit)
+    && p.length === 2 && last.checkpointHead === p[0] && await ancestor(p[1], comparisonBase)
+    && await git(['rev-parse', `${head}^{tree}`]) === observed.tree
+    && await git(['rev-parse', `${last.checkpoint}^{commit}`]) === last.checkpointCommit
+    && await git(['rev-parse', `${last.checkpointCommit}^`]) === last.checkpointHead) {
+    const merge = await adapters.command('git', ['--no-replace-objects', 'merge-tree', '--write-tree', ...p], { cwd });
+    if (merge.exitCode === 0 && merge.stdout.trim() === observed.tree) {
+      const inherited = await paths(['diff', '--no-renames', '--name-only', '-z', p[0], head]);
+      for (const file of attemptChangedPaths(last.changedPaths)) {
+        if (inherited.includes(file) && upstreamPaths.includes(file) && !committedPaths.includes(file)
+          && await git(['ls-tree', '-z', last.checkpointCommit, '--', file]) === await git(['ls-tree', '-z', last.checkpointHead, '--', file]))
+          inheritedStagePaths.push(file);
+      }
+    }
+  }
+  const unitPaths = attemptChangedPaths([...currentPaths, ...committedPaths,
+    ...attempts.flatMap(attempt => (attempt.changedPaths ?? []).filter(file => attempt !== last || !inheritedStagePaths.includes(file)))]);
   return { head, contentFingerprint: observed.contentFingerprint, contentTree: changes.contentTree,
     checkpointTree: changes.tree, excludedPaths: changes.excluded, repo: root, branch, base: observed.base, baseRef,
-    checkpoint: first.checkpointCommit, changedPaths, upstreamPaths, unitPaths };
+    checkpoint: first.checkpointCommit, changedPaths, upstreamPaths, unitPaths, comparisonBase, introduction,
+    inheritedStagePaths };
 }
 
 export async function recheckScope({ store, unit, adapters, cwd }) {

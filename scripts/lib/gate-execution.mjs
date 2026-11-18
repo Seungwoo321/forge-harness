@@ -1,4 +1,5 @@
 import { createGateBroker, gateBrokerEnvironment, brokerCommandBootstrap } from './gate-broker.mjs';
+import {cleanupGateSnapshot} from './gate-cleanup.mjs';
 import { createGateSnapshot } from './gate-snapshot.mjs';
 import { gateFingerprint } from './evidence.mjs';
 import { link, lstat, mkdir, open, readFile, readlink, realpath, rm } from 'node:fs/promises';
@@ -63,7 +64,7 @@ export async function executeCapturedGate({gate,directory,sourceRoot,command,pla
       capturedGate={sourceRoot:source,snapshotRoot:isolatedRoot,temporaryRoot:path.join(isolatedRoot,temporaryDirectory),runtimePaths:roots,command:captured.command,outputRoots:[...(captured.outputDirectories ?? []),temporaryDirectory].map(name=>path.join(isolatedRoot,name))};
       if (captured.config?.nestedIsolation === 'sibling-sandbox' && !process.env[gateBrokerEnvironment]) {
         const outputs=[...(captured.outputDirectories ?? []),temporaryDirectory].map(name=>path.join(isolatedRoot,name));
-        broker=await createGateBroker({root:isolatedRoot,outputs,runtimePaths:roots,boundaries:[{root:isolatedRoot,tools:roots,outputs,source,secret:path.join(isolatedRoot,temporaryDirectory,'.broker-capability')}],execute:async (input,endpoint,boundaries)=>{
+        broker=await createGateBroker({root:isolatedRoot,outputs,runtimePaths:roots,cleanup:request=>cleanupGateSnapshot({root:request.root,identity:request,command,platform}),boundaries:[{root:isolatedRoot,tools:roots,outputs,source,secret:path.join(isolatedRoot,temporaryDirectory,'.broker-capability')}],execute:async (input,endpoint,boundaries)=>{
           const profile=macProfile({source:input.sourceRoot,root:input.snapshotRoot,tools:input.runtimePaths,
             boundaries});
           return command('/usr/bin/sandbox-exec',['-p',profile,process.execPath,'-e',brokerCommandBootstrap],{cwd:input.snapshotRoot,

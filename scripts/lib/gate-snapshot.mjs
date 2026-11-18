@@ -1,11 +1,14 @@
-import { mkdtemp, mkdir, open, readFile, readlink, rm, chmod, lstat, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, open, readFile, readlink, rmdir, chmod, lstat, realpath, symlink } from 'node:fs/promises';
 import path from 'node:path';
+import { createAdapters } from './adapters.mjs';
+import {cleanupGateSnapshot} from './gate-cleanup.mjs';
+import {gateBrokerEnvironment,requestBrokerCleanup} from './gate-broker.mjs';
 
 const invalid = message => Object.assign(new Error(message), {code:'GATE_SNAPSHOT_INVALID'});
 const signature = stat => [stat.dev,stat.ino,stat.mode,stat.size,stat.ctimeNs].join(':');
 
 // Materialize the captured bytes rather than reading the live worktree again.
-export async function createGateSnapshot({ directory, files, outputDirectories = [] }) {
+export async function createGateSnapshot({ directory, files, outputDirectories = [], command = createAdapters().command, platform = process.platform }) {
   if (!path.isAbsolute(directory ?? '') || !Array.isArray(files) || !files.length || !Array.isArray(outputDirectories)) throw invalid('snapshot directory and inputs are required');
   const seen = new Set();
   const entries = files.map(file => {
@@ -40,9 +43,18 @@ export async function createGateSnapshot({ directory, files, outputDirectories =
   await mkdir(directory, {recursive:true,mode:0o700});
   const root = await mkdtemp(path.join(directory,'gate-'));
   const directories = new Set([root]);
+  const identity = await lstat(root,{bigint:true});
+  const isolatedRoot = await realpath(root);
   const cleanup = async () => {
-    for (const item of [...directories].sort((a,b)=>a.length-b.length)) await chmod(item,0o700).catch(error=>{if(error.code!=='ENOENT')throw error;});
-    await rm(root,{recursive:true,force:true});
+    try { await lstat(root); } catch (error) { if(error.code==='ENOENT')return;throw error; }
+    const request={root:isolatedRoot,dev:identity.dev.toString(),ino:identity.ino.toString()};
+    if (platform==='darwin' && process.env[gateBrokerEnvironment]) {
+      await requestBrokerCleanup(await readFile(process.env[gateBrokerEnvironment],'utf8'),request);
+    } else await cleanupGateSnapshot({root,identity:request,command,platform});
+    // The host clears descendants; the caller owns removal of its exact empty root.
+    const current=await lstat(root,{bigint:true});
+    if(!current.isDirectory() || current.dev!==identity.dev || current.ino!==identity.ino) throw invalid('snapshot cleanup root changed');
+    await rmdir(root);
   };
   try {
     for (const entry of entries) {
@@ -80,5 +92,8 @@ export async function createGateSnapshot({ directory, files, outputDirectories =
       } catch (error) { if (error.code === 'GATE_SNAPSHOT_INVALID') throw error; throw invalid('snapshot input cannot be reverified'); }
     };
     return {root,assertUnchanged,cleanup};
-  } catch (error) { await cleanup(); throw error; }
+  } catch (error) {
+    try { await cleanup(); } catch (cleanupError) { error.cleanupError=cleanupError; }
+    throw error;
+  }
 }

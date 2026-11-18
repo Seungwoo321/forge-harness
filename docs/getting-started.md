@@ -129,6 +129,8 @@ node "$PLUGIN_ROOT/scripts/unit.mjs" unit scope recheck greeting --adapters runt
 
 revision은 범위 재검사 후 원 단위의 값이다. finding과 output의 digest는 패키지 `scripts/lib/approvals.mjs`의 `effectArgsDigest`로 전체 객체를 정규화해 계산한다. 보고서는 원 바이트의 SHA256이다. 실제 값과 원본 파일을 사용하며 상태·신원·증거를 만들어 채우지 않는다.
 
+새 리뷰 제출은 `review`와 `coverage` 지적만 받는다. 구버전이 받아들인 리뷰어 작성 `scope-guard`, `shared-path`, `diagnosis` 지적에는 해당 findings 항목에 `originalReview`를 추가한다. 형태는 `{"unit":"greeting-review-original","attempt":1,"outputPath":"original-review-output.json","outputDigest":"sha256:<original output object digest>","findingIndex":0}`다. 이 참조는 현재 수정 검증용 `review`와 별개이며, 원 지적을 생성한 완료된 리뷰의 원본 출력과 그 안의 인덱스를 가리킨다. 제어면은 기록된 원본 입력·출력 digest, 대상, 제출 ID와 정확한 지적을 검증하고 영수증의 `originalReviews`에 출처와 원 지적을 보존한다. 자동 생성 경로 지적은 이 참조로 해소할 수 없다. 기존 kind·지적·리뷰 이력을 수정하지 않는다.
+
 ```sh
 node "$PLUGIN_ROOT/scripts/unit.mjs" unit finding resolve greeting --request finding-fixes.json --user-input actual-authorization-reference --adapters runtime.mjs
 node "$PLUGIN_ROOT/scripts/unit.mjs" unit accept greeting --adapters runtime.mjs

@@ -78,16 +78,119 @@ async function fixture(t,state = 'InReview',runtime = 'cmux') {
     unitDigest:effectArgsDigest(await store.read('change')),goalDigest:effectArgsDigest(await goals.read('goal')),targetDigest:effectArgsDigest(target),owner,
     provenance:{ref:authority,digest:hash(permission)},reason:'User authorized this exact existing native owner',...extra});
   const adopt = async body=>{const file = path.join(cwd,`${body.id}.json`);await writeFile(file,JSON.stringify(body));return run(['session-adopt','change','--request',file,'--user-input','native-user-message']);};
-  const startReview = async()=>{
+  const prepareReview = async()=>{
     const file=path.join(cwd,'review-unit.json');await writeFile(file,JSON.stringify({kind:'review',targetUnit:'change',goalId:'goal',policyOverrides:{session:execution},request:{text:'Independent review',userInputRef:'review-permission'}}));
     const started=await run(['start','review','--request',file,'--non-interactive']);assert.equal(started.code,0,JSON.stringify(started));
     const handoffPath=path.join(cwd,'handoff.md');await writeFile(handoffPath,packet);
     const launch=path.join(cwd,'launch.json');await writeFile(launch,JSON.stringify({cwd,handoffPath,handoffDigest:hash(packet),parentRuntime:owner,waitSeconds:0}));
-    return run(['session-start','review','--request',launch]);
+    return launch;
   };
-  return {cwd,stateRoot,store,goals,source,owner,reviewer,target,adapters,unitFile,run,request,adopt,startReview,effects,
+  const startReview = async()=>run(['session-start','review','--request',await prepareReview()]);
+  return {cwd,stateRoot,store,goals,source,owner,reviewer,target,adapters,unitFile,run,request,adopt,prepareReview,startReview,effects,
     setLive:value=>{live=value;},deny:()=>{authorized=false;},onVerify:value=>{hook=value;},launches:()=>launches};
 }
+
+async function registerReviewTarget(f, ownership) {
+  if (ownership === 'existing') assert.equal((await f.adopt(await f.request())).code,0);
+  else await f.goals.transaction('goal',goal=>({...goal,revision:goal.revision+1,
+    bootstraps:[{unit:'change',sessionId:f.owner.sessionId,incarnationId:f.owner.incarnationId,cwd:f.cwd}]}));
+}
+
+test('public reviewer startup rejects unready or missing targets before any native work for both custody modes',async t=>{
+  for (const ownership of ['managed','existing']) for (const invalid of ['Scoped','Implementing','SelfGated','Accepted','Blocked','Stopped','Closed','missing','head','contentFingerprint'])
+    await t.test(`${ownership}/${invalid}`,async t=>{
+      const f=await fixture(t);await registerReviewTarget(f,ownership);const launch=await f.prepareReview();
+      if (invalid === 'missing') await rm(f.unitFile);
+      else await f.store.update('change',record=>({...record,...(['head','contentFingerprint'].includes(invalid)?{[invalid]:''}:{state:invalid})}));
+      let verifications=0;f.adapters.session.verify=async()=>{verifications++;return {status:'unknown'};};
+      const before=await f.goals.read('goal'),target=await f.store.read('change');
+      const result=await f.run(['session-start','review','--request',launch]);assert.notEqual(result.code,0,JSON.stringify(result));
+      assert.equal(f.launches(),0);assert.equal(verifications,0);
+      assert.deepEqual(await f.goals.read('goal'),before);assert.deepEqual(await f.store.read('change'),target);
+      assert.deepEqual(await createLedgerStore(f.stateRoot).withLock('review',log=>log.read()),[]);
+    });
+});
+
+test('public reviewer startup rejects stale live head or fingerprint before creating an intent',async t=>{
+  for (const ownership of ['managed','existing']) for (const field of ['head','contentFingerprint']) await t.test(`${ownership}/${field}`,async t=>{
+    const f=await fixture(t);await registerReviewTarget(f,ownership);f.target[field]='changed';
+    let verifications=0;f.adapters.session.verify=async()=>{verifications++;return {status:'unknown'};};
+    assert.notEqual((await f.startReview()).code,0);assert.equal(f.launches(),0);assert.equal(verifications,0);
+    assert.equal((await f.goals.read('goal')).reviews,undefined);
+    assert.deepEqual(await createLedgerStore(f.stateRoot).withLock('review',log=>log.read()),[]);
+  });
+});
+
+test('public reviewer startup requires live Git inspection and preserves a real receipt if registration observes drift',async t=>{
+  for (const ownership of ['managed','existing']) await t.test(ownership,async t=>{
+    const f=await fixture(t);await registerReviewTarget(f,ownership);f.adapters.git={};
+    assert.notEqual((await f.startReview()).code,0);assert.equal(f.launches(),0);
+    assert.deepEqual(await createLedgerStore(f.stateRoot).withLock('review',log=>log.read()),[]);
+
+    const g=await fixture(t);await registerReviewTarget(g,ownership);
+    const execute=g.adapters.session.execute;
+    g.adapters.session.execute=async input=>{const receipt=await execute(input);g.target.contentFingerprint='drift';return receipt;};
+    assert.notEqual((await g.startReview()).code,0);assert.equal(g.launches(),1);
+    assert.equal((await g.goals.read('goal')).reviews,undefined);
+    const ledger=createLedgerStore(g.stateRoot),rows=await ledger.withLock('review',log=>log.read());
+    assert.equal(rows.filter(row=>row.event==='result').length,1);
+    g.target.contentFingerprint='content-1';
+    assert.equal((await g.startReview()).code,0);assert.equal(g.launches(),1);assert.equal((await g.goals.read('goal')).reviews.length,1);
+    assert.deepEqual((await ledger.withLock('review',log=>log.read())).filter(row=>row.event==='intent'),rows.filter(row=>row.event==='intent'));
+    assert.deepEqual(g.effects,['session.start']);
+  });
+});
+
+test('public reviewer startup rechecks live content at execute and reconciliation boundaries',async t=>{
+  for (const ownership of ['managed','existing']) for (const retry of [false,true]) await t.test(`${ownership}/retry=${retry}`,async t=>{
+    const f=await fixture(t);await registerReviewTarget(f,ownership);
+    if(retry) assert.equal((await f.startReview()).code,0);
+    let inspections=0,verifications=0;const verify=f.adapters.session.verify;
+    f.adapters.git.inspectUnit=async()=>({...f.target,...(++inspections>1?{contentFingerprint:'drift'}:{})});
+    f.adapters.session.verify=async input=>{verifications++;return verify(input);};
+    const launches=f.launches(),before=await f.goals.read('goal');
+    assert.notEqual((await f.startReview()).code,0);assert.equal(f.launches(),launches);assert.equal(verifications,0);
+    assert.deepEqual(await f.goals.read('goal'),before);
+  });
+});
+
+test('public reviewer startup serializes target transitions before launch and through registration',async t=>{
+  for (const ownership of ['managed','existing']) await t.test(ownership,async t=>{
+    const f=await fixture(t);await registerReviewTarget(f,ownership);const launch=await f.prepareReview();
+    const entered=Promise.withResolvers(),release=Promise.withResolvers();
+    const transition=f.store.update('change',async record=>{entered.resolve();await release.promise;return {...record,state:'SelfGated'};});
+    await entered.promise;const start=f.run(['session-start','review','--request',launch]);release.resolve();await transition;
+    assert.notEqual((await start).code,0);assert.equal(f.launches(),0);
+
+    const g=await fixture(t);await registerReviewTarget(g,ownership);
+    const execute=g.adapters.session.execute;let pending,changed=false;
+    g.adapters.session.execute=async input=>{
+      assert.ok(await readFile(path.join(g.stateRoot,'units/change/.lock'),'utf8'));
+      pending=g.store.update('change',async record=>{
+        assert.equal((await g.goals.read('goal')).reviews.length,1);
+        changed=true;return {...record,state:'SelfGated'};
+      });
+      assert.equal(changed,false);return execute(input);
+    };
+    assert.equal((await g.startReview()).code,0);await pending;assert.equal(changed,true);assert.equal(g.launches(),1);
+  });
+});
+
+test('eligible public reviewer attempts reconcile the original intent and concurrent starts do not relaunch',async t=>{
+  for (const ownership of ['managed','existing']) for (const uncertain of [false,true]) await t.test(`${ownership}/uncertain=${uncertain}`,async t=>{
+    const f=await fixture(t);await registerReviewTarget(f,ownership);
+    const execute=f.adapters.session.execute;
+    if(uncertain) f.adapters.session.execute=async input=>{await execute(input);throw new Error('receipt not yet observed');};
+    const first=await f.startReview();assert.equal(first.code,uncertain?3:0,JSON.stringify(first));
+    const ledger=createLedgerStore(f.stateRoot),rows=await ledger.withLock('review',log=>log.read());
+    const original=rows.find(row=>row.event==='intent');
+    assert.equal(Object.hasOwn(original.args,'targetDigest'),ownership==='existing');
+    const results=await Promise.all([f.startReview(),f.startReview()]);assert.ok(results.every(result=>result.code===0),JSON.stringify(results));
+    assert.equal(f.launches(),1);assert.equal((await f.goals.read('goal')).reviews.length,1);
+    assert.deepEqual((await ledger.withLock('review',log=>log.read())).filter(row=>row.event==='intent'),[original]);
+    assert.ok((await ledger.withLock('review',log=>log.read())).every(row=>!['session.close','session.deliver'].includes(row.effect)));
+  });
+});
 
 test('verified startup retirement permits custody recovery only after replacement effects settle',async t=>{
   for (const mode of ['missing','forged','pending-replacement','settled-replacement']) await t.test(mode,async t=>{

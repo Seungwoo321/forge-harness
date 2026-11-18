@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp,mkdir,writeFile,readFile,rm,realpath,symlink} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {createGateBroker,requestBrokerGate} from './lib/gate-broker.mjs';
+import {createGateBroker,requestBrokerGate,requestBrokerCleanup} from './lib/gate-broker.mjs';
 import {executeCapturedGate,capturedGateReport} from './lib/gate-execution.mjs';
 import {createAdapters} from './lib/adapters.mjs';
 import {gateFingerprint} from './lib/evidence.mjs';
@@ -46,7 +46,7 @@ test('AC-3 broker retains actual failure, signal and stdout and has no host fall
 async function nestedFixture(t){
  const root=await fixture(t),sourceRoot=path.join(root,'source');
  const files=[];
- for(const name of ['gate-execution','gate-snapshot','gate-broker','evidence','adapters','continuity-lock'])files.push({path:`scripts/lib/${name}.mjs`,content:await readFile(new URL(`./lib/${name}.mjs`,import.meta.url))});
+ for(const name of ['gate-execution','gate-snapshot','gate-cleanup','gate-broker','evidence','adapters','continuity-lock'])files.push({path:`scripts/lib/${name}.mjs`,content:await readFile(new URL(`./lib/${name}.mjs`,import.meta.url))});
  const script=`import {mkdtemp,mkdir,writeFile,readFile} from 'node:fs/promises';import path from 'node:path';import {executeCapturedGate} from './scripts/lib/gate-execution.mjs';import {createAdapters} from './scripts/lib/adapters.mjs';
  const ancestorFile=process.env.FORGE_GATE_BROKER;const endpoint=JSON.parse(await readFile(ancestorFile,'utf8'));if(Object.values(process.env).some(value=>value.includes(endpoint.token)))throw Error('credential visible in process environment');process.env.BROKER_TEST_VALUE='parent-value';const root=await mkdtemp(path.join(process.env.TMPDIR,'inner-'));const sourceRoot=path.join(root,'source'),directory=path.join(root,'snapshots');await mkdir(sourceRoot);await mkdir(directory);
  const content=\`import {readFile,writeFile,link} from 'node:fs/promises';if(process.env.BROKER_TEST_VALUE!=='parent-value')throw Error('lost environment');for(const location of [\${JSON.stringify(ancestorFile)},\${JSON.stringify(path.join(sourceRoot,'input'))},\${JSON.stringify(${JSON.stringify(path.join(sourceRoot,'live'))})},\${JSON.stringify(${JSON.stringify(path.join(root,'outside'))})}]){try{await readFile(location);throw Error('exposed '+location)}catch(error){if(!['EPERM','EACCES','ENOENT'].includes(error.code))throw error;}}try{await writeFile(\${JSON.stringify(${JSON.stringify(path.join(root,'outside'))})},'changed');throw Error('write escaped')}catch(error){if(!['EPERM','EACCES'].includes(error.code))throw error;}try{await link(\${JSON.stringify(ancestorFile)},process.env.TMPDIR+'/stolen');throw Error('credential alias allowed')}catch(error){if(!['EPERM','EACCES'].includes(error.code))throw error;}console.log('INNER_ISOLATED');\`;
@@ -127,4 +127,21 @@ test('AC-4 self-test capture includes tracked and new tests and excludes local a
  assert.equal(gate.files.find(file=>file.path==='scripts/new.test.mjs').mode,'100755');
  assert.equal(gate.config.nestedIsolation,'sibling-sandbox');
  assert.equal(gate.command[2],'--inside');assert.equal(gate.toolVersions.pnpm,packageManager.split('@')[1]);
+});
+
+test('AC-2 cleanup capabilities restrict exact roots and drain accepted cleanup at shutdown',async t=>{
+ const root=await fixture(t),output=path.join(root,'output'),snapshot=path.join(output,'snapshot');
+ let calls=0,started,release;
+ const ready=new Promise(resolve=>started=resolve),done=new Promise(resolve=>release=resolve);
+ const broker=await createGateBroker({root,outputs:[output],runtimePaths:[],boundaries:[{secret:path.join(snapshot,'.capability')}],
+  cleanup:async request=>{calls++;assert.equal(request.root,path.join(snapshot,'.forge-gate-tmp'));started();await done;},execute:async()=>{throw Error('cleanup cannot execute arbitrary commands');}});
+ t.after(()=>broker.close());
+ for(const patch of [{root},{root:output},{root:snapshot},{dev:1},{ino:'bad'},{command:['rm','-rf','/']}]) {
+  await assert.rejects(requestBrokerCleanup(broker.endpoint,{root:path.join(snapshot,'.forge-gate-tmp'),dev:'1',ino:'2',...patch}),{code:'GATE_BROKER_INVALID'});
+ }
+ assert.equal(calls,0);
+ const request=requestBrokerCleanup(broker.endpoint,{root:path.join(snapshot,'.forge-gate-tmp'),dev:'1',ino:'2'});
+ await ready;let closed=false;const closing=broker.close().then(()=>closed=true);
+ assert.equal(closed,false);release();await request;await closing;assert.equal(closed,true);assert.equal(calls,1);
+ await assert.rejects(requestBrokerCleanup(broker.endpoint,{root:snapshot,dev:'1',ino:'2'}));
 });

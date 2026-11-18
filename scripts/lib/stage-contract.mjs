@@ -199,6 +199,15 @@ export function validateStageOutput(contract, input, output) {
   if (!contractResult.ok) return contractResult;
   const validation = validateSchema(contract.output, output);
   const issues = [...validation.issues];
+  if (contract.stage === 'review' && Array.isArray(output?.findings)) {
+    for (const [index, finding] of output.findings.entries()) {
+      for (const field of ['id', 'site', 'claim', 'case', 'fix']) {
+        if (typeof finding?.[field] === 'string' && !finding[field].trim()) {
+          issues.push(issue(`$.findings[${index}].${field}`, 'ownership', 'reviewer resolution requires nonblank finding fields'));
+        }
+      }
+    }
+  }
   if (output?.inputDigest !== input?.inputDigest) issues.push(issue('$.inputDigest', 'binding', 'must match the opened StageInput'));
   if (output?.attempt !== input?.attempt) issues.push(issue('$.attempt', 'binding', 'must match the opened StageInput'));
   return { ok: issues.length === 0, issues };

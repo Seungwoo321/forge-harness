@@ -27,7 +27,7 @@ async function fixture(t,{submitted=true,blockedReview=false,samePolicy=false,ho
   const policy={runtime:'orca',provider:'claude',account:'/old-account',model:'model',effort:'high',argv:['claude']};
   await goals.create({goal:{id:'g',objective:'goal',criteria:['done'],remaining:[blockedReview?'change':'u'],status:'active'},policy,source:{path:source,digest:hash('goal')}});
   if(blockedReview){
-    await store.create({schema:'harness.unit/1',unit:'change',kind:'impl',state:'InReview',continuity:{goalId:'g'}});
+    await store.create({schema:'harness.unit/1',unit:'change',kind:'impl',state:'InReview',head:'head',contentFingerprint:'content',continuity:{goalId:'g'}});
     await goals.transaction('g',g=>({...g,revision:g.revision+1,bootstraps:[{unit:'change',sessionId:'parent',incarnationId:'parent-1',cwd:root}]}));
   }
   await store.create({schema:'harness.unit/1',unit:'u',kind:blockedReview?'review':'impl',state:blockedReview?'InReview':'Implementing',...(blockedReview?{targetUnit:'change'}:{}),continuity:{goalId:'g'},policy:{goal:{class:'product-prelaunch'}},failures:[{id:'original-auth-failure'}]});
@@ -55,7 +55,7 @@ async function fixture(t,{submitted=true,blockedReview=false,samePolicy=false,ho
       const bytes=await readFile(request.provenance.path);const evidence=JSON.parse(bytes);
       return {...binding,verified:true,...evidence,evidenceDigest:hash(bytes),...(samePolicy?{providerCorrection:{beforeDigest:hash('original provider'),afterDigest:hash('corrected provider'),evidenceDigest:hash(bytes)}}:{})};
     }};
-  const adapters={session,provider,now:()=> '2026-01-01T00:00:00Z'};
+  const adapters={session,provider,git:{inspectUnit:async()=>({head:'head',contentFingerprint:'content'})},now:()=> '2026-01-01T00:00:00Z'};
   const start=()=>startGoalSession({stateRoot:root,unit:'u',request:startRequest,store,adapters});
   assert.equal((await start()).status,'uncertain');
   const rows=()=>ledgerStore.withLock('u',l=>l.read());

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -7,10 +7,18 @@ import { gateFingerprint } from './lib/evidence.mjs';
 import { selectProfile } from './lib/profile.mjs';
 import { runUnitCli } from './lib/unit-driver.mjs';
 import { createUnitStateStore } from './lib/unit-state.mjs';
+import { createAdapters } from './lib/adapters.mjs';
+import { createGateSnapshot } from './lib/gate-snapshot.mjs';
 
 const gateFor = (id, content = 'source') => ({ id, format: 'exec', resultFormat: 'json', command: ['check', id], files: [{ path: id, content }] });
 const pass = covers => ({ exit: 0, ok: true, covers, report: '{}', reportPath: 'report.json' });
-const latch = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+const latch = () => {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve, wait: operation => Promise.race([promise, operation.then(result => {
+    throw new Error(`operation completed before synchronization: ${JSON.stringify(result)}`);
+  })]) };
+};
 const decode = output => JSON.parse(output.split('\n').at(-1).slice('RESULT '.length));
 
 async function fixture(t) {
@@ -28,7 +36,9 @@ async function fixture(t) {
   });
   const adapters = { git: { inspectUnit: async () => ({ head: 'h1', contentFingerprint: 'c1' }) },
     gates: { describe: async id => gateFor(id), run: async () => pass(['AC-1']) } };
-  adapters.command = async (_binary, args) => {
+  const platformCommand = createAdapters().command;
+  adapters.command = async (binary, args, options) => {
+    if (args.at(-2) !== 'check') return platformCommand(binary, args, options);
     const output = await adapters.gates.run(await adapters.gates.describe(args.at(-1)));
     return { exitCode: output.exit, stdout: JSON.stringify({ ok: output.ok, covers: output.covers }) };
   };
@@ -46,7 +56,7 @@ test('PUBLIC-EVIDENCE-RERUN-NONDETERMINISM: late matching and changed-input runs
     };
     const slow = f.call(['evidence', 'rerun', 'demo', '--gate', 'tests']);
     t.after(() => release.resolve());
-    await started.promise;
+    await started.wait(slow);
     assert.equal((await f.call(['evidence', 'rerun', 'demo', '--gate', 'tests'])).nondeterministic, true);
     if (changedInput) {
       await Promise.all(selectProfile('impl').gates.map(id => writeFile(path.join(f.cwd, id), 'changed')));
@@ -88,7 +98,7 @@ test('PUBLIC-EVIDENCE-RERUN-NONDETERMINISM: acceptance commit rechecks evidence 
   };
   const accepting = f.call(['unit', 'accept', 'demo']);
   t.after(() => release.resolve());
-  await checked.promise;
+  await checked.wait(accepting);
   f.adapters.gates.run = async () => pass(['AC-2']);
   assert.equal((await f.call(['evidence', 'rerun', 'demo', '--gate', 'tests'])).nondeterministic, true);
   release.resolve();
@@ -96,4 +106,18 @@ test('PUBLIC-EVIDENCE-RERUN-NONDETERMINISM: acceptance commit rechecks evidence 
   const current = await f.store.read('demo');
   assert.equal(current.accepted, null);
   assert.equal(current.state, 'SelfGated');
+});
+
+test('cleanup platform commands cannot enter the simulated gate latch', async t => {
+  const f = await fixture(t);
+  f.adapters.gates.run = async () => { throw new Error('cleanup was intercepted as a gate'); };
+  const snapshot = await createGateSnapshot({directory:path.dirname(f.cwd), files:[{path:'nested/input',content:'captured'}], command:f.adapters.command});
+  await snapshot.cleanup();
+  await assert.rejects(stat(snapshot.root), {code:'ENOENT'});
+});
+
+test('a failed public operation before synchronization rejects instead of hanging', async t => {
+  const f = await fixture(t), checked = latch();
+  f.adapters.git.inspectUnit = async () => { throw new Error('injected preflight failure'); };
+  await assert.rejects(checked.wait(f.call(['unit','accept','demo'])), /operation completed before synchronization.*injected preflight failure/);
 });

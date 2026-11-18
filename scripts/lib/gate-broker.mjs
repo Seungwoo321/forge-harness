@@ -33,7 +33,7 @@ const location = async value => {
 };
 
 // The host owns this endpoint; requests supply no profile or host filesystem action.
-export async function createGateBroker({root, outputs, runtimePaths, boundaries=[], execute}) {
+export async function createGateBroker({root, outputs, runtimePaths, boundaries=[], execute, cleanup}) {
   const token=randomUUID(), sockets=new Set(), pending=new Set();
   let closing=false;
   const scopes=new Map([[token,{root,outputs,runtimePaths,boundaries,pending:new Set(),closing:false}]]);
@@ -53,7 +53,19 @@ export async function createGateBroker({root, outputs, runtimePaths, boundaries=
           if(closing) throw invalid('gate broker is closing');
           const request=JSON.parse(Buffer.concat(chunks).toString('utf8'));chunks=[];
           owner=scopes.get(request.token);
-          if(!owner || owner.closing || !request.execution || typeof request.execution!=='object') throw invalid('unauthorized gate broker request');
+          if(!owner || owner.closing) throw invalid('unauthorized gate broker request');
+          if(request.cleanup !== undefined){
+            const input=request.cleanup;
+            if(typeof cleanup!=='function' || !input || typeof input!=='object' || Array.isArray(input)
+              || typeof input.dev!=='string' || typeof input.ino!=='string' || Object.keys(input).sort().join(',')!=='dev,ino,root' || !/^[0-9]+$/.test(input.dev) || !/^[0-9]+$/.test(input.ino)) throw invalid('invalid snapshot cleanup request');
+            const root=await location(input.root);
+            if(root!==input.root || !owner.outputs.some(output=>root!==output && within(output,root))
+              || owner.boundaries.some(boundary=>within(root,boundary.secret))) throw invalid('snapshot cleanup exceeds captured outputs');
+            await cleanup({...input,root});
+            socket.end(JSON.stringify({result:{exitCode:0,signal:null,stdout:'',stderr:''}}));
+            return;
+          }
+          if(!request.execution || typeof request.execution!=='object')throw invalid('missing captured gate execution');
           const input=request.execution;
           if(!Array.isArray(input.command) || !input.command.length || input.command.some(value=>typeof value!=='string' || !value || value.includes('\0'))
             || !Array.isArray(input.runtimePaths) || !Array.isArray(input.outputRoots)
@@ -86,7 +98,7 @@ export async function createGateBroker({root, outputs, runtimePaths, boundaries=
             scopes.delete(childToken);
           }
           socket.end(JSON.stringify({result:{...result,isolationBackend:'macos-sibling-sandbox-v1'}}));
-        } catch(error){socket.end(JSON.stringify({error:{code:error.code ?? 'GATE_BROKER_INVALID',message:error.message}}));}
+        } catch(error){socket.end(JSON.stringify({error:{code:error.code ?? 'GATE_BROKER_INVALID',message:error.message,...(error.cleanupResult ? {cleanupResult:error.cleanupResult} : {})}}));}
       })();
       pending.add(task);owner?.pending.add(task);
       const completed=()=>{pending.delete(task);owner?.pending.delete(task);};
@@ -104,7 +116,10 @@ export async function createGateBroker({root, outputs, runtimePaths, boundaries=
   }};
 }
 
-export async function requestBrokerGate(endpoint, execution) {
+export const requestBrokerGate = (endpoint,execution) => requestBroker(endpoint,{execution});
+export const requestBrokerCleanup = (endpoint,cleanup) => requestBroker(endpoint,{cleanup});
+
+async function requestBroker(endpoint, payload) {
   let address;
   try {address=JSON.parse(endpoint);} catch {throw invalid('invalid gate broker endpoint');}
   if(!Number.isInteger(address?.port) || address.port<1 || address.port>65535 || typeof address.token!=='string' || !address.token) throw invalid('invalid gate broker endpoint');
@@ -113,13 +128,13 @@ export async function requestBrokerGate(endpoint, execution) {
     const chunks=[];let completed=false;
     socket.on('error',reject);
     socket.once('close',()=>{if(!completed)reject(invalid('gate broker connection closed without a result'));});
-    socket.once('connect',()=>socket.end(JSON.stringify({token:address.token,execution})));
+    socket.once('connect',()=>socket.end(JSON.stringify({token:address.token,...payload})));
     socket.on('data',chunk=>chunks.push(chunk));
     socket.once('end',()=>{
       completed=true;
       try {
         const response=JSON.parse(Buffer.concat(chunks).toString('utf8'));
-        if(response.error)throw Object.assign(new Error(response.error.message),{code:response.error.code});
+        if(response.error)throw Object.assign(new Error(response.error.message),response.error);
         if(!response.result || typeof response.result.stdout!=='string' || typeof response.result.stderr!=='string'
           || !Number.isInteger(response.result.exitCode) && !response.result.signal)throw invalid('invalid gate broker execution result');
         resolve(response.result);

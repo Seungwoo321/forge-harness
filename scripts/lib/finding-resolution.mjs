@@ -10,6 +10,11 @@ const sha = value => typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(v
 const integer = value => Number.isSafeInteger(value) && value > 0;
 const fields = (value, names) => value !== null && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).length === names.length && names.every(name => Object.hasOwn(value, name));
+const reviewReference = value => fields(value, ['unit', 'attempt', 'outputPath', 'outputDigest'])
+  && identifier(value.unit) && integer(value.attempt) && text(value.outputPath) && sha(value.outputDigest);
+const originalReference = value => fields(value, ['unit', 'attempt', 'outputPath', 'outputDigest', 'findingIndex'])
+  && identifier(value.unit) && integer(value.attempt) && text(value.outputPath) && sha(value.outputDigest)
+  && Number.isSafeInteger(value.findingIndex) && value.findingIndex >= 0;
 
 function reject(message, code = 'FINDING_RESOLUTION_INVALID') {
   throw Object.assign(new Error(message), { code });
@@ -24,10 +29,11 @@ function assertRequest(request, userInputRef) {
     || !identifier(request.id) || !integer(request.expectedRevision) || !text(request.head) || !text(request.contentFingerprint)
     || !text(request.reviewer) || !text(request.reason) || !text(userInputRef)
     || !Array.isArray(request.findings) || !request.findings.length
-    || request.findings.some(item => !fields(item, ['index', 'digest']) || !Number.isSafeInteger(item.index) || item.index < 0 || !sha(item.digest))
+    || request.findings.some(item => !(fields(item, ['index', 'digest'])
+      || fields(item, ['index', 'digest', 'originalReview']) && originalReference(item.originalReview))
+      || !Number.isSafeInteger(item.index) || item.index < 0 || !sha(item.digest))
     || new Set(request.findings.map(item => item.index)).size !== request.findings.length
-    || !fields(request.review, ['unit', 'attempt', 'outputPath', 'outputDigest'])
-    || !identifier(request.review.unit) || !integer(request.review.attempt) || !text(request.review.outputPath) || !sha(request.review.outputDigest)
+    || !reviewReference(request.review)
     || !fields(request.evidence, ['path', 'digest']) || !text(request.evidence.path) || !sha(request.evidence.digest)) {
     reject('resolution requires exact findings, current source, completed review, reviewer, evidence and authorization');
   }
@@ -104,6 +110,45 @@ function assertSource(record, request, inspected) {
   }
 }
 
+async function checkOriginalReviews({ store, stateRoot, record, request, contract, cwd }) {
+  const provenance = [];
+  // Historical output uses the prior kind vocabulary; new submissions retain the current contract.
+  const historicalContract = structuredClone(contract);
+  historicalContract.output.properties.findings.items.properties.kind.enum = ['review', 'coverage', 'diagnosis', 'scope-guard', 'shared-path'];
+  for (const item of request.findings) {
+    const reference = item.originalReview;
+    if (!reference) continue;
+    try {
+      const review = reference.unit === record.unit ? record : await store.read(reference.unit);
+      if (!review || review !== record && (review.kind !== 'review' || review.targetUnit !== record.unit || review.state !== 'Closed')) {
+        reject('original reviewer provenance must belong to the exact target');
+      }
+      const attempt = review.stages?.find(stage => stage.name === 'review')?.attempts?.find(attempt => attempt.n === reference.attempt);
+      if (!attempt?.endedAt || attempt.result !== 'done' || attempt.outputDigest !== reference.outputDigest) {
+        reject('original reviewer provenance must match a completed immutable attempt');
+      }
+      const input = JSON.parse(await readFile(path.join(stateRoot, 'units', review.unit, attempt.inputPath), 'utf8'));
+      const { inputDigest, ...core } = input;
+      const output = JSON.parse(await readFile(path.resolve(cwd, reference.outputPath), 'utf8'));
+      const finding = output.findings?.[reference.findingIndex];
+      if (inputDigest !== attempt.inputDigest || effectArgsDigest(core) !== inputDigest
+        || input.unit !== review.unit || input.targetUnit !== record.unit || input.stage !== 'review'
+        || input.attempt !== attempt.n || input.inputRevision !== attempt.inputRevision
+        || effectArgsDigest(output) !== attempt.outputDigest || output.submissionId !== attempt.submissionId
+        || !validateStageOutput(historicalContract, input, output).ok || output.status !== 'done'
+        || !['fix', 'ship'].includes(output.verdict) || output.reviewedHead !== input.head
+        || !finding || effectArgsDigest(finding) !== item.digest) {
+        reject('original review input, output and exact finding must match immutable provenance');
+      }
+      provenance.push({ index: item.index, ...reference, inputDigest, finding });
+    } catch (error) {
+      if (error.code === 'FINDING_RESOLUTION_INVALID') throw error;
+      reject('original reviewer provenance must be readable and verifiable');
+    }
+  }
+  return provenance;
+}
+
 export async function resolveFindings({ store, stateRoot, unit, request, userInputRef, adapters, cwd, contract }) {
   assertRequest(request, userInputRef);
   const requestDigest = effectArgsDigest({ request, userInputRef });
@@ -124,22 +169,26 @@ export async function resolveFindings({ store, stateRoot, unit, request, userInp
     for (const item of request.findings) {
       const finding = record.findings?.[item.index];
       if (!finding || effectArgsDigest(finding) !== item.digest || finding.resolvedAt != null || finding.resolutionRef != null
-        || !['review', 'coverage'].includes(finding.kind)
+        || !['review', 'coverage', 'scope-guard', 'shared-path', 'diagnosis'].includes(finding.kind)
+        || !['review', 'coverage'].includes(finding.kind) && !item.originalReview
         || !['must-fix', 'should-fix', 'nice'].includes(finding.severity)
         || !['id', 'site', 'claim', 'case', 'fix'].every(key => text(finding[key]))
         || Object.keys(finding).some(key => !['id', 'kind', 'severity', 'site', 'claim', 'case', 'fix', 'acceptanceRef', 'classification', 'resolvedAt'].includes(key))) {
-        reject('only exact unresolved reviewer-authored review or coverage findings can be resolved');
+        reject('only exact unresolved reviewer-authored findings with supported resolution ownership can be resolved');
       }
     }
     if (typeof adapters.git?.inspectUnit !== 'function') reject('resolution requires Git inspection', 'ADAPTER_MISSING');
     assertSource(record, request, await adapters.git.inspectUnit({ unit, record }));
+    await checkOriginalReviews({ store, stateRoot, record, request, contract, cwd });
     await checkReview({ store, stateRoot, record, request, contract, cwd });
     await verifyApprovalInput(adapters.provider, { unit, userInputRef, effect: 'finding.resolve', argsDigest: requestDigest,
       head: request.head, contentFingerprint: request.contentFingerprint, reviewer: request.reviewer, independent: true, reason: request.reason });
     const checkedReview = await checkReview({ store, stateRoot, record, request, contract, cwd });
+    const originalReviews = await checkOriginalReviews({ store, stateRoot, record, request, contract, cwd });
     assertSource(record, request, await adapters.git.inspectUnit({ unit, record }));
     const resolvedAt = adapters.now();
     receipt = { ...request, unit, requestDigest, userInputRef, resolvedAt, revision: record.revision + 1,
+      ...(originalReviews.length ? { originalReviews } : {}),
       ...(checkedReview.recovered ? { previousReview: { verdict: record.verdict, reviewedHead: record.reviewedHead, reviewDecision: record.reviewDecision } } : {}) };
     const indexes = new Set(request.findings.map(item => item.index));
     return { ...record, ...(checkedReview.recovered ? { verdict: 'ship', reviewedHead: request.head,

@@ -40,11 +40,12 @@ test('independent review inherits the goal without advancing target ownership', 
  const goals=createContinuityStore(root),store=createUnitStateStore(root);
  await goals.create({goal:{id:'g2',objective:'goal',criteria:['done'],remaining:['target'],status:'active'},policy:{runtime:'cmux',provider:'codex',account:'/account',model:'model',effort:'high',argv:['codex'],roles:{review:{model:'review-model'}}},source:{path:source,digest:hash('goal')}});
  await goals.transaction('g2',current=>({...current,revision:2,bootstraps:[{unit:'target',sessionId:'owner',incarnationId:'owner-1',cwd:root}]}));
+ await store.create({schema:'harness.unit/1',unit:'target',kind:'impl',state:'InReview',head:'head',contentFingerprint:'content'});
  await store.create({schema:'harness.unit/1',unit:'review',kind:'review',state:'InReview',targetUnit:'target',continuity:{goalId:'g2'},policy:{goal:{class:'product-prelaunch'}}});
  let args;
  const session={async observe(){return {sessionId:'owner',incarnationId:'owner-1',cwd:root,runtime:'cmux'}},async execute(input){args=input.args;const identity={sessionId:'reviewer',incarnationId:'reviewer-1',cwd:root};return {...identity,task:{...identity,schema:'harness.goal-receipt/1',enforcement:{status:'verified',cwd:root,key:'guard',hash:'hash'},effectKey:input.key,promptDigest:taskDigest('prompt'),goalDigest:input.args.goalDigest,goal:{threadId:'thread',status:'active',objective:'prompt'},threadId:'thread',turnId:'turn',activityId:'activity',packets:['handoff','goal'].map(name=>({path:input.args[`${name}Path`],digest:input.args[`${name}Digest`]}))}}},async verify(){return {status:'unknown'}}};
  const request={cwd:root,handoffPath:handoff,handoffDigest:hash(packet),parentRuntime:{sessionId:'owner',incarnationId:'owner-1',cwd:root}};
- assert.equal((await startGoalSession({stateRoot:root,unit:'review',request,store,adapters:{session,now:()=>new Date().toISOString()}})).status,'completed');
+ assert.equal((await startGoalSession({stateRoot:root,unit:'review',request,store,adapters:{session,git:{inspectUnit:async()=>({head:'head',contentFingerprint:'content'})},now:()=>new Date().toISOString()}})).status,'completed');
  assert.equal(args.role,'review');const goal=await goals.read('g2');assert.deepEqual(goal.goal.remaining,['target']);assert.equal(goal.reviews[0].targetUnit,'target');
 });
 

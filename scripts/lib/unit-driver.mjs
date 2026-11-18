@@ -5,7 +5,7 @@ import { withGoalAcceptanceRecoveryLock } from './goal-acceptance-lock.mjs';
 import { acquireContinuityLock } from './continuity-lock.mjs';
 import { clarifyGoalAcceptance, validateInitialGoalAcceptance } from './goal-acceptance-binding.mjs';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, open, readFile, readdir, rename, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rmdir, open, readFile, readdir, rename, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createLedgerStore, executeEffect, sessionEffectRetired, unresolvedEffect } from './ledger.mjs';
@@ -239,10 +239,14 @@ async function otherActiveUnits(stateRoot, currentUnit, adapters) {
 
 function commandFailure(error) {
   const code = error.exitCode ?? (['STAGE_CONTRACT_INVALID', 'CLI_USAGE', 'PROFILE_UNSUPPORTED'].includes(error.code) ? 2
-    : ['LOCK_RECOVERY_UNVERIFIED', 'POLICY_UNSET', 'EFFECT_DENIED', 'EFFECT_APPROVAL_REQUIRED', 'OPEN_DECISIONS', 'DELIVERY_DENIED', 'DELIVERY_PLAN_MISMATCH'].includes(error.code) ? 3
+    : ['POLICY_UNSET', 'EFFECT_DENIED', 'EFFECT_APPROVAL_REQUIRED', 'OPEN_DECISIONS', 'DELIVERY_DENIED', 'DELIVERY_PLAN_MISMATCH'].includes(error.code) ? 3
       : error.code === 'REVIEW_REQUIRED' ? 20
       : ['ADAPTER_MISSING', 'ADAPTER_INVALID', 'ENOENT', 'SESSION_CONTRACT_UNSUPPORTED'].includes(error.code) ? 4 : 1);
-  return { code, summary: error.message, details: { error: error.code ?? 'UNIT_FAILURE', ...(error.issues ? { issues: error.issues } : {}) } };
+  return { code, summary: error.message, details: { error: error.code ?? 'UNIT_FAILURE', ...(error.issues ? { issues: error.issues } : {}),
+    ...(error.execution ? {execution:error.execution} : {}), ...(error.reportPath ? {reportPath:error.reportPath} : {}),
+    ...(error.cleanupError ? {cleanupError:{code:error.cleanupError.code,message:error.cleanupError.message,...(error.cleanupError.cleanupResult ? {result:error.cleanupError.cleanupResult} : {})}} : {}),
+    ...(error.cleanupResult ? {cleanupResult:error.cleanupResult} : {}),
+    ...(error.reportError ? {reportError:{code:error.reportError.code,message:error.reportError.message}} : {}) } };
 }
 
 function acceptanceProgress(record) {
@@ -1096,12 +1100,32 @@ function gateFailureProof(evidence) {
 async function runIsolatedGate({gate,stateRoot,unit,adapters,cwd}) {
   if (typeof adapters.command !== 'function') throw Object.assign(new Error('isolated gate execution requires the core command adapter'),{code:'ADAPTER_MISSING'});
   const directory=await mkdtemp(path.join(os.tmpdir(),'forge-gate-'));
+  let failure,execution,reportPath,reportAttempted=false;
   try {
-    const execution=await executeCapturedGate({gate,directory,sourceRoot:cwd,command:adapters.command});
+    execution=await executeCapturedGate({gate,directory,sourceRoot:cwd,command:adapters.command});
     const parsed=capturedGateReport({gate,execution,reportPath:'captured'});
-    const reportPath=await persistCapturedReport({stateRoot:path.resolve(stateRoot),unit,content:execution.stdout});
-    return {...parsed,reportPath};
-  } finally {await rm(directory,{recursive:true,force:true});}
+    reportAttempted=true;
+    reportPath=await persistCapturedReport({stateRoot:path.resolve(stateRoot),unit,content:execution.stdout});
+    const diagnostics=JSON.stringify({exitCode:execution.exitCode ?? null,signal:execution.signal ?? null,stderr:execution.stderr ?? ''});
+    const diagnosticPath=await persistCapturedReport({stateRoot:path.resolve(stateRoot),unit,content:diagnostics});
+    return {...parsed,reportPath,execution:{...parsed.execution,diagnostics:{report:diagnosticPath,
+      digest:`sha256:${createHash('sha256').update(diagnostics).digest('hex')}`}}};
+  } catch (error) {
+    failure=error;
+    if (execution) error.execution ??= execution;
+    if (error.execution?.stdout !== undefined && !reportAttempted) {
+      try { error.reportPath=await persistCapturedReport({stateRoot:path.resolve(stateRoot),unit,content:error.execution.stdout}); }
+      catch (reportError) { error.reportError=reportError; }
+    }
+    if (reportPath) error.reportPath ??= reportPath;
+    throw error;
+  } finally {
+    try { await rmdir(directory); }
+    catch (cleanupError) {
+      if (failure) failure.cleanupError ??= cleanupError;
+      else throw Object.assign(cleanupError,{execution,reportPath});
+    }
+  }
 }
 
 async function runEvidenceRerun({ stateRoot, unit, gateId, adapters, cwd }) {

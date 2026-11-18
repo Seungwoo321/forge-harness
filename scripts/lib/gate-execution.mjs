@@ -27,10 +27,10 @@ export async function executeCapturedGate({gate,directory,sourceRoot,command,pla
   if (!relative || relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) throw Object.assign(new Error('snapshot must be outside the live source tree'),{code:'GATE_SNAPSHOT_INVALID'});
   const temporaryDirectory='.forge-gate-tmp';
   if (captured.files.some(file=>file.path===temporaryDirectory || file.path.startsWith(`${temporaryDirectory}/`))) throw invalid('reserved gate temporary directory overlaps input');
-  const snapshot=await createGateSnapshot({directory,files:captured.files,outputDirectories:[...(captured.outputDirectories ?? []),temporaryDirectory]});
+  const snapshot=await createGateSnapshot({directory,platform,files:captured.files,outputDirectories:[...(captured.outputDirectories ?? []),temporaryDirectory]});
   const isolatedRoot=await realpath(snapshot.root);
   const sourceInputs = [];
-  let broker;
+  let broker, execution, failure;
   try {
     for (const file of captured.files) {
       const sourceFile=path.join(source,file.path);
@@ -89,14 +89,30 @@ export async function executeCapturedGate({gate,directory,sourceRoot,command,pla
     const env={TMPDIR:temporaryRoot,XDG_RUNTIME_DIR:temporaryRoot,OPENSSL_CONF:'/dev/null'};
     const input=broker ? JSON.stringify({command:captured.command,env:{...process.env,...env},endpoint:broker.endpoint}) : undefined;
     if(broker)args=[...args.slice(0,2),process.execPath,'-e',brokerCommandBootstrap];
-    const result=await command(binary,args,{cwd:snapshot.root,...(capturedGate ? {capturedGate} : {}),env,...(input === undefined ? {} : {input})});
+    const result=execution=await command(binary,args,{cwd:snapshot.root,...(capturedGate ? {capturedGate} : {}),env,...(input === undefined ? {} : {input})});
     if (broker) { await broker.close(); broker=null; result.isolationBackend='macos-sibling-sandbox-host-v1'; }
     for (const input of sourceInputs) {
       if (signature(await lstat(input.path,{bigint:true})) !== input.signature) throw invalid('live gate input changed during execution');
     }
     await snapshot.assertUnchanged();
     return {...result,inputFingerprint:fingerprint};
-  } finally { try { await broker?.close(); } finally { await snapshot.cleanup(); } }
+  } catch (error) {
+    failure=error;
+    if (execution) error.execution ??= execution;
+    throw error;
+  } finally {
+    // Preserve the command and primary failure even when either cleanup boundary fails.
+    let cleanupFailure;
+    try { await broker?.close(); } catch (error) { cleanupFailure=error; }
+    try { await snapshot.cleanup(); } catch (error) {
+      if (cleanupFailure) cleanupFailure.cleanupError=error;
+      else cleanupFailure=error;
+    }
+    if (cleanupFailure) {
+      if (failure) failure.cleanupError=cleanupFailure;
+      else throw Object.assign(cleanupFailure,{execution});
+    }
+  }
 }
 
 export function capturedGateReport({gate,execution,reportPath}) {
@@ -116,7 +132,7 @@ export function capturedGateReport({gate,execution,reportPath}) {
     covers:gate.resultFormat === 'json' && exit === 0 ? parsed.covers : [],
     ...(parsed.judge !== undefined ? {judge:parsed.judge} : {}),
     ...(exit !== 0 ? {failureClass:parsed.failureClass ?? 'unknown'} : {}),
-    execution:{kind:'isolated-snapshot-v1',fingerprint:execution.inputFingerprint,...(execution.isolationBackend ? {backend:execution.isolationBackend} : {})}};
+    execution:{kind:'isolated-snapshot-v1',fingerprint:execution.inputFingerprint,exitCode:execution.exitCode ?? null,signal:execution.signal ?? null,...(execution.isolationBackend ? {backend:execution.isolationBackend} : {})}};
 }
 
 export async function persistCapturedReport({stateRoot,unit,content}) {

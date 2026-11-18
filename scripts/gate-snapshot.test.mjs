@@ -1,6 +1,8 @@
 import test from 'node:test';
+import fs from 'node:fs/promises';
+import {syncBuiltinESMExports} from 'node:module';
 import assert from 'node:assert/strict';
-import {chmod,link,mkdir,mkdtemp,readFile,realpath,rm,stat,symlink,writeFile} from 'node:fs/promises';
+import {chmod,link,mkdir,mkdtemp,readFile,readdir,realpath,rm,stat,symlink,writeFile} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {createGateSnapshot} from './lib/gate-snapshot.mjs';
@@ -141,4 +143,105 @@ test('a hardlink introduced in an allowed runtime path after preflight invalidat
  await writeFile(path.join(sourceRoot,'check.mjs'),script);const command=createAdapters().command;
  await assert.rejects(executeCapturedGate({gate:{command:[process.execPath,'check.mjs'],config:{runtimePaths:[runtime]},files:[{path:'input',content:'original'},{path:'check.mjs',content:script}]},directory:snapshots,sourceRoot,
   command:async(...args)=>{await link(input,alias);await writeFile(input,'changed');try{return await command(...args)}finally{await writeFile(input,'original');await rm(alias)}}}),{code:'GATE_SNAPSHOT_INVALID'});
+});
+
+for (const exitCode of [0,7,'SIGTERM']) test('AC-1 AC-2 copied read-only outputs retain command result '+exitCode,async t=>{
+ const directory=await mkdtemp(path.join(os.tmpdir(),'gate-copy-'));
+ const sourceRoot=path.join(directory,'source'),snapshots=path.join(directory,'snapshots');
+ await mkdir(path.join(sourceRoot,'fixture/nested'),{recursive:true});await mkdir(snapshots);
+ const external=path.join(directory,'external');await mkdir(external);await writeFile(path.join(external,'keep'),'outside');await chmod(external,0o500);
+ t.after(async()=>{await chmod(external,0o700);await rm(directory,{recursive:true,force:true});});
+ const script=`import {chmod,cp,mkdir,symlink} from 'node:fs/promises';
+ await cp('fixture','output/copied',{recursive:true});
+ const nested=process.env.TMPDIR+'/forge-gate-child/gate-inner/.forge-gate-tmp';
+ await mkdir(nested,{recursive:true});
+ await cp('fixture',nested+'/copied',{recursive:true});
+ await chmod(nested+'/copied/nested',0);
+ await chmod(nested,0o500);
+ await chmod('output/copied/nested',0);
+ await symlink(${JSON.stringify(external)},'output/external');
+ await symlink('missing','output/dangling');
+ console.log('copied');console.error('diagnostic');${exitCode==='SIGTERM'?"process.kill(process.pid,'SIGTERM')":`process.exitCode=${exitCode}`};`;
+ const files=[{path:'fixture/nested/input',content:'input'},{path:'copy.mjs',content:script}];
+ for(const file of files)await writeFile(path.join(sourceRoot,file.path),file.content);
+ const gate={id:'tests',command:[process.execPath,'copy.mjs'],files,outputDirectories:['output']};
+ const execution=await executeCapturedGate({gate,directory:snapshots,sourceRoot,command:createAdapters().command});
+ if(exitCode==='SIGTERM')assert.equal(execution.signal,exitCode);else assert.equal(execution.exitCode,exitCode);
+ assert.equal(execution.stdout,'copied\n');assert.equal(execution.stderr,'diagnostic\n');
+ assert.equal(capturedGateReport({gate,execution,reportPath:'captured'}).ok,exitCode===0);
+ assert.deepEqual(await readdir(snapshots),[]);
+ assert.equal((await stat(external)).mode & 0o777,0o500);assert.equal(await readFile(path.join(external,'keep'),'utf8'),'outside');
+ assert.equal(await readFile(path.join(sourceRoot,'fixture/nested/input'),'utf8'),'input');
+});
+
+test('AC-1 cleanup ignores a replaced output directory symbolic link',async t=>{
+ const directory=await mkdtemp(path.join(os.tmpdir(),'gate-cleanup-link-'));
+ const external=path.join(directory,'external');await mkdir(external);await writeFile(path.join(external,'keep'),'outside');await chmod(external,0o500);
+ t.after(async()=>{await chmod(external,0o700);await rm(directory,{recursive:true,force:true});});
+ const snapshot=await createGateSnapshot({directory,files:[{path:'input',content:'captured'}],outputDirectories:['output']});
+ await chmod(snapshot.root,0o700);await rm(path.join(snapshot.root,'output'),{recursive:true});await symlink(external,path.join(snapshot.root,'output'));
+ await snapshot.cleanup();await snapshot.cleanup();
+ assert.equal((await stat(external)).mode & 0o777,0o500);assert.equal(await readFile(path.join(external,'keep'),'utf8'),'outside');
+});
+
+
+for (const changedInput of [false,true]) test('AC-2 cleanup failure retains '+(changedInput?'validation error':'execution diagnostics'),async t=>{
+ const directory=await mkdtemp(path.join(os.tmpdir(),'gate-cleanup-error-'));
+ const sourceRoot=path.join(directory,'source'),snapshots=path.join(directory,'snapshots');await mkdir(sourceRoot);await mkdir(snapshots);
+ await writeFile(path.join(sourceRoot,'input'),'captured');let snapshotRoot;
+ const original=fs.rmdir;
+ t.mock.method(fs,'rmdir',async item=>{if(item===snapshotRoot)throw Object.assign(new Error('injected cleanup denial'),{code:'EACCES'});return original(item);});syncBuiltinESMExports();
+ t.after(async()=>{t.mock.restoreAll();syncBuiltinESMExports();await rm(directory,{recursive:true,force:true});});
+ const execution={exitCode:7,stdout:'original stdout',stderr:'original stderr'};
+ await assert.rejects(executeCapturedGate({gate:{command:[process.execPath,'-e','process.exit(0)'],files:[{path:'input',content:'captured'}],outputDirectories:['output']},directory:snapshots,sourceRoot,
+ command:async(binary,args,{cwd})=>{
+  snapshotRoot=cwd;
+  if(changedInput){await chmod(path.join(cwd,'input'),0o600);await writeFile(path.join(cwd,'input'),'changed');}
+  return execution;
+ }}),error=>{
+  assert.deepEqual(error.execution,execution);
+  if(changedInput){assert.equal(error.code,'GATE_SNAPSHOT_INVALID');assert.equal(error.cleanupError.code,'EACCES');}
+  else assert.equal(error.code,'EACCES');
+  return true;
+ });
+});
+
+for (const boundary of ['chmod','readdir']) test('AC-1 cleanup confines an ancestor replacement before '+boundary,async t=>{
+ const directory=await mkdtemp(path.join(os.tmpdir(),'gate-cleanup-race-'));
+ const external=path.join(directory,'external');await mkdir(path.join(external,'victim'),{recursive:true});await writeFile(path.join(external,'victim/keep'),'outside');await chmod(path.join(external,'victim'),0o500);
+ let snapshot,fired=false;
+ const command=createAdapters().command;
+ snapshot=await createGateSnapshot({directory,files:[{path:'input',content:'captured'}],outputDirectories:['output'],command:async(binary,args,options)=>{
+  if(!fired){
+   fired=true;const index=args.indexOf('-e')+1;
+   const prefix=`import fs from 'node:fs/promises';import {syncBuiltinESMExports} from 'node:module';
+const original=fs[${JSON.stringify(boundary)}];let replaced=false;
+fs[${JSON.stringify(boundary)}]=async function(directory,...rest){
+ if(!replaced && directory==='./output') {replaced=true;await fs.rename(directory,directory+'-moved');await fs.symlink(${JSON.stringify(external)},directory);}
+ return original(directory,...rest);
+};syncBuiltinESMExports();\n`;
+   args=[...args];args[index]=prefix+args[index];
+  }
+  return command(binary,args,options);
+ }});
+ t.after(async()=>{await snapshot.cleanup();await chmod(path.join(external,'victim'),0o700);await rm(directory,{recursive:true,force:true});});
+ await mkdir(path.join(snapshot.root,'output/victim'));await writeFile(path.join(snapshot.root,'output/victim/keep'),'snapshot');
+ await assert.rejects(snapshot.cleanup(),error=>['EACCES','EPERM','ENOENT'].includes(error.code));
+ assert.equal((await stat(path.join(external,'victim'))).mode & 0o777,0o500);
+ assert.equal(await readFile(path.join(external,'victim/keep'),'utf8'),'outside');
+});
+
+for (const replacement of ['symlink','directory']) test('AC-1 root replacement cannot authorize an external '+replacement, async t=>{
+ const directory=await mkdtemp(path.join(os.tmpdir(),'gate-cleanup-root-race-'));
+ const external=path.join(directory,'external');await mkdir(path.join(external,'victim'),{recursive:true});await writeFile(path.join(external,'victim/keep'),'outside');await chmod(path.join(external,'victim'),0o500);
+ let snapshot,replaced=false;const command=createAdapters().command;
+ snapshot=await createGateSnapshot({directory,files:[{path:'input',content:'captured'}],command:async(binary,args,options)=>{
+  if(!replaced){replaced=true;await chmod(snapshot.root,0o700);await fs.rename(snapshot.root,snapshot.root+'-moved');if(replacement==='symlink')await symlink(external,snapshot.root);else await fs.rename(external,snapshot.root);}
+  return command(binary,args,options);
+ }});
+ t.after(async()=>{if(replacement==='symlink')await fs.unlink(snapshot.root);else await fs.rename(snapshot.root,external);await fs.rename(snapshot.root+'-moved',snapshot.root);await snapshot.cleanup();await chmod(path.join(external,'victim'),0o700);await rm(directory,{recursive:true,force:true});});
+ await assert.rejects(snapshot.cleanup());
+ const kept=replacement==='symlink'?external:snapshot.root;
+ assert.equal((await stat(path.join(kept,'victim'))).mode & 0o777,0o500);
+ assert.equal(await readFile(path.join(kept,'victim/keep'),'utf8'),'outside');
 });

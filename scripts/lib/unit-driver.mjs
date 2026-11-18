@@ -239,7 +239,7 @@ async function otherActiveUnits(stateRoot, currentUnit, adapters) {
 
 function commandFailure(error) {
   const code = error.exitCode ?? (['STAGE_CONTRACT_INVALID', 'CLI_USAGE', 'PROFILE_UNSUPPORTED'].includes(error.code) ? 2
-    : ['POLICY_UNSET', 'EFFECT_DENIED', 'EFFECT_APPROVAL_REQUIRED', 'OPEN_DECISIONS', 'DELIVERY_DENIED', 'DELIVERY_PLAN_MISMATCH'].includes(error.code) ? 3
+    : ['LOCK_RECOVERY_UNVERIFIED', 'POLICY_UNSET', 'EFFECT_DENIED', 'EFFECT_APPROVAL_REQUIRED', 'OPEN_DECISIONS', 'DELIVERY_DENIED', 'DELIVERY_PLAN_MISMATCH'].includes(error.code) ? 3
       : error.code === 'REVIEW_REQUIRED' ? 20
       : ['ADAPTER_MISSING', 'ADAPTER_INVALID', 'ENOENT', 'SESSION_CONTRACT_UNSUPPORTED'].includes(error.code) ? 4 : 1);
   return { code, summary: error.message, details: { error: error.code ?? 'UNIT_FAILURE', ...(error.issues ? { issues: error.issues } : {}),

@@ -141,7 +141,7 @@ test('PUBLIC-EFFECT-REGISTERED-LEDGERED: public E2 execution records intent befo
   await uncertain.setNative({ mode: 'uncertain' });
   assert.equal((await uncertain.effect()).code, 3);
   assert.equal((await uncertain.effect()).status, 'reconciled');
-  assert.deepEqual((await uncertain.ledger()).map(row => row.event), ['intent', 'result']);
+  assert.deepEqual((await uncertain.ledger()).map(row => row.event), ['intent', 'execution-error', 'result']);
   assert.equal((await uncertain.rows()).filter(row => row.operation === 'execute').length, 1);
 });
 

@@ -123,9 +123,9 @@ test('an initial execution error is retained as bounded diagnostics without perm
     assert.equal((await executeEffect(input)).status, 'uncertain');
     assert.equal(calls, 1);
     const rows = await f.store.withLock('UNIT-9', ledger => ledger.read());
-    assert.deepEqual(rows.map(row => row.event), ['intent', 'verification', 'verification']);
-    assert.equal(rows[1].verify.code, 'COMMAND_REJECTED');
-    assert.equal(rows[1].status, 'unknown');
+    assert.deepEqual(rows.map(row => row.event), ['intent', 'execution-error', 'verification']);
+    assert.equal(rows[1].error.code, 'COMMAND_REJECTED');
+    assert.equal(rows[1].error.exitCode, 2);
   } finally { await f.cleanup(); }
 });
 
@@ -160,8 +160,8 @@ test('uncertain PR reconciliation accepts only the exact open repository branch 
     assert.equal(calls, 1);
     const rows = await f.store.withLock(input.unit, ledger => ledger.read());
     assert.equal(rows.filter(row => row.event === 'intent').length, 1);
-    // One row retains the original execution failure; four record the mismatched observations.
-    assert.equal(rows.filter(row => row.event === 'verification').length, 5);
+    assert.equal(rows.filter(row => row.event === 'verification').length, 4);
+    assert.equal(rows.filter(row => row.event === 'execution-error').length, 1);
   } finally { await f.cleanup(); }
 });
 

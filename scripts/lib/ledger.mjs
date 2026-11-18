@@ -332,7 +332,13 @@ export async function executeEffect({
       // The failed execution is not proof of non-application, so the intent stays uncertain; the bounded diagnostic
       // keeps the original cause visible to later reconciliation without permitting another execution.
       const verification = executionFailure(error, effect);
-      await ledger.append({event:'verification',unit,seq,key:prepared.key,status:'unknown',verify:verification,checked_at:adapter.now()});
+      // Native goal startup already treats this failure as its first observation. Other effects record it as its own
+      // event so verification-count retry budgets keep counting only observations.
+      if (effect === 'session.start' && args.goalPath) {
+        await ledger.append({event:'verification',unit,seq,key:prepared.key,status:'unknown',verify:verification,checked_at:adapter.now()});
+      } else {
+        await ledger.append({event:'execution-error',unit,seq,key:prepared.key,error:verification,failed_at:adapter.now()});
+      }
       return {status:'uncertain',key:prepared.key,seq,verification};
     }
     };

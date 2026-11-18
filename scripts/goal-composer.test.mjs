@@ -113,7 +113,7 @@ test('fresh queue/goal proof is rechecked after owner probes at first input and 
 });
 
 test('AC-2 fresh supported input requires its exact supported platform and matching native welcome',async()=>{
- for(const [platform,welcome,allowed] of [['0.169.0','0.169.0',true],['0.169.1','0.169.1',false],['0.170.0','0.170.0',false],['0.169.0-custom','0.169.0-custom',false],['0.169.0','0.168.0',false],['0.168.0','0.169.0',false],['0.168.0','0.168.0',true],['0.168.1','0.168.1',false],['0.168.0','0.167.1',false]]) {
+ for(const [platform,welcome,allowed] of [['0.169.0','0.169.0',true],['0.169.1','0.169.1',true],['0.169.2','0.169.2',false],['0.169.1','0.169.0',false],['0.169.0','0.169.1',false],['0.169.1-custom','0.169.1-custom',false],['0.170.0','0.170.0',false],['0.169.0-custom','0.169.0-custom',false],['0.169.0','0.168.0',false],['0.168.0','0.169.0',false],['0.168.0','0.168.0',true],['0.168.1','0.168.1',false],['0.168.0','0.167.1',false]]) {
   let draft='',entered=0,writes=0;
   const read=async()=>` >_ OpenAI Codex (v${welcome})\n› ${draft||'Ask Codex to do anything'}\n model · Ready · context\n ? for shortcuts`;
   const run=()=>submitNativeGoal({provider:'codex',objective:'finish',preTurn:{platform:`codex/${platform}`},read,

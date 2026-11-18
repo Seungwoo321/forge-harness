@@ -150,7 +150,7 @@ test('public trust timeout recovers the same reviewer and seq1 on Ready, with on
 });
 
 test('AC-1 AC-3 public first-input recovery keeps the original intent and worker across trust timeout and lazy rollout',async t=>{
- for(const version of ['0.167.1','0.168.0','0.169.0'])await t.test(version,async t=>{
+ for(const version of ['0.167.1','0.168.0','0.169.0','0.169.1'])await t.test(version,async t=>{
  const f=await fixture(t,true,false,false,version),before=await f.store.read('change');assert.equal((await f.run()).code,3);
  await f.edit({trust:true});const result=await f.run();assert.equal(result.code,0,JSON.stringify(result));assert.equal(result.result.seq,1);
  assert.equal((await f.run()).code,0);const native=await f.read(),rows=await f.ledger();

@@ -49,7 +49,12 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
 
   async function invoke(binary, args, cwd) {
     const result = await command(binary, args, { cwd });
-    if (result.exitCode !== 0 || result.signal) throw invalid(`${binary} observation or launch failed`);
+    if (result.exitCode !== 0 || result.signal) {
+      const status = result.signal ? `signal ${result.signal}` : `exit ${result.exitCode}`;
+      const diagnostic = String(result.stderr ?? '').split(/\r?\n/).map(line => line.trim()).find(Boolean)?.slice(0, 200);
+      throw Object.assign(invalid(`${binary} observation or launch failed (${status})${diagnostic ? `: ${diagnostic}` : ''}`),
+        { exitCode: result.exitCode ?? null, signal: result.signal ?? null });
+    }
     return result.stdout;
   }
 

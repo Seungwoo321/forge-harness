@@ -20,6 +20,17 @@ function quote(value) {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+// This runs inside the newly created terminal, before replacing its shell with the worker.
+const cmuxTtyBootstrap = `import {execFileSync} from 'node:child_process';
+const workspace_id=process.env.CMUX_WORKSPACE_ID,surface_id=process.env.CMUX_SURFACE_ID;
+const uuid=/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
+if(!uuid.test(workspace_id ?? '') || !uuid.test(surface_id ?? ''))throw Error('cmux launch target is unavailable');
+const tty_name=execFileSync('/usr/bin/tty',[],{encoding:'utf8',stdio:['inherit','pipe','inherit']}).trim().replace(/^\\/dev\\//,'');
+if(!/^[A-Za-z0-9/]+$/.test(tty_name))throw Error('cmux launch TTY is unavailable');
+const response=JSON.parse(execFileSync('cmux',['--json','--id-format','uuids','rpc','surface.report_tty',JSON.stringify({workspace_id,surface_id,tty_name})],{encoding:'utf8'}));
+const result=response.result ?? response;
+if(response.ok===false || result.workspace_id!==workspace_id || result.surface_id!==surface_id || result.tty_name!==tty_name)throw Error('cmux TTY registration is unverified');`;
+
 function terminals(tree) {
   return (tree.windows ?? []).flatMap(window => (window.workspaces ?? []).flatMap(workspace =>
     (workspace.panes ?? []).flatMap(pane => (pane.surfaces ?? []).map(surface => ({ ...surface, workspaceId: workspace.id, windowId: window.id })))));
@@ -630,7 +641,8 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
         if (owner.incarnationId !== parent.incarnationId) throw invalid('parent incarnation changed before launch');
       }
       const assignments = Object.entries(env).map(([key, value]) => `${key}=${quote(value)}`).join(' ');
-      const text = `cd -- ${quote(input.args.cwd)} && ${assignments ? `${assignments} ` : ''}exec ${argv.map(quote).join(' ')}`;
+      const registration = runtime === 'cmux' ? `${quote(process.execPath)} --input-type=module -e ${quote(cmuxTtyBootstrap)} && ` : '';
+      const text = `cd -- ${quote(input.args.cwd)} && ${registration}${assignments ? `${assignments} ` : ''}exec ${argv.map(quote).join(' ')}`;
       if (runtime === 'cmux') {
         // Mutation acknowledgments can be plain text; completion requires live observation below.
         await invoke('cmux', ['--json', '--id-format', 'uuids', 'new-workspace', '--name', marker(input.key), '--cwd', input.args.cwd, '--command', text, '--focus', 'true'], input.args.cwd);

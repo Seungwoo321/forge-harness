@@ -44,7 +44,7 @@ async function fixture(t,{pending=false,seed=true,expandedFooter=false,legacy:le
     }
     if(state.mode==='crash-submission'&&marked||state.mode==='crash-confirmation'&&confirmed)throw Error('simulated process loss after synced boundary');
     let stdout;
-    if(binary==='cmux'&&argv.includes('tree'))stdout=JSON.stringify({windows:[{workspaces:[...(!state.closed?[{id:'owner-workspace',panes:[{surfaces:[{id:'owner',type:'terminal',tty:'tty1'},{id:'user-shell',type:'terminal',tty:'tty9'}]}]}]:[]),{id:'receiver-workspace',panes:[{surfaces:[{id:'receiver',type:'terminal',tty:'tty2'}]}]}]}]});
+    if(binary==='cmux'&&argv.includes('tree'))stdout=JSON.stringify({windows:[{id:'window',workspaces:[{id:'owner-workspace',panes:[{surfaces:[...(!state.closed?[{id:'owner',type:'terminal',tty:'tty1'}]:[]),{id:'user-shell',type:'terminal',tty:'tty9'}]}]},{id:'receiver-workspace',panes:[{surfaces:[{id:'receiver',type:'terminal',tty:'tty2'}]}]}]}]});
     else if(binary==='ps')stdout=argv.includes('tty=')?'supervisor':argv.includes('pid=,pgid=,tpgid=,comm=')?(argv.includes('tty1')?'22 22 22 codex':'33 33 33 codex'):'START';
     else if(binary==='lsof')stdout=argv.includes('-d')?'n'+root+'\n':`n${process.env.CODEX_HOME??process.env.HOME+'/.codex'}/thread-writer-locks/${argv.includes('22')?ownerThread:state.thread}.lock\n`;
     else if(binary==='cmux'&&argv.includes('terminal.viewport'))stdout=JSON.stringify({surface_id:'receiver',columns:44});
@@ -185,7 +185,10 @@ test('AC-3 a changed packet or native queue at either durable boundary prevents 
 
 test('a fresh public delivery also records both durable boundaries before native effects',async t=>{
   const f=await fixture(t,{seed:false});assert.equal((await f.run()).code,0);assert.equal(f.state.pastes,1);assert.equal(f.state.returns,1);
-  const rows=await f.rows();assert.equal(rows.find(r=>r.event==='intent').seq,1);assert.equal(rows.filter(r=>r.event==='submission').length,1);assert.equal(rows.filter(r=>r.event==='confirmation').length,1);
+  const rows=await f.rows(),delivery=rows.filter(r=>r.key===f.intent.key);
+  assert.equal(delivery.find(r=>r.event==='intent').seq,1);assert.equal(delivery.filter(r=>r.event==='submission').length,1);assert.equal(delivery.filter(r=>r.event==='confirmation').length,1);
+  const closing=rows.filter(r=>r.event==='submission'&&r.effect==='session.close');assert.equal(closing.length,1);
+  assert.equal(closing[0].binding.target.workspaceId,'owner-workspace');assert.equal(closing[0].binding.target.kind,'surface');
 });
 
 test('crash after submission or confirmation never repeats the consumed native input boundary',async t=>{

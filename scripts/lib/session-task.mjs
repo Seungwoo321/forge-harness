@@ -3,6 +3,9 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
 export const taskDigest = value => `sha256:${createHash('sha256').update(value).digest('hex')}`;
+export const packetReadContract = 'Within the existing goal, read each such packet unfiltered: either a bare `cat <path>` that the runtime recognizes as a file read and whose complete output equals the file, '
+  + 'or one successful command whose complete output contains the whole file followed by its `shasum -a 256 <absolute path>` line. '
+  + 'Summarized, truncated or compacted output, a hash from another unrecognized command and a digest alone are not read proof; run an output compactor or wrapper in its raw mode.';
 export const taskError = message => Object.assign(new Error(message), { code: 'SESSION_TASK_UNVERIFIED' });
 
 export async function taskPackets(args) {
@@ -62,6 +65,11 @@ export async function observeGoalTask({ transport, observed, input, prompt, pack
     if (!submission.attempted) throw taskError('native goal submission did not record its mutation boundary');
     evidence = await transport.observeGoal(request);
     if ((evidence.threadId ?? evidence.fence) !== submission.binding.threadId) throw taskError('native submission owner or packets changed');
+  }
+  if (evidence.state === 'accepted' && evidence.goal && evidence.missingPackets?.length) {
+    // The goal is already running: report the incomplete packet proof and never resubmit it.
+    throw Object.assign(taskError(`native goal accepted; immutable packet read proof is incomplete for ${evidence.missingPackets.map(packet => packet.path).join(', ')}. ${packetReadContract}`),
+      {taskState:evidence.state, missingPackets:evidence.missingPackets});
   }
   if (evidence.state !== 'started') throw Object.assign(taskError('native goal or packet delivery has not started'), {taskState:evidence.state});
   return validateTaskReceipt({...observed,task:{...evidence,schema:'harness.goal-receipt/1',effectKey:input.key,

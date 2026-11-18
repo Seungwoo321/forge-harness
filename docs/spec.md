@@ -425,6 +425,8 @@ LLM 이 제어면의 결정을 우회하지 못하도록 두 가지를 둔다: �
 
 전체 목표 완료 또는 수신자가 없는 실제 차단·사용자 일시중지에는 successor나 returnTo를 만들지 않는다. 목표 완료 근거 또는 Stopped 상태·원인·객관적인 재개 조건과 결과를 영속 기록해 사용자에게 보고한다. 수신자가 없으므로 native 수신·목표 활성·착수 영수증을 요구하지 않는다. 허용된 관리 worker의 자동 종료가 요청된 경우에만 생존 제어면이 정확한 소유자의 소멸을 별도로 확인한다. 허용되지 않은 셸·오케스트레이터와 사용자 소유 terminal은 유지한다.
 
+cmux 종료는 모든 surface 유형을 포함하는 완전한 목록과 정확한 소유자·수신자·경로를 다시 확인한다. 전용 관리 workspace는 지원되는 `close-workspace`로 직접 닫고 대체 surface를 생성하지 않는다. 공유·외부 workspace는 정확한 소유자 surface만 닫는다. 원장은 파괴 명령 전에 선택한 종료 대상을 원 close 인자에 결속해 저장한다. 응답 유실 뒤에는 같은 대상만 재관찰하며 이미 시도한 명령을 반복하지 않는다. 선택한 workspace 또는 surface가 실제 목록에서 사라져야 완료한다. 지연된 목록은 제한 안에서 재관찰하고, 소유자가 사라져도 관리 workspace의 정리가 증명되지 않으면 완료를 확정하지 않는다. [ADR 0063](adr/0063-managed-workspace-closure.md)를 따른다.
+
 ### 7.3 단계 계약 (공통 봉투)
 
 stage 열거값은 `scope | implement | gates | root-cause | review | handoff`다. CLI·stages[].name·파일·체크포인트·Failure Record는 같은 이름을 사용한다. Scoped→scope, Implementing→implement, SelfGated→gates, InReview→review, Delivered 종료 준비→handoff다. gates는 제어면 단계이며 LLM StageOutput을 받지 않는다. root-cause는 실패 때 삽입하며 원 상태를 보존한다. Accepted·Delivering·Closed에는 LLM 단계가 없다.
@@ -802,6 +804,10 @@ fingerprint 가 달라진 증거는 무효이고 해당 게이트부터 다시 �
 
 기존 사용자 세션의 현재 목표 단위는 공개 `unit session-adopt`로 등록한다. 정본 단위 파일과 revision·기준 변경·실패·증거·정책을 보존하고 현재 목표 실행정책·대상·출처 있는 허용·실측 native 소유자를 결속한 별도 adoptions 감사 기록을 목표에 추가한다. 등록은 관리 기동이나 task/enforcement 영수증을 뜻하지 않으며 기존 소유권·불확실한 효과·오래된 입력은 거부한다. 독립 리뷰는 별도 검증 세션이고 실제 효과 경계마다 기존 소유자를 재관찰한다. 기존 사용자 세션과 그 같은 세션 후속 소유권은 자동 종료하지 않는다. 같은 native thread의 기존 소유자가 종료 후 재시작하면 공개 `unit session-rebind`가 이전 프로세스 부재·불변 신원·출처 있는 허용·현재 정책/대상/정본과 CAS를 반복 검증하고 원래 등록을 보존하는 rebindings 영수증을 추가한다. 살아 있거나 불명확한 이전 소유자·진행 중 리뷰·불확실한 효과·오래된 입력은 거부한다. 수신자 없이 보존한 Stopped 소유자의 명시적 외부 종료는 공개 `unit stopped-owner-recover`가 실제 권한·native 종료·현재 단위/목표/원장/대상/정책을 검증한 별도 관찰 기록으로 복구한다. 실행 종료 영수증을 만들지 않고 같은 단위의 목표/단위 재개와 다음 관리 기동을 사용한다. 이전 custody는 보존하되 현재 소유자 선택에서 제외하고 새 기동을 선택한다. 공개 계약은 [기존 소유자 복구](session-custody-recovery.md)를 따른다. 살아 있는 원 소유자의 실제 외부 user-domain/defer 차단 해소는 별도의 출처·해소·현재 custody 검증을 갖춘 [retained 외부 재개](retained-owner-resume.md)로 같은 goal/unit을 재개한다. 원 Accepted·리뷰·실패·stop 이력은 보존하고 같은 단위의 필수 게이트 재검증과 정책상 독립 리뷰를 요구하며 종료 관찰이나 새 세션을 합성하지 않는다.
 
+잘못 기록된 adoption과 목표 변경 승인 출처는 공개 `unit session-approval-correct`와 `goal approval-correct`로 원 영수증을 보존한 별도 감사 기록에 정정한다. 실제 사람의 원 대화·오류 문맥, 현재 단위/목표 revision·대상·source·native 소유권을 잠금 아래 반복 검증한다. 완전히 완료된 목표의 Closed 최종 단위는 원 accepted 대상·완료 proof·결과 파일과 별도 검증된 native 처분 이력으로 감사하며 실행이나 소유권을 재개하지 않는다. 정정은 소유권과 목표 의미, 기존 단위·실패·증거·수용·리뷰를 바꾸지 않으며 위조·stale·불명 효과·경합을 거부한다. 원 대화 provenance는 절대 경로의 불변 파일로 받아 문맥 검증 전후에 실제 바이트를 대조한다. [승인 출처 정정](authority-correction.md)에 공개 계약을 정의한다.
+
+호스트의 worktree·branch·원격 ref 삭제는 공개 읽기 전용 `unit cleanup-check`의 자격을 요구한다. complete 목표의 Closed 최종 단위, 정확한 최종 소유자 close 결과, 소유자 유지·미해결 효과·열린 리뷰 부재, 최종 소유자 cwd와 같은 worktree, 삭제 대상 밖의 상태 저장소를 잠금 아래 확인하고 결과 digest에 결속한다. 호스트는 각 삭제 직전에 다시 판정해 같은 digest를 요구한다. 병합된 PR이나 프로세스 부재는 자격이 아니다. [호스트 정리 자격](cleanup-eligibility.md).
+
 잘못 기록된 범위 승인 출처는 공개 `unit scope approval-correct`로 원 행을 보존한 별도 감사 기록에 정정한다. 원 사람 지시와 차단 문맥·정확한 현재 단위/대상을 검증하며 운영 메시지나 요청 파일의 자기 신고를 승인으로 취급하지 않는다. 미결속·미전달 Accepted·SelfGated·InReview 단위의 최초 goal 결속은 명시적인 `unit goal-bind` 복구 요청으로만 연결한다. 원 정책·실패·단계·증거·수용·리뷰와 goal 자체를 유지하고 정확한 승인·source·대상·잠금을 확인한다. 결속은 native 소유권을 만들지 않으며 이후 기존 session-adopt와 정상 수용·종료 계약을 따른다. [승인 출처·goal 결속 복구](goal-binding-recovery.md)에 공개 계약을 정의한다.
 
 단위 위치는 `<stateRoot>/units/<unit>/unit.json`이다. 단위별 배타 잠금 안에서 최신 revision 읽기→수정→revision 증가→임시 파일 후 교체한다. 같은 제출 ID는 멱등 처리한다. stage 충돌은 inputDigest·attempt·검증 대상 기준이며 무관 필드 갱신은 최신 값에 병합한다. 소유자 종료를 확인하지 못하면 시간 경과만으로 잠금을 빼앗지 않는다. 큐·카운터·causeRegistry·원장·기동 예약도 자원 잠금으로 직렬화한다.
@@ -1028,9 +1034,10 @@ CLI 는 사람용 출력의 마지막 줄에 기계용 한 줄 `RESULT {json}` �
 | H-GO-18 | 명시적으로 외부 종료된 retained Stopped 소유자는 출처 있는 권한·native surface/process 부재·현재 단위/목표/원장/대상/정책/중단 패킷을 반복 검증한 공개 관찰 기록으로 복구한다. 검증된 terminal non-start 정리 관찰로 미착수 리뷰의 복구 순환을 해소하고, 원 이력과 custody를 보존하고 같은 단위의 재개·다음 실제 소유권을 결속하며 무권한·오래된 입력·불확실 효과·살아 있거나 모호한 owner·경합을 거부하고 정확한 재호출은 중복 효과를 내지 않는다 | T |
 | H-GO-17 | 빈 roles map과 생략을 같은 실행 정책으로 비교하되 실제 설정 차이·원 custody/effect digest를 보존한다. 잘못 적용된 마지막 정책 갱신은 원 권한·현재 목표/단위/대상/출처/native custody가 검증된 공개 추가 전용 복구로만 직전 정책을 복원한다. 원 이력·실패·증거·효과를 보존하고 오래된 입력·위조·무권한·리뷰/기동 경합·모호한 재호출을 거부한다 | T |
 | H-GO-16 | 실행 중인 Codex 수신자에게 결과를 native queue로 전달할 때 원 intent의 영속 submission·confirmation 경계, 동일 수신자·thread·패킷 검증 및 실제 읽기 영수증을 유지한다. Stop 훅은 검증된 delivered continuation의 현재 owner 단위를 추적하며 정확히 결속된 원 수신 대기 리뷰의 native 턴 경계를 허용하되 수신·완료·종료 영수증으로 간주하지 않는다. 불확실한 전송은 반복하지 않는다 | T |
+| H-GO-21 | 호스트 자원 삭제는 complete 목표의 Closed 최종 단위·정확한 최종 소유자 close·유지/미해결 효과/열린 리뷰 부재·정확한 repo/branch/worktree·삭제 대상 밖 증거를 잠금 아래 결속한 공개 읽기 전용 자격과 삭제 직전 같은 digest 재판정만 허용한다. InReview·활성 목표·오래된 revision·인자 누락·비관리 작업은 거부하고 정본을 바꾸지 않는다 | T |
 | H-GO-20 | 출처 있는 명시적 제공자 인계와 별도 관찰된 원 소유자 종료 복구는 원 단위·증거·정책/custody 이력을 보존하고 정확한 원 프로세스/자손 정지 또는 독립된 종료/부재 fence와 새 native 소유자·현재 전체 대상/출처/원장·실제 계정/정책을 반복 검증해 별도 감사 기록으로만 수행한다. 실제 작업한 미등록 reviewer는 미착수를 주장하지 않고 원 시작을 보존한 공개 정지 복구로 같은 단위의 다음 시도를 예약하며 필수 독립 리뷰를 다시 수행한다. stale/replay/경합/실행 중 효과와 신원 불일치는 거부한다 | T/L |
 | H-GO-19 | 초기 scope 제출은 구현 전에 원 목표 기준과 AC의 정확한 결속을 검사한다. 수용된 원 단위의 문구 불일치는 출처·현재 대상·전체 의무·native 소유권을 검증한 공개 동일 단위 명확화로만 매핑하며 목표·AC·외부 전달·게이트·리뷰·실패·재시도·정책을 보존한다. 무권한·오래된 입력·위조·충돌·불확실 효과를 거부하고 원자적 감사 기록과 실제 크래시 후 동일 요청 재실행을 보장한다. 살아 있는 retained Stopped-from-Accepted 소유자는 별도의 출처 기반 결속 전용 재개 권한·불변 stop/실패 패킷·같은 native 신원·변경 없는 수용 입력을 검증한 goal/unit resume으로 같은 단위를 계속하며 종료 관찰·새 세션을 합성하지 않는다 | T/L |
-| H-GO-15 | 잘못된 범위 승인 출처와 수용된 미결속 단위는 원 사람 지시·단위/goal/대상 결속을 검증한 공개 감사 복구만 허용한다. 원 이력을 수정하거나 native 소유권·성공 영수증을 만들어 권한을 얻지 않는다 | T |
+| H-GO-15 | 잘못된 범위·adoption·목표 변경 승인 출처와 수용된 미결속 단위는 원 사람 지시·단위/goal/대상 결속을 검증한 공개 감사 복구만 허용한다. 원 이력을 수정하거나 native 소유권·성공 영수증을 만들어 권한을 얻지 않는다 | T |
 | H-GO-05 | 자동 압축·계획 조정·검증 전환은 세션을 나누지 않고, 실제 책임 경계에서만 검증된 인계를 수행한다 | T/L |
 | H-GO-06 | 완료·차단·리뷰 반환은 각각 단일 목적 스킬과 스크립트로 처리한다. 실제 이전에만 수신을 확인하고 수신자 없는 완료·차단은 사용자 보고와 재개 조건을 보존하며 허용된 worker 종료만 정확히 확인한다 | T/L |
 | H-GO-07 | 호스트의 중단·목표 제어·훅 신뢰를 우회하지 않고 미검증 강제 상태를 성공으로 보고하지 않는다 | T/L |

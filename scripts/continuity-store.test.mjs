@@ -45,3 +45,13 @@ test('goal lock excludes live owners and is released after a process dies', asyn
   }
   assert.equal(recovered?.revision,1);
 });
+
+test('lock readiness tolerates slow utility startup and still bounds a hung utility', async () => {
+  const {EventEmitter} = await import('node:events'), {PassThrough} = await import('node:stream');
+  const child = ready => { const c = new EventEmitter(); Object.assign(c, {stdin:new PassThrough(),stdout:new PassThrough(),stderr:new PassThrough(),exitCode:null,signalCode:null,kill(){ c.signalCode='SIGTERM'; }});
+    if (ready) setTimeout(() => c.stdout.write('ready\n'), 30); return c; };
+  // Startup slower than a narrow window must not be reported as an unavailable lock.
+  const held = await acquireContinuityLock('/unused', {launch:() => child(true), readyTimeoutMs:1000});
+  held.assertHeld();
+  await assert.rejects(acquireContinuityLock('/unused', {launch:() => child(false), readyTimeoutMs:10}), {code:'GOAL_LOCK_UNAVAILABLE'});
+});

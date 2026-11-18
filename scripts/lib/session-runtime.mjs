@@ -25,7 +25,7 @@ function terminals(tree) {
     (workspace.panes ?? []).flatMap(pane => (pane.surfaces ?? []).map(surface => ({ ...surface, workspaceId: workspace.id, windowId: window.id })))));
 }
 
-export function createSessionRunner({ runtime, command, parent, launch, runtimeRpc, taskTransport, taskPrompt, pollAttempts = 30 }) {
+export function createSessionRunner({ runtime, command, parent, launch, runtimeRpc, taskTransport, taskPrompt, pollAttempts = 30, now = () => performance.now() }) {
   if (!['cmux', 'orca'].includes(runtime) || typeof command !== 'function' || typeof launch !== 'function'
     || !parent || typeof parent.sessionId !== 'string' || !parent.sessionId || typeof parent.incarnationId !== 'string' || !parent.incarnationId
     || typeof parent.cwd !== 'string' || !path.isAbsolute(parent.cwd)
@@ -53,6 +53,24 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
   const cmux = (args, cwd) => json('cmux', ['--json', '--id-format', 'uuids', ...args], cwd);
   const orca = (args, cwd) => json('orca', [...args, '--json'], cwd);
   const marker = key => `handoff-${createHash('sha256').update(key).digest('hex')}`;
+
+  async function closeInventory(cwd) {
+    const tree = await cmux(['tree', '--all'], cwd);
+    if (!Array.isArray(tree.windows) || tree.windows.some(window => !window.id || !Array.isArray(window.workspaces)
+      || window.workspaces.some(workspace => !workspace.id || !Array.isArray(workspace.panes)
+        || workspace.panes.some(pane => !Array.isArray(pane.surfaces)
+          || pane.surfaces.some(surface => !surface.id || typeof surface.type !== 'string')
+          || pane.surface_count !== undefined && pane.surface_count !== pane.surfaces.length
+          || pane.surface_ids !== undefined && effectArgsDigest(pane.surface_ids) !== effectArgsDigest(pane.surfaces.map(surface => surface.id))))))
+      throw invalid('close inventory is incomplete');
+    const workspaces = tree.windows.flatMap(window => window.workspaces.map(workspace => ({...workspace,windowId:window.id})));
+    const surfaces = terminals(tree);
+    for (const rows of [tree.windows, workspaces, surfaces]) {
+      if (rows.some(row => typeof row.id !== 'string') || new Set(rows.map(row => row.id)).size !== rows.length)
+        throw invalid('close inventory is ambiguous');
+    }
+    return {workspaces,surfaces};
+  }
 
   async function inspectCmux(sessionId, cwd, expectedExecutable) {
     const found = terminals(await cmux(['tree', '--all'], cwd)).filter(item => item.id === sessionId);
@@ -101,9 +119,9 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       throw invalid('Orca terminal identity is unavailable');
     }
     const processEvidence = async () => {
-      const requestedAt = performance.now();
+      const requestedAt = now();
       const response = await runtimeRpc('terminal.inspectProcess', { terminal: sessionId, expectedIncarnationId: terminal.incarnationId, scanChildProcesses: true });
-      const receiveDelay = Math.max(0, performance.now() - requestedAt);
+      const receiveDelay = Math.max(0, now() - requestedAt);
       if (response?.ok === false) throw invalid('Orca process inspection failed');
       const evidence = (response?.result ?? response)?.process?.foregroundProcessEvidence;
       const fence = evidence?.fence;
@@ -392,50 +410,85 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       || owner.cwd !== parent.cwd || owner.sessionId === recipient.sessionId || !owner.worker?.executable || !owner.worker.incarnationId || !owner.worker.threadId) throw invalid('session close ownership is not authorized');
     const callerTty = (await invoke('ps', ['-p', String(process.pid), '-o', 'tty='], owner.cwd)).trim();
     if (!callerTty || callerTty === owner.tty) throw invalid('session close requires a surviving external supervisor');
+    const inventory = runtime === 'cmux' ? await closeInventory(owner.cwd) : null;
     const present = runtime === 'cmux'
-      ? terminals(await cmux(['tree', '--all'], owner.cwd)).filter(item => item.id === owner.sessionId)
+      ? inventory.surfaces.filter(item => item.id === owner.sessionId)
       : (await orca(['terminal', 'list', '--worktree', `path:${owner.cwd}`], owner.cwd)).terminals.filter(item => item.handle === owner.sessionId);
-    if (present.length === 0 && verifyOnly) return { sessionId: owner.sessionId, incarnationId: owner.incarnationId, closed: true };
-    if (present.length !== 1) throw invalid('close target is missing or ambiguous');
+    const closure = input.submission?.binding ?? input.priorResult?.closure;
+    if (closure && (closure.runtime !== runtime || closure.argsDigest !== effectArgsDigest(input.args)
+      || !['workspace','surface'].includes(closure.target?.kind) || !closure.target.workspaceId || !closure.target.windowId
+      || closure.target.workspaceId !== owner.workspaceId
+      || closure.target.kind === 'surface' && closure.target.id !== owner.sessionId
+      || closure.target.kind === 'workspace' && (closure.target.id !== closure.target.workspaceId || !/^handoff-[a-f0-9]{64}$/.test(closure.target.title ?? ''))))
+      throw invalid('close target binding changed');
     const receiver = await inspect(recipient.sessionId, recipient.cwd, recipient.executable);
     if (receiver.incarnationId !== recipient.incarnationId) throw invalid('result recipient changed before close');
+    const result = closed => ({sessionId:owner.sessionId,incarnationId:owner.incarnationId,closed,...(closure?{closure}:{})});
+    if (verifyOnly && closure) {
+      const workspace = inventory.workspaces.find(item => item.id === closure.target.workspaceId);
+      if (workspace && (workspace.windowId !== closure.target.windowId || workspace.title !== closure.target.title)
+        || present.length > 1 || present.some(item => item.workspaceId !== closure.target.workspaceId || item.tty !== owner.tty))
+        throw invalid('close workspace route changed');
+      if (closure.target.kind === 'workspace' ? workspace !== undefined : present.length !== 0)
+        throw Object.assign(invalid('close target disappearance is pending'),{pendingClose:true});
+      return result(true);
+    }
+    if (present.length === 0 && verifyOnly) {
+      if (runtime === 'cmux') {
+        const workspaceId = owner.workspaceId;
+        if (!workspaceId) throw invalid('original close workspace is unavailable');
+        const workspace = inventory.workspaces.find(item => item.id === workspaceId);
+        if (workspace) throw invalid('managed workspace closure is unverified');
+      }
+      return result(true);
+    }
+    if (present.length !== 1) throw invalid('close target is missing or ambiguous');
     const current = await inspect(owner.sessionId, owner.cwd, parent.workerExecutable);
     const worker = await workerIdentity(await inspect(owner.sessionId, owner.cwd, owner.worker.executable));
     if (current.incarnationId !== owner.incarnationId || worker.incarnationId !== owner.worker.incarnationId
-      || worker.pid !== owner.worker.pid || worker.executable !== owner.worker.executable || worker.threadId !== owner.worker.threadId) throw invalid('close target identity changed');
-    if (verifyOnly) return { sessionId: owner.sessionId, incarnationId: owner.incarnationId, closed: false };
+      || worker.pid !== owner.worker.pid || worker.executable !== owner.worker.executable || worker.threadId !== owner.worker.threadId
+      || runtime === 'cmux' && owner.workspaceId !== current.workspaceId) throw invalid('close target identity changed');
+    if (verifyOnly) {
+      return result(false);
+    }
     if (runtime === 'cmux') {
-      const inventory = terminals(await cmux(['tree', '--all'], owner.cwd));
-      const owned = inventory.filter(item => item.workspaceId === current.workspaceId);
-      const target = inventory.filter(item => item.id === owner.sessionId);
-      if (target.length !== 1 || target[0].workspaceId !== current.workspaceId || target[0].tty !== current.tty) throw invalid('close target moved before mutation');
-      // Keep an exited placeholder when needed: workspace-wide close has no atomic inventory fence.
-      let placeholder = null;
-      if (owned.length === 1 && owned[0].id === owner.sessionId) {
-        const created = await cmux(['new-surface', '--workspace', current.workspaceId, '--type', 'terminal', '--command', '/usr/bin/true', '--focus', 'false'], owner.cwd);
-        const after = await workerIdentity(await inspect(owner.sessionId, owner.cwd, owner.worker.executable));
-        if (after.incarnationId !== owner.worker.incarnationId || after.threadId !== owner.worker.threadId || after.workspaceId !== current.workspaceId) throw invalid('owner changed while preparing surface closure');
-        placeholder = typeof created?.surface_id === 'string' ? created.surface_id : null;
-      }
-      await invoke('cmux', ['close-surface', '--workspace', current.workspaceId, '--surface', owner.sessionId], owner.cwd);
-      // A workspace this harness created for the session is closed once only its own placeholder is left.
-      // Workspaces with any other terminal (a user shell, a dev server) are kept.
-      if (placeholder) {
-        const tree = await cmux(['tree', '--all'], owner.cwd);
-        const workspace = (tree.windows ?? []).flatMap(window => window.workspaces ?? []).find(item => item.id === current.workspaceId);
-        const left = terminals(tree).filter(item => item.workspaceId === current.workspaceId);
-        if (workspace && /^handoff-[a-f0-9]{64}$/.test(workspace.title ?? '') && left.length === 1 && left[0].id === placeholder)
-          await invoke('cmux', ['close-workspace', '--workspace', current.workspaceId], owner.cwd);
-      }
+      const waitForClose = () => poll(async () => {
+        const checked = await close(input, true);
+        if (!checked.closed) throw Object.assign(invalid('close is still awaiting disappearance'),{pendingClose:true});
+        return checked;
+      }, error => error.pendingClose === true);
+      if (input.submission?.attempted) return waitForClose();
+      if (typeof input.submission?.mark !== 'function') throw invalid('close requires a durable target fence');
+      const snapshot = await closeInventory(owner.cwd);
+      const workspace = snapshot.workspaces.find(item => item.id === current.workspaceId);
+      const owned = snapshot.surfaces.filter(item => item.workspaceId === current.workspaceId);
+      if (!workspace) throw invalid('close workspace is missing');
+      const exclusive = /^handoff-[a-f0-9]{64}$/.test(workspace.title ?? '') && owned.length === 1 && owned[0].id === owner.sessionId;
+      const binding = {runtime,argsDigest:effectArgsDigest(input.args),target:{kind:exclusive?'workspace':'surface',
+        id:exclusive?workspace.id:owner.sessionId,workspaceId:workspace.id,windowId:workspace.windowId,...(workspace.title!==undefined?{title:workspace.title}:{})}};
+      await input.submission.mark(binding);
+      const after = await workerIdentity(await inspect(owner.sessionId, owner.cwd, owner.worker.executable));
+      const receiverAfter = await inspect(recipient.sessionId, recipient.cwd, recipient.executable);
+      const fresh = await closeInventory(owner.cwd);
+      const route = fresh.workspaces.find(item => item.id === workspace.id);
+      const target = fresh.surfaces.filter(item => item.id === owner.sessionId);
+      if (effectArgsDigest(after) !== effectArgsDigest(worker) || receiverAfter.incarnationId !== recipient.incarnationId
+        || route?.windowId !== workspace.windowId || route.title !== workspace.title
+        || target.length !== 1 || target[0].workspaceId !== workspace.id || target[0].tty !== current.tty
+        || exclusive && fresh.surfaces.filter(item => item.workspaceId === workspace.id).length !== 1)
+        throw invalid('close identity or workspace route changed before mutation');
+      await invoke('cmux', exclusive ? ['close-workspace','--workspace',workspace.id]
+        : ['close-surface','--workspace',workspace.id,'--surface',owner.sessionId], owner.cwd);
+      return waitForClose();
     }
     else await orca(['terminal', 'close', '--terminal', owner.sessionId], owner.cwd);
     return close(input, true);
   }
 
-  async function poll(action) {
+  async function poll(action, retry = () => true) {
     let failure;
     for (let attempt = 0; attempt < pollAttempts; attempt += 1) {
-      try { return await action(); } catch (error) { failure ??= error; }
+      try { return await action(); } catch (error) { if (!retry(error)) throw error; failure ??= error; }
       if (attempt + 1 < pollAttempts) await new Promise(resolve => setTimeout(resolve, 1000));
     }
     throw failure;
@@ -589,7 +642,7 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     },
     async verify(input) {
       try {
-        const result = await (input.effect === 'session.close' ? close(input, true) : input.effect === 'session.deliver' ? deliver(input) : findStarted(input,input.submission));
+        const result = await (input.effect === 'session.close' ? poll(() => close(input, true), error => error.pendingClose === true) : input.effect === 'session.deliver' ? deliver(input) : findStarted(input,input.submission));
         return { status: input.effect === 'session.close' && !result.closed ? 'not-applied' : 'completed', result };
       }
       catch (error) {

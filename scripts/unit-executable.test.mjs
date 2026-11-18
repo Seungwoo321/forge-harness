@@ -51,7 +51,7 @@ export async function createRuntimeAdapters({cwd,adapters}) {
   const parentCwd = process.env.TEST_PARENT;
   const mode = process.env.TEST_MODE;
   const receipt = input => { const identity={sessionId:'child',incarnationId:'child-incarnation',cwd:input.args.cwd,executable:'worker'}; return {...identity,task:{schema:'harness.task-receipt/1',effectKey:input.key,...identity,promptDigest:taskDigest('native prompt'),threadId:'thread',requestId:'request',turnId:'turn',activityId:'activity',packets:['handoff','result'].filter(name=>input.args[name+'Path']).map(name=>({path:input.args[name+'Path'],digest:input.args[name+'Digest']}))}}};
-  const sessionRunner = process.env.TEST_RUNTIME ? createSessionRunner({runtime:process.env.TEST_RUNTIME,command:adapters.command,pollAttempts:1,
+  const sessionRunner = process.env.TEST_RUNTIME ? createSessionRunner({runtime:process.env.TEST_RUNTIME,command:adapters.command,pollAttempts:1,now:(clock=>()=>clock+=mode==='native-slow-rpc'?2001:0)(0),
     taskTransport:{async identity() { const state=JSON.parse(await readFile(process.env.TEST_NATIVE)); return {threadId:/--session-id' '([^']+)'/.exec(state.command ?? '')?.[1] ?? 'thread'}; }, async observe({prompt,packets}) {return {state:'started',promptDigest:taskDigest(prompt),threadId:'thread',requestId:'request',turnId:'turn',activityId:'activity',packets}}},
     parent:{sessionId:'parent',incarnationId:${JSON.stringify(incarnationId)},cwd:parentCwd},launch:args=>['worker','--unit',args.unit],
     async runtimeRpc(method,params){const result=await adapters.command('orca-rpc',[method,JSON.stringify(params)],{cwd});if(result.exitCode!==0)throw Error('RPC failed');return JSON.parse(result.stdout)}}) : {
@@ -340,6 +340,12 @@ test('Orca rejects absent native live process evidence before start', async t =>
 
 test('Orca rejects native process evidence older than its supported admission window', async t => {
   const f = await fixture(t, { runtime: 'orca', mode: 'native-stale', separate: true });
+  assert.equal(f.run('finish').code, 1);
+  assert.equal((await f.ledger()).length, 0);
+});
+
+test('Orca rejects native process evidence received after its supported admission window', async t => {
+  const f = await fixture(t, { runtime: 'orca', mode: 'native-slow-rpc', separate: true });
   assert.equal(f.run('finish').code, 1);
   assert.equal((await f.ledger()).length, 0);
 });

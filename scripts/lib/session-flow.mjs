@@ -417,7 +417,7 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters, re
   if (closed.status === 'uncertain') closed = await executeEffect(closeEffect);
   if (!['completed', 'reconciled', 'duplicate'].includes(closed.status) || closed.result?.closed !== true
     || closed.result.sessionId !== plan.owner.sessionId || closed.result.incarnationId !== plan.owner.incarnationId) return pending('Exact owner closure is unverified');
-  const checked = await adapters.session.verify({ effect: 'session.close', args: closeArgs, key: closed.key, seq: closed.seq });
+  const checked = await adapters.session.verify({ effect: 'session.close', args: closeArgs, key: closed.key, seq: closed.seq, priorResult: closed.result });
   if (checked?.status !== 'completed') return pending('Post-exit observation is unavailable');
   validateClose(checked.result);
   if (record.state === 'Stopped' || plan.mode === 'review') {

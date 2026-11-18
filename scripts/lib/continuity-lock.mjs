@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
 
 // The child holds an OS advisory lock until the parent closes its stdin or exits.
-export async function acquireContinuityLock(file, { wait = false, launch = spawn } = {}) {
+// The readiness window only bounds a hung utility; real contention exits at once, so process startup under load must fit inside it.
+export async function acquireContinuityLock(file, { wait = false, launch = spawn, readyTimeoutMs = 60000 } = {}) {
   const darwin = process.platform === 'darwin';
   const windows = process.platform === 'win32';
   if (!darwin && !windows && process.platform !== 'linux') throw Object.assign(new Error('goal locking requires a supported native lock utility'),{code:'GOAL_LOCK_UNAVAILABLE'});
@@ -14,7 +15,7 @@ export async function acquireContinuityLock(file, { wait = false, launch = spawn
   child.stdin.on('error',()=>{});
   await new Promise((resolve,reject) => {
     let output = '', error = '';
-    const timeout = wait ? null : setTimeout(()=>{ child.stdin.destroy(); child.kill(); reject(Object.assign(new Error('goal lock acquisition timed out'),{code:'GOAL_LOCK_UNAVAILABLE'})); },5000);
+    const timeout = wait ? null : setTimeout(()=>{ child.stdin.destroy(); child.kill(); reject(Object.assign(new Error('goal lock acquisition timed out'),{code:'GOAL_LOCK_UNAVAILABLE'})); },readyTimeoutMs);
     child.stdout.on('data', chunk => { output += chunk; if (output.replaceAll('\r\n','\n').includes('ready\n')) { clearTimeout(timeout); resolve(); } });
     child.stderr.on('data', chunk => { if (error.length < 2048) error += chunk; });
     child.once('error', cause => { clearTimeout(timeout); reject(Object.assign(new Error(`goal lock utility failed: ${cause.message}`),{code:'GOAL_LOCK_UNAVAILABLE'})); });

@@ -177,6 +177,38 @@ test('goal activity must follow native goal creation and needs no ordinary user 
   await assert.rejects(transport.observeGoal({ ...request, prompt: 'different' }), /differs/);
 });
 
+test('accepted native goal names incomplete immutable packet read proof and never resubmits it', async () => {
+  const threadId = '00000000-0000-0000-0000-000000000001', content = 'immutable packet';
+  const packet = { path: '/work/product/packet.md', digest: taskDigest(content), content }, hash = `${packet.digest.slice(7)}  ${packet.path}`;
+  const run = (id, command, output, actions = [{ type: 'unknown' }]) => ({ type: 'commandExecution', id, status: 'completed', exitCode: 0, cwd: observed.cwd, command, commandActions: actions, aggregatedOutput: output, startedAtMs: 11000 });
+  let items;
+  const transport = createCodexTaskTransport({ command: async binary => binary === 'lsof'
+    ? { exitCode: 0, stdout: `n${process.env.CODEX_HOME ?? process.env.HOME+'/.codex'}/thread-writer-locks/${threadId}.lock\n` }
+    : { exitCode: 0, stdout: JSON.stringify({ thread: { id: threadId, cwd: observed.cwd }, goal: { threadId, status: 'active', objective: 'finish', createdAt: 10 },
+      turns: [{ id: 'turn', startedAt: 11, status: 'inProgress', items }], queued: [] }) } });
+  const request = { observed, input, prompt: 'finish', packets: [packet] };
+  const cases = {
+    'absolute cat with a separate hash': [[run('read', `/bin/cat ${packet.path}`, content), run('hash', `shasum -a 256 ${packet.path}`, hash)], false],
+    'compacted output with the same-result hash': [[run('read', `wrapper read ${packet.path}`, `immutable…\n${hash}`)], false],
+    'stale digest line': [[run('read', `wrapper sh -c cat`, `${content}\n${'0'.repeat(64)}  ${packet.path}`)], false],
+    'raw wrapped full content plus hash without trailing newline': [[run('read', 'wrapper sh -c cat', `${content}\n${hash}`)], true],
+    'recognized bare read': [[run('read', `cat ${packet.path}`, content, [{ type: 'read', path: packet.path }])], true],
+  };
+  for (const [name, [values, proven]] of Object.entries(cases)) {
+    items = [{ type: 'agentMessage', id: 'activity', startedAtMs: 11000 }, ...values];
+    const evidence = await transport.observeGoal(request);
+    assert.equal(evidence.state, proven ? 'started' : 'accepted', name);
+    if (!proven) assert.deepEqual(evidence.missingPackets, [{ path: packet.path, digest: packet.digest }], name);
+  }
+  items = [run('read', `/bin/cat ${packet.path}`, content)];
+  let sends = 0;
+  const goalInput = { ...input, args: { ...input.args, goalPath: packet.path, goalDigest: packet.digest } };
+  await assert.rejects(observeGoalTask({ transport, observed: { ...observed, executable: 'codex' }, input: goalInput, prompt: 'finish', packets: [packet], submission: undefined,
+    submit: async () => { sends += 1; } }), error => /immutable packet read proof is incomplete for \/work\/product\/packet\.md/.test(error.message)
+      && /shasum -a 256/.test(error.message) && error.taskState === 'accepted');
+  assert.equal(sends, 0);
+});
+
 test('upgrading a legacy full-packet delivery observes its receipt or queue without submitting a new prompt', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'legacy-delivery-'));
   t.after(() => rm(root, { recursive: true, force: true }));

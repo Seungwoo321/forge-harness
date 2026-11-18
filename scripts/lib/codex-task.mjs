@@ -95,7 +95,9 @@ export function createCodexTaskTransport({ command, executable = 'codex', submit
           return { state: 'started', threadId: data.threadId, goal: data.goal, enforcement, turnId: turn.id, activityId: activity.id, packets: packets.map(({path,digest}) => ({path,digest})) };
         }
       }
-      return { state: 'accepted', threadId: data.threadId, goal: data.goal };
+      // Read-only diagnosis: which immutable packets still lack an accepted read proof. Never a start receipt.
+      return { state: 'accepted', threadId: data.threadId, goal: data.goal,
+        missingPackets: request.packets.filter(packet => !packets.includes(packet)).map(({path,digest}) => ({path,digest})) };
     },
     async observe(request) {
       const data = await query(request);

@@ -37,6 +37,8 @@ import { commitGoalCompletion } from './continuity-completion.mjs';
 import { commitGoalContinuation } from './continuity-finish.mjs';
 import { handoffGoalSession, reassignGoalSession } from './custody-handoff.mjs';
 import { adoptGoalSession } from './continuity-custody.mjs';
+import { correctGoalAuthority } from './authority-correction.mjs';
+import { checkCleanupEligibility } from './cleanup-eligibility.mjs';
 import { startGoalSession } from './continuity-start.mjs';
 import { recoverGoalSession } from './continuity-recover.mjs';
 import { recoverStoppedOwner, resumeStoppedGoal, verifyRecoveredStop } from './stopped-owner-recovery.mjs';
@@ -1555,9 +1557,15 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
     }
     if (noun === 'goal') {
       const [id] = rest;
-      if (!id || rest.length !== 1 || !['create', 'show', 'block', 'resume', 'reconcile', 'add-work', 'policy-refresh', 'policy-recover', 'amend'].includes(subcommand)) usageError('usage: goal create|show|policy-refresh|policy-recover|amend <id> [--request <file>] [--user-input <ref>]');
+      if (!id || rest.length !== 1 || !['create', 'show', 'block', 'resume', 'reconcile', 'add-work', 'policy-refresh', 'policy-recover', 'amend', 'approval-correct'].includes(subcommand)) usageError('usage: goal create|show|policy-refresh|policy-recover|amend|approval-correct <id> [--request <file>] [--user-input <ref>]');
       const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
       const store = createContinuityStore(effectiveRoot);
+      if (subcommand === 'approval-correct') {
+        if (!parsed.options.request || !parsed.options['user-input']) usageError('goal approval-correct requires --request <file> --user-input <ref>');
+        const request = await readJsonFile(path.resolve(cwd,parsed.options.request), 'authority correction request', 'CLI_USAGE');
+        const receipt = await correctGoalAuthority({stateRoot:effectiveRoot,store:createUnitStateStore(effectiveRoot),unit:request.unit,goalId:id,kind:'amendment',request,userInputRef:parsed.options['user-input'],adapters,cwd});
+        return formatCliResult({code:0,summary:'Goal amendment authority corrected',details:{receipt}});
+      }
       if (subcommand === 'show') {
         const goal = await store.read(id);
         if (!goal) throw Object.assign(new Error('goal not found'), { code: 'GOAL_NOT_FOUND' });
@@ -1681,7 +1689,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const goal = await store.create({goal:request.goal,source:request.source,policy:resolved.policy.session});
       return formatCliResult({ code: 0, summary: `Goal ${id} registered`, details: { goal } });
     }
-    if (noun !== 'unit' || !['review-recipient-recover','review-exit-recover', 'lock', 'start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'session-recover', 'session-adopt', 'session-rebind', 'session-handoff', 'session-reassign', 'stopped-owner-recover', 'goal-bind', 'goal-acceptance', 'session-stop', 'session-return', 'policy', 'reopen', 'rework', 'completion-recover', 'delivered-preflight', 'delivered-fence', 'delivered-reconcile', 'delivered-continue'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen|rework|completion-recover|delivered-preflight|delivered-fence|delivered-reconcile|delivered-continue <unit> --request <file>, unit goal-acceptance clarify <unit> --request <file> --user-input <ref>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct|drop <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit session-recover <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
+    if (noun !== 'unit' || !['review-recipient-recover','review-exit-recover', 'lock', 'start', 'scope', 'finding', 'acceptance', 'stage', 'effect', 'close', 'reconcile', 'fail', 'retry', 'resume', 'finish', 'finalize', 'decision', 'accept', 'progress', 'approval', 'session-start', 'session-recover', 'session-adopt', 'session-rebind', 'session-approval-correct', 'cleanup-check', 'session-handoff', 'session-reassign', 'stopped-owner-recover', 'goal-bind', 'goal-acceptance', 'session-stop', 'session-return', 'policy', 'reopen', 'rework', 'completion-recover', 'delivered-preflight', 'delivered-fence', 'delivered-reconcile', 'delivered-continue'].includes(subcommand)) usageError('usage: unit start <unit> --request <file>, unit reopen|rework|completion-recover|delivered-preflight|delivered-fence|delivered-reconcile|delivered-continue <unit> --request <file>, unit goal-acceptance clarify <unit> --request <file> --user-input <ref>, unit scope recheck <unit>, unit finding resolve <unit> --request <file> --user-input <ref>, unit acceptance correct|drop <unit> --request <file> --user-input <ref>, unit stage open|submit <unit> <stage>, unit approval record <unit> --request <file> --user-input <ref>, unit session-recover <unit> --request <file> --user-input <ref>, unit effect|fail|retry|resume|close|reconcile|finish|decision|accept|progress');
     const effectiveRoot = stateRoot ? path.resolve(stateRoot) : await getStateRoot(parsed.options, cwd, adapters);
     if (['review-exit-recover','review-recipient-recover'].includes(subcommand)) {
       const [unit]=rest;
@@ -1874,6 +1882,20 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       const request = await readJsonFile(path.resolve(cwd,parsed.options.request), 'session handoff request', 'CLI_USAGE');
       const receipt = await (subcommand==='session-reassign'?reassignGoalSession:handoffGoalSession)({stateRoot:effectiveRoot,unit,request,userInputRef:parsed.options['user-input'],store:createUnitStateStore(effectiveRoot),adapters,cwd});
       return formatCliResult({code:0,summary:subcommand==='session-reassign'?'Exited owner custody reassigned':'Suspended owner custody handed off',details:{unit,receipt}});
+    }
+    if (subcommand === 'cleanup-check') {
+      const [unit] = rest;
+      if (!unit || rest.length !== 1 || !parsed.options.request) usageError('unit cleanup-check requires <unit> --request <file>');
+      const request = await readJsonFile(path.resolve(cwd,parsed.options.request), 'cleanup eligibility request', 'CLI_USAGE');
+      const eligibility = await checkCleanupEligibility({stateRoot:effectiveRoot,store:createUnitStateStore(effectiveRoot),unit,request});
+      return formatCliResult({code:0,summary:'Host cleanup is eligible for the exact completed lifecycle',details:{eligibility}});
+    }
+    if (subcommand === 'session-approval-correct') {
+      const [unit] = rest;
+      if (!unit || rest.length !== 1 || !parsed.options.request || !parsed.options['user-input']) usageError('unit session-approval-correct requires <unit> --request <file> --user-input <ref>');
+      const request = await readJsonFile(path.resolve(cwd,parsed.options.request), 'authority correction request', 'CLI_USAGE');
+      const receipt = await correctGoalAuthority({stateRoot:effectiveRoot,store:createUnitStateStore(effectiveRoot),unit,kind:'adoption',request,userInputRef:parsed.options['user-input'],adapters,cwd});
+      return formatCliResult({code:0,summary:'Session adoption authority corrected',details:{unit,receipt}});
     }
     if (['session-adopt','session-rebind'].includes(subcommand)) {
       const [unit] = rest;

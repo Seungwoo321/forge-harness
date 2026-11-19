@@ -35,7 +35,7 @@ async function fixture(t){
  let suspended=true,live=replacement,permission=true,hook=async()=>{};
  const adapters={...createAdapters({repositoryRoot:cwd}),git:{inspectUnit:async()=>({...target})},session:{observe:async input=>{assert.deepEqual(input.suspendedOwner,owner);return {...live,previousOwnerSuspended:suspended};}},provider:{verifyUserInput:async input=>({...input,verified:permission && input.effect==='unit.session.handoff' && input.userInputRef==='human'}),verifySessionHandoff:async input=>{const {request,record,goal,target,previousCustody,...binding}=input;assert.deepEqual(previousCustody,previous);assert.equal(binding.previousPolicyDigest,digest(policy));await hook();return {...binding,verified:permission};}}};
  const run=async(body=request,fileName='request.json',route='session-handoff')=>{const file=path.join(cwd,fileName);await writeFile(file,JSON.stringify(body));const out=await runUnitCli(['unit',route,'change','--request',file,'--user-input','human'],{cwd,stateRoot,adapters});return JSON.parse(out.slice(out.lastIndexOf('RESULT ')+7));};
- return {cwd,stateRoot,store,goals,ledger,source,proof,request,run,target,adapters,replacement,nextPolicy,previous,unsuspend:()=>{suspended=false;},wrongOwner:()=>{live={...replacement,worker:{...replacement.worker,threadId:'foreign'}};},deny:()=>{permission=false;},hook:fn=>{hook=fn;}};
+ return {cwd,stateRoot,store,goals,ledger,source,proof,request,run,target,adapters,owner,policy,replacement,nextPolicy,previous,unsuspend:()=>{suspended=false;},wrongOwner:()=>{live={...replacement,worker:{...replacement.worker,threadId:'foreign'}};},deny:()=>{permission=false;},hook:fn=>{hook=fn;}};
 }
 test('AC-1 public cross-provider handoff preserves source unit and custody and replays without effects',async t=>{
  const f=await fixture(t),unit=await readFile(path.join(f.stateRoot,'units/change/unit.json')),before=await f.goals.read('goal');
@@ -62,14 +62,14 @@ test('AC-3 concurrent competing handoffs commit once and later restart custody s
  const g=await f.goals.read('goal'),later={...g.handovers[0],id:'restart',goalRevision:g.revision+1};assert.equal(goalOwner({...g,rebindings:[later]},'change').id,'restart');
 });
 
-async function suspendedReviewerFixture(t){
- const f=await fixture(t),goal=await f.goals.read('goal'),target=await f.store.read('change');
+async function suspendedReviewerFixture(t,base=fixture){
+ const f=await base(t),goal=f.originalGoal??await f.goals.read('goal'),target=await f.store.read('change');
  const packet=['목표: goal','수용 기준: original','작업관리: review','결정: approved','변경: inspect','검증: pending','남은 일·위험: review','다음 단위 첫 행동: read'].join('\n');
  const handoffPath=path.join(f.cwd,'review.md');await writeFile(handoffPath,packet);
  await f.store.create({schema:'harness.unit/1',unit:'review',kind:'review',state:'InReview',targetUnit:'change',continuity:{goalId:'goal'},stages:[],policy:{goal:{class:'task'},session:goal.policy}});
- const snapshot=await snapshotGoal(f.stateRoot,goal),args={unit:'review',role:'review',attempt:1,cwd:f.cwd,handoffPath,handoffDigest:taskDigest(packet),goalPath:snapshot.path,goalDigest:snapshot.digest,targetDigest:digest(target)};
+ const snapshot=await snapshotGoal(f.stateRoot,goal),args={unit:'review',role:'review',attempt:1,cwd:f.cwd,handoffPath,handoffDigest:taskDigest(packet),goalPath:snapshot.path,goalDigest:snapshot.digest,...(f.originalGoal?{}:{targetDigest:digest(target)})};
  const key=prepareEffect('session.start',args).key,intent={event:'intent',unit:'review',seq:1,key,effect:'session.start',args};
- const reviewOwner={...f.previous.owner,sessionId:'old-review',incarnationId:'review-v1',worker:{...f.previous.owner.worker,pid:44,incarnationId:'review-v1',threadId:'review-thread'}};
+ const reviewOwner={...f.owner,sessionId:'old-review',incarnationId:'review-v1',worker:{...f.owner.worker,pid:44,incarnationId:'review-v1',threadId:'review-thread'}};
  const binding={runtime:reviewOwner.runtime,sessionId:reviewOwner.sessionId,incarnationId:reviewOwner.incarnationId,cwd:f.cwd,...reviewOwner.worker};
  await f.ledger.withLock('review',async ledger=>{await ledger.append(intent);await ledger.append({event:'submission',unit:'review',seq:1,key,effect:'session.start',binding});});
  const rows=await f.ledger.withLock('review',ledger=>ledger.read()),record=await f.store.read('review');
@@ -131,7 +131,7 @@ test('AC-5 suspended reviewer authority cannot hide registered, changed, running
 
 function exitedOwner(f){
  const original=f.adapters.session.observe;let absent=true;
- f.adapters.session.observe=async input=>input.exitedOwner?{...f.replacement,previousOwnerExited:absent}:input.suspendedOwner?.sessionId===f.previous.owner.sessionId?{...f.replacement,previousOwnerSuspended:false}:original(input);
+ f.adapters.session.observe=async input=>input.exitedOwner?{...f.replacement,previousOwnerExited:absent}:input.suspendedOwner?.sessionId===f.owner.sessionId?{...f.replacement,previousOwnerSuspended:false}:original(input);
  const approval=f.adapters.provider.verifyUserInput;
  f.adapters.provider.verifyUserInput=async input=>input.effect==='unit.session.reassign'?{...input,verified:input.userInputRef==='human' && input.previousOwnerState==='exited'}:approval(input);
  f.adapters.provider.verifyExitedOwnerHandoff=f.adapters.provider.verifySessionHandoff;
@@ -199,5 +199,74 @@ test('AC-10 exited-review recovery cannot reuse suspension, claim non-start, ign
    const proof=await verify(input);if(scenario==='false-suspension'){delete proof.receiverExited;proof.receiverSuspended=true;}else if(scenario==='false-non-start')proof.taskNeverStarted=true;else f.restoreReviewer();return proof;
   };
   const before=await f.ledger.withLock('review',l=>l.read());assert.notEqual((await f.recover()).code,0);assert.deepEqual(await f.ledger.withLock('review',l=>l.read()),before);
+ });
+});
+
+
+// A unit started by session-start is owned by its managed bootstrap, whose launch snapshot keeps the original policy.
+async function managedFixture(t,state='SelfGated'){
+ const f=await fixture(t),original=await f.goals.read('goal');
+ await f.store.update('change',r=>({...r,state}));
+ const packet=['목표: goal','수용 기준: original','작업관리: change','결정: approved','변경: implement','검증: pending','남은 일·위험: none','다음 단위 첫 행동: read'].join('\n');
+ const handoffPath=path.join(f.cwd,'change.md');await writeFile(handoffPath,packet);
+ const snapshot=await snapshotGoal(f.stateRoot,original);
+ const args={unit:'change',role:'implementation',attempt:1,cwd:f.cwd,handoffPath,handoffDigest:taskDigest(packet),goalPath:snapshot.path,goalDigest:snapshot.digest};
+ const key=prepareEffect('session.start',args).key,identity={sessionId:'old',incarnationId:'old-v1',cwd:f.cwd};
+ const binding={runtime:'cmux',...identity,...f.owner.worker};
+ await f.ledger.withLock('change',async l=>{await l.append({event:'intent',unit:'change',seq:1,key,effect:'session.start',args});
+  await l.append({event:'submission',unit:'change',seq:1,key,effect:'session.start',binding});
+  await l.append({event:'result',unit:'change',seq:1,key,result:{...identity,task:{...identity,threadId:'old-thread'}}});});
+ const bootstrap={unit:'change',attempt:1,effectKey:key,goalPath:snapshot.path,goalDigest:snapshot.digest,...identity};
+ // goal policy-refresh: the approved policy reaches the goal, not the running managed owner.
+ await f.goals.transaction('goal',({adoptions,...g})=>({...g,revision:g.revision+1,bootstraps:[bootstrap],policy:f.nextPolicy,policyChanges:[{revision:g.revision+1,previous:g.policy,reason:'approved',userInputRef:'human'}]}));
+ const record=await f.store.read('change'),goal=await f.goals.read('goal');
+ Object.assign(f.request,{expectedRevision:record.revision,expectedGoalRevision:goal.revision,unitDigest:digest(record),goalDigest:digest(goal),previousCustodyDigest:digest(bootstrap),previousOwner:f.owner,policy:f.nextPolicy});
+ let permission=true;const calls=[];
+ f.adapters.provider.verifyUserInput=async input=>({...input,verified:permission && ['unit.session.handoff','unit.session.reassign','unit.session.recover'].includes(input.effect) && input.userInputRef==='human'});
+ f.adapters.provider.verifySessionHandoff=async input=>{const {request,record,goal,target,previousCustody,suspendedReviews,exitedReviews,...scalar}=input;calls.push(input);
+  assert.deepEqual(previousCustody,bootstrap);assert.equal(scalar.previousOwnership,'managed');assert.equal(scalar.previousOwnerDigest,digest(f.owner));assert.equal(scalar.previousPolicyDigest,digest(f.nextPolicy));
+  return {...scalar,verified:permission};};
+ return {...f,originalGoal:original,bootstrap,calls,deny:()=>{permission=false;}};
+}
+test('AC-11 managed SelfGated owner hands off to the refreshed provider with its uncommitted target and unit bytes intact',async t=>{
+ const f=await managedFixture(t),unit=await readFile(path.join(f.stateRoot,'units/change/unit.json')),rows=await f.ledger.withLock('change',l=>l.read()),before=await f.goals.read('goal');
+ const result=await f.run();assert.equal(result.code,0,JSON.stringify(result));
+ const after=await f.goals.read('goal'),handover=after.handovers[0];
+ assert.deepEqual(await readFile(path.join(f.stateRoot,'units/change/unit.json')),unit);assert.deepEqual(await f.ledger.withLock('change',l=>l.read()),rows);
+ assert.deepEqual(after.bootstraps,before.bootstraps);assert.deepEqual(after.policy,f.nextPolicy);assert.deepEqual(after.policyChanges,before.policyChanges);
+ assert.equal(handover.previousOwnership,'managed');assert.deepEqual(handover.previousOwner,f.owner);assert.deepEqual(goalOwner(after,'change').owner,f.replacement);
+ const replay=await f.run();assert.equal(replay.code,0,JSON.stringify(replay));assert.equal(replay.receipt.duplicate,true);assert.deepEqual(await f.goals.read('goal'),after);
+ assert.notEqual((await f.run({...f.request,reason:'changed request'})).code,0);assert.equal(f.calls.length,2);
+});
+test('AC-12 managed handoff rejects missing authority, inexact custody or identity, a live owner and an unrefreshed policy',async t=>{
+ const cases={
+  denied:f=>f.deny(),wrongCustody:f=>{f.request.previousCustodyDigest=hash('foreign');},
+  missingPreviousOwner:f=>{delete f.request.previousOwner;},wrongPid:f=>{f.request.previousOwner={...f.owner,worker:{...f.owner.worker,pid:99}};},
+  wrongThread:f=>{f.request.previousOwner={...f.owner,worker:{...f.owner.worker,threadId:'foreign'}};},
+  wrongSession:f=>{f.request.previousOwner={...f.owner,sessionId:'foreign'};},
+  wrongProvider:f=>{f.request.previousOwner={...f.owner,worker:{...f.owner.worker,executable:'/bin/codex'}};},
+  livePrevious:f=>f.unsuspend(),unrefreshedPolicy:f=>{f.request.policy=f.policy;f.request.owner={...f.replacement,worker:{...f.replacement.worker,executable:'/bin/claude'}};},
+  changedTarget:f=>{f.target.head='other';},missingVerifier:f=>{delete f.adapters.provider.verifySessionHandoff;}
+ };
+ for(const [name,alter] of Object.entries(cases))await t.test(name,async t=>{const f=await managedFixture(t);await alter(f);const before=await f.goals.read('goal'),unit=await f.store.read('change');const result=await f.run();assert.notEqual(result.code,0,JSON.stringify(result));assert.deepEqual(await f.goals.read('goal'),before);assert.deepEqual(await f.store.read('change'),unit);});
+ await t.test('existing custody cannot claim a managed owner',async t=>{const f=await fixture(t);const result=await f.run({...f.request,previousOwner:f.owner});assert.notEqual(result.code,0);});
+});
+test('AC-13 managed InReview owner with a worked unregistered reviewer transfers and the same review restarts normally',async t=>{
+ for(const mode of ['suspended','exited'])await t.test(mode,async t=>{
+  let f=await suspendedReviewerFixture(t,t=>managedFixture(t,'InReview'));
+  assert.equal(f.intent.args.targetDigest,undefined);
+  if(mode==='exited'){f=exitedOwner(f);const observe=f.adapters.session.observe;f.adapters.session.observe=async input=>input.exitedOwner?.sessionId==='old-review'?{...f.replacement,previousOwnerExited:true}:observe(input);
+   f.request.exitedReviews=f.request.suspendedReviews;delete f.request.suspendedReviews;
+   f.adapters.provider.verifyExitedReviewRecovery=async input=>{const {request,intent,submission,original,goal,nextArgs,handover,reviewExit,...scalar}=input;return {...scalar,verified:true,receiverExited:true,receiver:submission.binding,evidenceDigest:request.provenance.digest};};}
+  const reviewBytes=await readFile(path.join(f.stateRoot,'units/review/unit.json')),target=await f.store.read('change');
+  const moved=await (mode==='exited'?f.reassign():f.run());assert.equal(moved.code,0,JSON.stringify(moved));
+  const audit=(await f.goals.read('goal')).handovers[0][`${mode}Reviews`][0];assert.equal(audit.targetDigest,digest(target));
+  assert.deepEqual(await f.ledger.withLock('review',l=>l.read()),f.rows);assert.deepEqual(await readFile(path.join(f.stateRoot,'units/review/unit.json')),reviewBytes);
+  const recovered=await f.recover();assert.equal(recovered.code,0,JSON.stringify(recovered));
+  const reservation=(await f.ledger.withLock('review',l=>l.read())).findLast(row=>row.event==='session-start-recovery');
+  assert.equal(reservation.nextArgs.targetDigest,digest(target));assert.equal(reservation.proof.taskNeverStarted,undefined);
+  const started=await f.start();assert.equal(started.code,0,JSON.stringify(started));
+  const reviews=(await f.goals.read('goal')).reviews;assert.equal(reviews.length,1);assert.equal(reviews[0].attempt,2);assert.equal(reviews[0].targetDigest,digest(target));
+  assert.equal((await f.store.read('review')).verdict,undefined);
  });
 });

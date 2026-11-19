@@ -64,18 +64,21 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
       const owners=review?goal.reviews:goal.bootstraps;
       if (owners?.some(item=>item.unit===unit) || !review && goalOwner(goal,unit)) fail('startup already has a registered owner','SESSION_RECOVERY_CONFLICT');
       const unchangedPolicy=!settleOnly && executionPoliciesEqual(original.policy,goal.policy);
-      if (!settleOnly && intent.args.targetDigest!== (target?effectArgsDigest(targetRecord):undefined)) fail('review target changed','CONTINUITY_STALE');
+      const submission=rows.findLast(row=>row.event==='submission' && row.seq===intent.seq && row.key===intent.key);
+      const receiver=rows.findLast(row=>row.event==='receiver' && row.seq===intent.seq && row.key===intent.key);
+      const suspended=review?suspendedReviewHandoff(goal,record,intent,submission,rows):null;
+      // A reviewer launched by a managed owner had no target digest; the next attempt binds the one its handover audit pinned.
+      const liftedTarget=target && suspended?.handover.previousOwnership==='managed' && intent.args.targetDigest===undefined
+        && suspended.suspension.targetDigest===effectArgsDigest(targetRecord) ? suspended.suspension.targetDigest : undefined;
+      if (!settleOnly && !liftedTarget && intent.args.targetDigest!== (target?effectArgsDigest(targetRecord):undefined)) fail('review target changed','CONTINUITY_STALE');
       await checkFile(goal.source); await checkFile(request.provenance);
       const nextAttempt=intent.args.attempt+1;
       if (!Number.isSafeInteger(nextAttempt)) fail('invalid next attempt');
       const snapshot=settleOnly?null:await snapshotGoal(stateRoot,goal);
       // The next attempt observes its own hooks before launch; the original attempt's binding does not carry over.
       const {enforcement:_previous,...previousArgs}=intent.args;
-      const nextArgs=settleOnly?null:{...previousArgs,attempt:nextAttempt,goalPath:snapshot.path,goalDigest:snapshot.digest};
+      const nextArgs=settleOnly?null:{...previousArgs,attempt:nextAttempt,goalPath:snapshot.path,goalDigest:snapshot.digest,...(liftedTarget?{targetDigest:liftedTarget}:{})};
       if (nextArgs) await loadManagedLaunch(nextArgs);
-      const submission=rows.findLast(row=>row.event==='submission' && row.seq===intent.seq && row.key===intent.key);
-      const receiver=rows.findLast(row=>row.event==='receiver' && row.seq===intent.seq && row.key===intent.key);
-      const suspended=review?suspendedReviewHandoff(goal,record,intent,submission,rows):null;
       const exitedReview=suspended?.suspension.ownerState==='exited';
       const verifier=suspended?(exitedReview?'verifyExitedReviewRecovery':'verifySuspendedReviewRecovery'):'verifySessionStartRecovery';
       if(typeof adapters.provider?.[verifier]!=='function')fail('trusted startup recovery verifier is required','ADAPTER_MISSING');

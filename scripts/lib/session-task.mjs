@@ -57,7 +57,12 @@ export function validateTaskReceipt(result, input, {requireEnforcement = false} 
   return result;
 }
 
-export async function observeGoalTask({ transport, observed, input, prompt, packets, submission, submit }) {
+// A missing startup transcript proves no turn only on the process this intent launched with its derived session id.
+// Recovery accepts it because every harness input is preceded by a durable submission row, which is absent here.
+export const launchedReceiver = (evidence, threadId, launchThreadId) => evidence?.freshOnly === true
+  && typeof launchThreadId === 'string' && Boolean(launchThreadId) && threadId === launchThreadId;
+
+export async function observeGoalTask({ transport, observed, input, prompt, packets, submission, submit, launchThreadId }) {
   if (!transport || typeof transport.observeGoal !== 'function' || typeof prompt !== 'string' || !prompt.trim()) throw taskError('native goal transport is required');
   const request = {observed,input,prompt,packets};
   let evidence = await transport.observeGoal(request);
@@ -72,7 +77,7 @@ export async function observeGoalTask({ transport, observed, input, prompt, pack
     const preTurn = evidence.state === 'unmaterialized';
     if (!threadId || (preTurn ? !/^codex\/(?:0\.167\.[01]|0\.168\.0|0\.169\.[01])$/.test(evidence.proof?.platform ?? '') || evidence.proof.threadId !== threadId
       || !evidence.proof.sqliteRoot || evidence.proof.queueCount !== 0
-      : evidence.notApplied !== true && (submission.recovery || evidence.freshOnly !== true))) throw taskError('native input absence is unverified');
+      : evidence.notApplied !== true && !(evidence.freshOnly === true && (!submission.recovery || launchedReceiver(evidence, threadId, launchThreadId))))) throw taskError('native input absence is unverified');
     if (typeof submission.mark !== 'function') throw taskError('durable native submission fence is unavailable');
     if (typeof submit !== 'function') throw taskError('native goal submission is unavailable');
     await submit({...request,threadId,binding,resumeDraft,...(preTurn ? {preTurn:evidence.proof} : {})}, async () => { await submission.mark(binding); });

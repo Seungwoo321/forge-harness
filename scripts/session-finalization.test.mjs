@@ -16,8 +16,8 @@ async function setup(t, mode = 'success') {
   await store.create({ schema: 'harness.unit/1', unit: 'finished', revision: 0, kind: 'impl', state: 'Delivered',
     policy: { goal: { class: 'product-prelaunch' }, delivery: 'none' }, accepted: { head: 'head', contentFingerprint: 'content' },
     acceptance: [], openDecisions: [], tracker: null });
-  const owner = { sessionId: 'owner', incarnationId: 'owner-generation', cwd: root, tty: 'tty-owner', closable: true,
-    worker: { executable: 'worker', incarnationId: 'worker-generation', pid: 42 } };
+  const owner = { runtime:'cmux', sessionId: 'owner', incarnationId: 'owner-generation', cwd: root, tty: 'tty-owner', closable: true,
+    worker: { executable: 'worker', incarnationId: 'worker-generation', pid: 42, threadId:'owner-thread' } };
   const recipient = { sessionId: 'existing-parent', incarnationId: 'recipient-generation', cwd: root, executable: 'worker' };
   const events = [];
   let closed = false;
@@ -175,4 +175,21 @@ test('public finish of a completed goal without a return recipient is refused be
   assert.equal(result.error, 'RETURN_RECIPIENT_REQUIRED', output);
   assert.equal((await f.store.read('finished')).state, 'Delivered');
   assert.deepEqual(f.events.filter(e => !e.startsWith('observe')), []);
+});
+
+
+test('finalization cleans only the finished receiver watch after result acceptance and verified closure',async t=>{
+  const {createWatchStore} = await import('./lib/lifecycle-watch.mjs');
+  const {nativeOwner} = await import('./lib/continuity-custody.mjs');
+  const f = await setup(t,'queued'); await f.run('finish');
+  const owner = nativeOwner((await f.store.read('finished')).sessionFinalization.owner);
+  const watches = createWatchStore(f.root,f.adapters);
+  await watches.transaction(async(data,save)=>{data.watches=[
+    {id:'finished-watch',unit:'finished',recipient:owner,status:'active'},
+    {id:'unrelated',unit:'other',recipient:owner,status:'active'},
+  ];await save();});
+  assert.equal((await f.run('finalize')).code,3);
+  assert.equal((await watches.read()).watches[0].status,'active');
+  f.accept(); assert.equal((await f.run('finalize')).code,0);
+  assert.deepEqual((await watches.read()).watches.map(watch=>watch.status),['removed','active']);
 });

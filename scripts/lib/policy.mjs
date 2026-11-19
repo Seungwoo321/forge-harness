@@ -21,6 +21,7 @@ const effects = {
   'session.start': ['E3', ['unit', 'role', 'attempt']],
   'session.deliver': ['E3', ['session', 'incarnation', 'resultDigest']],
   'session.close': ['E3', ['session', 'incarnation']],
+  'session.wake': ['E3', ['watchId','stateRoot','goalId','custodyDigest','conditionDigest','run']],
   'data.delete': ['E4', ['resource', 'selectionDigest']],
 };
 

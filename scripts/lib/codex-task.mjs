@@ -69,7 +69,7 @@ export function createCodexTaskTransport({ command, executable = 'codex', submit
     const {threadId,sqliteRoot} = await binding(request.observed);
     if (operation === 'queue' && threadId !== request.fence) throw taskError('worker readiness fence changed');
     const result = await command(process.execPath, [queryScript], { cwd: request.observed.cwd, env,
-      input: JSON.stringify({ executable, threadId, sqliteRoot, account, cwd:request.observed.cwd, operation, prompt: request.prompt, clientId: request.input.key }) });
+      input: JSON.stringify({ executable, threadId, sqliteRoot, account, cwd:request.observed.cwd, operation, prompt: request.prompt, clientId: request.input.key, requireIdle: request.requireIdle === true }) });
     if (result.exitCode !== 0 || result.signal) throw taskError('native worker history is unavailable');
     const data = JSON.parse(result.stdout);
     const current = await binding(request.observed);
@@ -159,7 +159,7 @@ export function createCodexTaskTransport({ command, executable = 'codex', submit
       if (data.queued.some(item => item.clientUserMessageId === request.input.key || textOf({ content: item.input }) === request.prompt)) return { state: 'queued', active };
       // Initial argv input belongs to the TUI. Repeating it while startup is pending is unsafe.
       return request.input.effect === 'session.deliver' ? { state: 'ready', fence: data.threadId, notApplied: true,
-        active } : { state: 'startup' };
+        active, queueLength: data.queued.length } : { state: 'startup' };
     },
     async submit(request) {
       if (request.input.effect !== 'session.deliver' || (await binding(request.observed)).threadId !== request.fence) throw taskError('worker readiness fence changed');

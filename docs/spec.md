@@ -621,6 +621,7 @@ E2 이상의 부작용은 수행 전에 의도를, 수행 후 결과를 원장�
 | session.start | E3 | unit, role, attempt |
 | session.deliver | E3 | session, incarnation, resultDigest |
 | session.close | E3 | session, incarnation |
+| session.wake | E3 | watchId, stateRoot, goalId, custodyDigest, conditionDigest, run |
 | data.delete | E4 | resource, selectionDigest |
 
 대상 소유권·운영 환경·불가역성은 등록 스키마의 필수 메타데이터로 어댑터가 검증한다. 불가역이면 E4로 올리며 스킬 신고로 낮추지 않는다.
@@ -888,6 +889,15 @@ CLI 는 사람용 출력의 마지막 줄에 기계용 한 줄 `RESULT {json}` �
 
 외부 호출은 adapters 한 곳에 모으고 테스트는 stub 실행 파일로 대체한다. clock·id 값은 결정 모듈의 명시 입력으로 주입하고 저장한다. 순수 모듈이 시각·난수·외부 작업트리 상태를 직접 읽지 않는다. 세션 runner는 `harness.session-adapter/1` 계약, `fix-forward`·`failure-classification-five-way`·`retry-limit`·`ops-e0-only`·`policy-review` 기능, `observe`·`execute`·`verify` 연산을 등록한다. Unit finish는 부작용 전에 등록된 계약을 사용해 현재 소유자와 cwd를 확인하며, 미지원 계약은 종료 코드 4로 거부한다. 외부 개인 정책의 암묵 병합은 없다. 다른 언어가 필요한 검증기(예: 기존 Python 스크립트)는 `GateResult` JSON 을 stdout 으로 내는 외부 게이트로 연결한다. 엔진을 두 언어로 나누지 않는다.
 
+### 영속 생명주기 감시
+
+감시는 목표·단위·현재 custody·정확한 네이티브 수신자에 결속된다. 기계적인 조건 관찰은 모델을 호출하지 않으며 actionable 상태 변화당 한 번만 소유자를 깨운다.
+등록·감시 명령·SessionStart가 실행기를 자동 기동·복구한다. 실행 가능한 감시가 없으면 실행기가 종료한다. OS 서비스 등록이나 사용자의 별도 데몬 기동에 의존하지 않는다.
+intent와 유한 예산을 먼저 영속 기록하고 수신자를 직렬화한다. 불확실한 전송은 관찰만 하며 재전송하지 않는다.
+제출·transport 수락·실제 native turn 시작·결과를 구분한다. Working·대기열·사용자 draft·pause·HOLD·만료·custody 변경·종료 단위는 깨우지 않는다.
+재시작과 수면 후 놓친 회차는 한 회차로 합친다. 살아 있는 실행기 또는 불명확한 PID는 교체하지 않는다.
+정상 handoff/finalization 뒤 해당 수신자의 감시만 제거한다. 공개 계약과 저장·복구 규약은 [영속 생명주기 감시](lifecycle-watch.md)가 정의한다.
+
 ## 12. 적합성 목록 (수용 기준)
 
 이 목록이 구현 갭 판정의 기준이다. 각 항목은 검증 방식이 있고, 통과·실패·미검증을 스크립트나 독립 리뷰로 가린다.
@@ -1060,6 +1070,13 @@ CLI 는 사람용 출력의 마지막 줄에 기계용 한 줄 `RESULT {json}` �
 | H-SC-01 | 디렉터리 경로는 그 하위만 포함하고 비슷한 이름의 형제 경로나 상위 탈출을 포함하지 않는다 | T |
 | H-DG-01 | 발견된 사용자 관리 플러그인 결함은 원인 서명별 정본 이슈와 원본 수정·검증·필수 리뷰·공식 설치 확인을 거쳐 기존 작업에서 재개한다 | T/L |
 | H-DG-02 | 프로젝트 정본과 배포 산출물은 별도 제품의 Studio Kit App 설계와 그 전용 구현에 의존하지 않는다 | S/T |
+
+| H-WT-01 | 감시는 목표·단위·custody·정확한 수신자와 유한 예산·만료에 결속되고 stale/종료 수신자를 깨우지 않는다 | T |
+| H-WT-02 | 등록·공개 명령·SessionStart가 실행기를 자동 복구하며 단일 실행기와 유휴 자동 종료를 보장한다 | T |
+| H-WT-03 | 기계적 관찰은 모델 없이 실행되고 actionable 상태 변화당 한 번만 유휴·빈 composer 수신자를 깨운다 | T |
+| H-WT-04 | intent·예산 선기록과 수신자 직렬화, uncertain 관찰 전용 정합화, 단계별 native 영수증을 보존한다 | T |
+| H-WT-05 | pause/HOLD·pending은 재시작 후 유지되고 놓친 회차는 병합되며 finalization 뒤 해당 수신자만 정리한다 | T |
+| H-WT-06 | 별도 플러그인·OS 서비스 없이 native Codex queue로 전달하고 외부 감시와 중복 소유를 거부한다 | T |
 
 ## 13. 정책 기본값 요약
 

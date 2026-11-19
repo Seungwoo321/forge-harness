@@ -127,3 +127,5 @@ pnpm check
 [설계 결정](docs/adr/) · [MIT License](LICENSE) · [버그 제보](https://github.com/Seungwoo321/forge-harness/issues)
 
 플랫폼 문서: [Claude 플러그인](https://code.claude.com/docs/en/plugins-reference), [마켓플레이스](https://code.claude.com/docs/en/plugin-marketplaces), [Codex 패키징](https://developers.openai.com/plugins/build/plugins), [배포 에셋 규격](https://developers.openai.com/plugins/deploy/submission).
+
+영속적인 외부 상태 감시와 자동 소유자 깨우기는 [생명주기 감시](docs/lifecycle-watch.md)를 따른다.

@@ -1,3 +1,4 @@
+import { runWatchCli } from './lifecycle-watch-cli.mjs';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
@@ -9,7 +10,8 @@ const operations = { git: ['inspectUnit'], gates: ['describe'], tracker: ['read'
 
 export async function runPublicUnitCli(argv, { cwd = process.cwd(), contractsDir } = {}) {
   try {
-    const { options } = parseUnitArgs(argv);
+    const { options, positional } = parseUnitArgs(argv);
+    if (positional[0] === 'unit' && positional[1] === 'watch') return await runWatchCli({positional,options,cwd});
     const core = createAdapters({ repositoryRoot: cwd });
     let providers = {};
     if (options.adapters) {

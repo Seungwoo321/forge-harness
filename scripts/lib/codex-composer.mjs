@@ -6,7 +6,7 @@ const placeholders = new Set(['Ask Codex to do anything', 'Explain this codebase
 
 function composer(screen) {
   const lines = screen.split('\n').map(line => line.trimEnd());
-  const start = lines.findLastIndex(line => /^ ?› /.test(line));
+  const start = lines.findLastIndex(line => /^ ?›(?: |$)/.test(line));
   if (start < 0 || lines.slice(start+1).some(line=>/· Working ·/.test(line))) throw taskError('supported Codex composer is unavailable');
   let end = lines.findLastIndex(line=>line.trim().length > 0);
   const complete = lines.findLastIndex((line,index)=>index>start && /^ {2}GPT-/.test(line)
@@ -16,7 +16,7 @@ function composer(screen) {
   const footer = /^ {2}GPT-[A-Za-z0-9.-]+ (?:low|medium|high|xhigh|max) · (?:~\/|\/)[^·\n]+ · (?:[A-Za-z0-9._/-]+ · )?Ready ·(?:…| Context (?:100|[1-9]?\d)% left · [A-Za-z0-9._/-]+…)(?:  ⚠ [1-9]\d* warnings? · f2 to view)?$/u;
   if (/^ {2,}⚠ [1-9]\d* warnings? · f2 to view$/u.test(lines[end] ?? '') && footer.test(lines[end - 1] ?? '')) end -= 1;
   if (end > start && footer.test(lines[end])) {
-    return [lines[start].replace(/^ ?› /,''),...lines.slice(start+1,end).map(line=>line.replace(/^ {2}/,''))].join('\n').replace(/\n+$/,'');
+    return [lines[start].replace(/^ ?› ?/,''),...lines.slice(start+1,end).map(line=>line.replace(/^ {2}/,''))].join('\n').replace(/\n+$/,'');
   }
   if (end <= start || !(lines[end].includes('? for shortcuts') || lines[end].includes('tab to queue message'))) throw taskError('supported Codex composer is unavailable');
   return nativeComposerContents(screen, 'codex');
@@ -24,7 +24,7 @@ function composer(screen) {
 
 export function codexComposerWorking(screen) {
   const lines = screen.split('\n').map(line => line.trimEnd());
-  const start = lines.findLastIndex(line => /^ ?› /.test(line));
+  const start = lines.findLastIndex(line => /^ ?›(?: |$)/.test(line));
   const footer = lines.findLastIndex((line, index) => index > start && /^ {2}GPT-[A-Za-z0-9.-]+ (?:low|medium|high|xhigh|max) · /.test(line));
   if (start < 0 || footer < 0) return false;
   const status = [];
@@ -34,6 +34,8 @@ export function codexComposerWorking(screen) {
   }
   return /^GPT-[A-Za-z0-9.-]+(?:low|medium|high|xhigh|max)·(?:~\/|\/)[^·]+·(?:[A-Za-z0-9._/-]+·)?Working·/.test(status.join('').replace(/\s/g, ''));
 }
+
+export function codexComposerEmpty(screen) { const value = composer(screen); return value === '' || placeholders.has(value); }
 
 export function codexComposerMatches(screen, prompt) { return composerTextMatches(composer(screen), prompt); }
 

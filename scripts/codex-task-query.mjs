@@ -6,7 +6,7 @@ import { observeUnmaterializedThread } from './lib/codex-preturn.mjs';
 let source = '';
 for await (const chunk of process.stdin) source += chunk;
 try {
-  const { executable, threadId, threadIds, cwd, operation, prompt, clientId, sqliteRoot, account } = JSON.parse(source);
+  const { executable, threadId, threadIds, cwd, operation, prompt, clientId, sqliteRoot, account, requireIdle } = JSON.parse(source);
   const goalOperation = ['goal', 'goal-observe'].includes(operation);
   const nativeGoal = goalOperation ? readCodexNativeGoal(threadId, sqliteRoot ?? account) : undefined;
   const result = operation === 'goal' && !nativeGoal && typeof cwd==='string' ? {thread:{id:threadId,cwd},turns:[],queued:[],goal:null} : await withJsonRpcProcess(executable, ['app-server', '--stdio'], async (rpc, initialization) => {
@@ -51,6 +51,7 @@ try {
       const samePrompt = parts => Array.isArray(parts) && parts.length > 0 && parts.every(part => part.type === 'text' && typeof part.text === 'string') && parts.map(part => part.text).join('') === prompt;
       const accepted = turns.some(turn => turn.items.some(item => item.type === 'userMessage' && (item.clientId === clientId || samePrompt(item.content))));
       if (!accepted && !queued.some(item => item.clientUserMessageId === clientId || samePrompt(item.input))) {
+        if (requireIdle === true && (queued.length || turns.some(turn=>turn.status === 'inProgress'))) throw new Error('native receiver became busy before queue submission');
         await rpc('thread/queue/add', { threadId, clientUserMessageId: clientId, input: [{ type: 'text', text: prompt, text_elements: [] }] });
       }
     } else if (!['read', 'goal-observe'].includes(operation)) throw new Error('unsupported worker operation');

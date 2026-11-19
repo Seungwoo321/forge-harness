@@ -1,3 +1,4 @@
+import { cleanupWatches } from './lifecycle-watch.mjs';
 import {reconcileReviewClose} from './review-close-reconcile.mjs';
 import { verifyGoalAcceptanceClarification } from './goal-acceptance-binding.mjs';
 import { goalOwner, assertAdoptedOwner } from './continuity-custody.mjs';
@@ -264,6 +265,7 @@ export async function finishSessionUnit({
     const closed = await commitTerminalClose({ store, unit, git: adapters.git, provider: adapters.provider, now: adapters.now });
     if (closed.state === 'Closed' && continuity && goalComplete) await commitGoalCompletion({ continuityStore: createContinuityStore(stateRoot), unitStore: store, goalId: continuity.goal.id, unit });
     if (closed.state === 'Closed' && continuity && sameSession) await commitGoalContinuation({ continuityStore:createContinuityStore(stateRoot),unitStore:store,goalId:continuity.goal.id,unit });
+    if (closed.state === 'Closed' && owner?.worker?.threadId) await cleanupWatches({stateRoot,unit,recipient:owner,io:adapters});
     return { code: closed.state === 'Closed' ? 0 : 1, state: closed.state, resultPath, resultDigest, delivery: authorized, successor: null, summary: 'Unit completed' };
   }
   if (returnTo) return prepareFinalization(returnTo);
@@ -390,6 +392,7 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters, re
     await store.update(unit,current => ({...current,sessionFinalization:{...current.sessionFinalization,deliveryReceipt:delivered,ownerRetained:true}}));
     const current = record.state === 'Closed' || record.state === 'Stopped' ? record : await commitTerminalClose({store,unit,git:adapters.git,provider:adapters.provider,now:adapters.now,sessionStart:plan.sessionStart,sessionRetention:plan.retainedOwner});
     if (current.state === 'Closed' && current.goalCompletion) await commitGoalCompletion({continuityStore:createContinuityStore(stateRoot),unitStore:store,goalId:current.goalCompletion.goalId,unit});
+    if (['Closed','Stopped'].includes(current.state)) await cleanupWatches({stateRoot,unit,recipient:plan.owner,io:adapters});
     return {code:current.state === 'Closed' || current.state === 'Stopped' ? 0 : 3,state:current.state,resultPath:plan.resultPath,summary:current.state === 'Closed' || current.state === 'Stopped' ? 'Result accepted; existing user session retained' : 'Accepted target changed before terminal completion'};
   }
   const validateClose = result => {
@@ -426,9 +429,11 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters, re
       if (current.sessionFinalization.closeReceipt) return current;
       return {...current,sessionFinalization:{...current.sessionFinalization,closeReceipt:closed}};
     });
+    await cleanupWatches({stateRoot,unit,recipient:plan.owner,io:adapters});
     return {code:0,state:record.state,summary:'Result accepted and owner session closure verified',resultPath:plan.resultPath};
   }
   const current = record.state === 'Closed' ? record : await commitTerminalClose({ store, unit, git: adapters.git, provider: adapters.provider, now: adapters.now, sessionStart: plan.sessionStart, sessionClose: closed });
   if (current.state === 'Closed' && current.goalCompletion) await commitGoalCompletion({continuityStore:createContinuityStore(stateRoot),unitStore:store,goalId:current.goalCompletion.goalId,unit});
+  if (current.state === 'Closed') await cleanupWatches({stateRoot,unit,recipient:plan.owner,io:adapters});
   return { code: current.state === 'Closed' ? 0 : 3, state: current.state, summary: 'Result accepted and owner session closure verified', resultPath: plan.resultPath };
 }

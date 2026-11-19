@@ -185,6 +185,24 @@ test('a long objective that scrolls the Claude composer is still submitted once 
   assert.equal(wrong,0);
 });
 
+test('a Claude composer folded under "↑ N more" (no ❯ row visible) is read and submitted once its tail settles', async () => {
+  const width=30, visible=3;
+  const view=text=>{
+    if (!text) return `────────────\n❯ Try "example"\n────────────\n  ⏵⏵ auto mode on (shift+tab to cycle)`;
+    const rows=[]; for (let i=0;i<text.length;i+=width) rows.push(text.slice(i,i+width));
+    if (rows.length<=visible) return `────────────\n❯ ${rows[0]}\n${rows.slice(1).map(r=>`  ${r}`).join('\n')}\n────────────\n  ⏵⏵ auto mode on (shift+tab to cycle)`;
+    return `─── ↑ ${rows.length-visible} more ───\n${rows.slice(-visible).map(r=>`  ${r}`).join('\n')}\n────────────\n  project · model\n  ⏵⏵ auto mode on (shift+tab to cycle)`;
+  };
+  const objective='Finish the unit with gates, review and handoff, then read the immutable packet references in full as the authoritative goal snapshot.';
+  let draft='', entered=0;
+  await submitNativeGoal({provider:'claude',objective,read:async()=>view(draft),write:async text=>{draft+=text;},enter:async()=>{entered+=1;},verify:async()=>{}});
+  assert.equal(draft,`/goal ${objective}`); assert.equal(entered,1);
+  draft=''; let wrong=0;
+  await assert.rejects(submitNativeGoal({provider:'claude',objective,read:async()=>view(draft.length>12?`${draft} but a different ending appended`:draft),
+    write:async text=>{draft+=text;},enter:async()=>{wrong+=1;},verify:async()=>{}}));
+  assert.equal(wrong,0);
+});
+
 test('long objectives avoid a folded paste burst before separate submission',async()=>{
  let draft='',last=0,entered=false;
  const objective='Read the immutable packets. '.repeat(15);

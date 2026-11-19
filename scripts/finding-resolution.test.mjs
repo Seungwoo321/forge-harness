@@ -14,7 +14,7 @@ const finding = (id, kind = 'review') => ({ id, kind, severity: 'must-fix', site
   claim: 'Output is incorrect', case: 'Boundary input produces wrong output', fix: 'Correct output and verify boundary',
   classification: 'harness', resolvedAt: null });
 
-async function fixture(t, { separate = false, originalSeparate = false, extraFindings = [], goalClass = 'task', legacyCli, outside = false, legacy = false, rejectKinds = false } = {}) {
+async function fixture(t, { separate = false, originalSeparate = false, extraFindings = [], goalClass = 'task', legacyCli, outside = false, legacy = false, rejectKinds = false, verifications = null } = {}) {
   let executable = legacyCli ?? cli;
   const filesRoot = await mkdtemp(path.join(os.tmpdir(), 'finding-resolution-'));
   const cwd = path.join(filesRoot, 'product');
@@ -79,6 +79,7 @@ export function createRuntimeAdapters({ cwd, adapters }) {
     const attempt = (await record(name)).stages.find(item => item.name === stage).attempts.at(-1);
     const input = await read(path.join(root, 'units', name, attempt.inputPath));
     const outputPath = path.join(filesRoot, name+'-'+stage+'-'+attempt.n+'.json');
+    if (typeof fields === 'function') fields = fields(input);
     await writeFile(outputPath, JSON.stringify({ inputDigest: input.inputDigest, attempt: attempt.n,
       submissionId: name+'-'+stage+'-'+attempt.n, status: 'done', summary: stage+' done',
       ...(stage === 'review' ? { reviewedHead: input.head } : {}), ...fields }));
@@ -133,7 +134,8 @@ export function createRuntimeAdapters({ cwd, adapters }) {
       assert.deepEqual(await record(reviewUnit), reviewerBefore);
     }
   }
-  const outputPath = await submit('review', { verdict: 'ship', findings: [] }, reviewUnit);
+  const outputPath = await submit('review', input => ({ verdict: 'ship', findings: [],
+    ...(verifications ? { findingVerifications: verifications(input.priorFindings ?? []) } : {}) }), reviewUnit);
   // Older releases cleared ship; both historical rejections retain the unresolved findings.
   const rejectedAcceptance = run(['unit', 'accept', unit]);
   if (legacyCli) assert.ok([1, 20].includes(rejectedAcceptance.code), JSON.stringify(rejectedAcceptance));
@@ -188,6 +190,39 @@ for (const separate of [false, true]) test(`public fix-review-resolve-accept pre
   assert.equal(f.run(['unit', 'accept', f.unit]).code, 0);
   assert.equal((await f.record()).state, 'Accepted');
   assert.equal(f.run(await f.prepare({ id: 'after-accept' })).error, 'INVALID_TRANSITION');
+});
+
+test('a ship review binds per-finding verifications of its prior findings, and resolution requires a verified claim for each', async t => {
+  const claims = prior => prior.map(({ index, digest, finding: item }) => ({ index, digest, verified: true,
+    case: `${item.id} boundary input`, evidence: `${item.id} passes on the fixed target` }));
+  const f = await fixture(t, { separate: true, verifications: claims });
+  const reviewer = await f.record(f.reviewUnit), attempt = reviewer.stages.find(stage => stage.name === 'review').attempts.at(-1);
+  const input = await f.read(path.join(f.root, 'units', f.reviewUnit, attempt.inputPath));
+  const target = await f.record();
+  assert.deepEqual(input.priorFindings.map(item => item.index), [0, 1]);
+  assert.deepEqual(input.priorFindings.map(item => item.digest), target.findings.map(item => effectArgsDigest(item)));
+  assert.equal(f.run(await f.prepare()).code, 0);
+  assert.ok((await f.record()).findings.every(item => item.resolutionRef === 'resolution-1'));
+
+  const partial = await fixture(t, { separate: true, verifications: prior => claims(prior).map((item, index) => index ? { ...item, verified: false } : item) });
+  const before = await partial.record();
+  assert.equal(partial.run(await partial.prepare()).error, 'FINDING_RESOLUTION_INVALID');
+  assert.deepEqual(await partial.record(), before);
+  const current = await partial.record();
+  assert.equal(partial.run(await partial.prepare({ findings: [{ index: 0, digest: effectArgsDigest(current.findings[0]) }] })).code, 0);
+});
+
+test('finding verifications must match the review input prior findings', async t => {
+  const f = await fixture(t, { separate: true });
+  const reviewUnit = 'review-b';
+  await f.start(reviewUnit, 'review');
+  assert.equal(f.open('review', reviewUnit).code, 0);
+  for (const bad of [prior => [{ index: 0, digest: 'sha256:' + '0'.repeat(64), verified: true, case: 'c', evidence: 'e' }],
+    prior => [prior[0], prior[0]].map(({ index, digest }) => ({ index, digest, verified: true, case: 'c', evidence: 'e' })),
+    prior => [{ index: 9, digest: prior[0].digest, verified: true, case: 'c', evidence: 'e' }],
+    prior => [{ index: 0, digest: prior[0].digest, verified: true, case: ' ', evidence: 'e' }]]) {
+    await f.submit('review', input => ({ verdict: 'ship', findings: [], findingVerifications: bad(input.priorFindings) }), reviewUnit, 2);
+  }
 });
 
 test('unrelated unresolved findings still block; multi-finding validation is atomic', async t => {

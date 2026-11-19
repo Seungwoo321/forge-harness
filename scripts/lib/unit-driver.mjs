@@ -461,6 +461,10 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
         head: target.head ?? '', contentFingerprint: target.contentFingerprint ?? '',
         data: Object.fromEntries(contract.reads.map(field => [field, readiness.preparedValues[field]])),
       };
+      // The reviewer re-checks the target's unresolved findings and may record a bound verification for each.
+      const priorFindings = stage === 'review' ? (target.findings ?? []).map((finding, index) => ({ index, digest: digest(finding), finding }))
+        .filter(({ finding }) => finding.resolvedAt == null && finding.resolutionRef == null) : [];
+      if (priorFindings.length) inputCore.priorFindings = priorFindings;
       inputCore.inputDigest = digest(inputCore);
       const created = createStageInput(contract, inputCore, readiness);
       if (!created.ok) {
@@ -564,6 +568,13 @@ async function runStage({ stateRoot, contractsDir, unit, stage, options, adapter
       throw error;
     }
     assertReviewScope(reviewedRecord, input);
+    const prior = new Map((input.priorFindings ?? []).map(item => [item.index, item.digest]));
+    const verifications = output.findingVerifications ?? [];
+    if (new Set(verifications.map(item => item.index)).size !== verifications.length
+      || verifications.some(item => prior.get(item.index) !== item.digest || !item.case.trim() || !item.evidence.trim())) {
+      throw Object.assign(new Error('finding verifications must reference distinct prior findings of this review input with a case and evidence'),
+        { code: 'STAGE_CONTRACT_INVALID', issues: [{ path: '$.findingVerifications', keyword: 'binding', message: 'must match input.priorFindings' }] });
+    }
     if (output.reviewedHead !== reviewedRecord.head) {
       const error = new Error('reviewedHead must match the current review target head');
       error.code = 'STAGE_CONTRACT_INVALID';

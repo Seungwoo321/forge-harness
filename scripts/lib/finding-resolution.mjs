@@ -97,6 +97,11 @@ async function checkReview({ store, stateRoot, record, request, contract, cwd })
     || (record.reviewDecision?.submissionId != null && record.reviewDecision.submissionId !== output.submissionId)) {
     reject('resolution requires the current matching ship review');
   }
+  // When the reviewer recorded per-finding verifications, each resolved finding needs its own verified claim.
+  if (Array.isArray(output.findingVerifications) && request.findings.some(item => !output.findingVerifications.some(entry =>
+    entry.index === item.index && entry.digest === item.digest && entry.verified === true))) {
+    reject('the ship review did not verify every requested finding');
+  }
   return { output, recovered: record.verdict == null || record.reviewedHead == null };
 }
 

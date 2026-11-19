@@ -28,7 +28,8 @@ export async function withSuspendedReviewLocks({stateRoot,store,entries,exitedEn
   return lock(0,[]);
 }
 
-export async function verifySuspendedReviews({lockedReviews,goal,target,owner,adapters}) {
+// A reviewer started by a managed target owner never bound the target digest; its audit pins the current target instead.
+export async function verifySuspendedReviews({lockedReviews,goal,target,owner,adapters,managedTarget=false}) {
   const audited=[];
   for(const {entry,record,rows,exited} of lockedReviews){
     if(record.kind!=='review' || record.state!=='InReview' || record.targetUnit!==target.unit
@@ -43,7 +44,7 @@ export async function verifySuspendedReviews({lockedReviews,goal,target,owner,ad
     if(digest(old)!==digest(entry.owner) || old.cwd!==owner.cwd || old.sessionId===owner.sessionId
       || old.worker.pid===owner.worker.pid || old.worker.threadId===owner.worker.threadId
       || !intent || !submission || intent.args?.unit!==record.unit || intent.args.role!=='review'
-      || intent.args.targetDigest!==digest(target) || prepareEffect('session.start',intent.args).key!==intent.key
+      || intent.args.targetDigest!==(managedTarget?undefined:digest(target)) || prepareEffect('session.start',intent.args).key!==intent.key
       || rows.some(row=>row.event==='intent' && row!==intent)
       || rows.some(row=>['result','session-start-recovery'].includes(row.event))
       || ['runtime','sessionId','incarnationId','cwd'].some(key=>old[key]!==receiver[key])

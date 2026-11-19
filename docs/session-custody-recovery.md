@@ -121,6 +121,22 @@ For that exact audit, ordinary public `unit session-recover` selects the separat
 Core repeats the exact native/current target/source/ledger fence and appends the same-unit next-attempt reservation with `mode:'exited-handoff'`. Startup remains blocked until that reservation exists, then the ordinary fresh attempt and full independent review proceed. No source-close receipt, old success, non-start or review verdict is generated. See [ADR 0052](adr/0052-exited-worked-reviewer.md).
 
 
+### Managed bootstrap owner transfer
+
+A unit started by `unit session-start` is owned by its managed bootstrap. The same public `unit session-handoff` (suspended) and `unit session-reassign` (exited) transfer that owner to a distinct existing cmux session in the same cwd. Use them after `goal policy-refresh` has recorded the user-approved execution policy. Never fail, stop or recover a healthy unit to reach a new provider.
+
+The request adds `previousOwner`, the exact old native owner in the canonical adoption shape. It is required exactly when `previousCustodyDigest` names the unit's current `goal.bootstraps` entry. `owner` is the actual replacement. `policy` must equal the current goal policy; the handover selects no other policy.
+
+Core proves `previousOwner` without trusting it. Its `sessionId`, `incarnationId` and `cwd` equal the bootstrap. The bootstrap's `effectKey` names the unit's original implementation `session.start` intent at the same attempt and launch snapshot. That intent's latest result has the same identity and `task.threadId`. Every recorded submission, receiver and confirmation binding of that intent agrees on identity and on any recorded pid, thread and executable. The immutable launch snapshot's implementation runtime and provider match the old owner. The usual observer then proves that exact owner suspended or exited around the replacement observation.
+
+Approval and the verifier keep the effect names and callbacks above. The scalar binding additionally includes `previousOwnership:'managed'` and `previousOwnerDigest` (`effectArgsDigest` of the canonical old owner). `previousPolicyDigest` hashes the current refreshed goal policy, and `previousCustody` is the bootstrap entry. The host verifier must prove the old identity from its own launch history and native account. It must also prove the actual user authority for this provider move and the replacement's actual account and configuration for the new policy. It returns every scalar unchanged with `verified:true`. Any other answer rejects with `CUSTODY_UNPROVEN`. A missing callback rejects with `ADAPTER_MISSING`.
+
+Core rejects a missing or inexact `previousOwner`, a superseded bootstrap or a managed successor transfer with `CUSTODY_CONFLICT` or `CUSTODY_INVALID`. A changed unit, goal, target, source or a policy other than the current goal policy rejects with `CUSTODY_STALE`. A live, resumed or unobserved old owner rejects with `CUSTODY_UNPROVEN`. Rejection writes nothing.
+
+The handover receipt adds `previousOwnership:'managed'` and the proven `previousOwner`. Bootstraps, policy history, the Unit Record, its ledger, gates, evidence and review obligations stay unchanged. Exact replay revalidates everything and returns `duplicate:true`.
+
+A worked unregistered reviewer launched by the managed owner never bound `targetDigest`. The same `suspendedReviews` or `exitedReviews` inventory accepts it only for this managed predecessor and pins the current target digest in its audit. Ordinary `unit session-recover` then adds that pinned digest to the next attempt's arguments. Normal `session-start` by the replacement launches that attempt as an existing-owner review. See [ADR 0069](adr/0069-managed-owner-provider-transfer.md).
+
 ## Exited historical review return transport
 
 Use `unit review-exit-recover <review> --request <file> --user-input <real authority>` only for a registered Closed review with an actually completed submitted review attempt, original positive managed startup receipt and exactly one unresolved return-delivery intent. Original reviewer and original recipient must both be independently observed exited and fenced. A delivery submission/result, close intent, another unresolved effect or changed original source/custody rejects this path.

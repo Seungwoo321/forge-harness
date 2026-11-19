@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,realpath,readFile,writeFile,rm} from 'node:fs/promises';
+import {mkdir,mkdtemp,realpath,readFile,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
@@ -84,7 +84,7 @@ async function suspendedReviewerFixture(t,base=fixture){
  };
  const recover=async()=>{
   const goal=await f.goals.read('goal');
-  const request={id:'recover-review',expectedRevision:record.revision,expectedGoalRevision:goal.revision,intent:{seq:1,key,argsDigest:digest(args)},provenance:{path:f.proof,digest:hash(await readFile(f.proof))},reason:'Resume suspended actual reviewer under authorized handoff'};
+  const request={id:'recover-review',expectedRevision:(await f.store.read('review')).revision,expectedGoalRevision:goal.revision,intent:{seq:1,key,argsDigest:digest(args)},provenance:{path:f.proof,digest:hash(await readFile(f.proof))},reason:'Resume suspended actual reviewer under authorized handoff'};
   const file=path.join(f.cwd,'recovery.json');await writeFile(file,JSON.stringify(request));
   return JSON.parse((await runUnitCli(['unit','session-recover','review','--request',file,'--user-input','human'],{cwd:f.cwd,stateRoot:f.stateRoot,adapters:f.adapters})).split('RESULT ').at(-1));
  };
@@ -109,8 +109,16 @@ test('AC-4 suspended actual reviewer retains records and reserves the same revie
  const started=await f.start();assert.equal(started.code,0,JSON.stringify(started));
  const registered=(await f.goals.read('goal')).reviews;assert.equal(registered.length,1);assert.equal(registered[0].attempt,2);assert.equal(registered[0].nativeThreadId,'new-review-thread');
 });
+// Mirrors what `unit stage open <review> review` records before the reviewer submits anything.
+async function openReviewStage(f,{attempt={},input={}}={}){
+ const core={unit:'review',stage:'review',attempt:1,targetUnit:'change',head:'head',contentFingerprint:'tree',...input};
+ const file=path.join(f.stateRoot,'units/review/stages/review.1.input.json');
+ await mkdir(path.dirname(file),{recursive:true});await writeFile(file,JSON.stringify({...core,inputDigest:digest(core)}));
+ await f.store.update('review',r=>({...r,stages:[{name:'review',attempts:[{n:1,inputPath:'stages/review.1.input.json',inputDigest:digest(core),startedAt:'t',endedAt:null,...attempt}]}]}));
+ for(const key of ['suspendedReviews','exitedReviews'])if(f.request[key])f.request[key][0].unitDigest=digest(await f.store.read('review'));
+}
 test('AC-5 suspended reviewer authority cannot hide registered, changed, running or completed work',async t=>{
- for(const scenario of ['running','changed-ledger','registered','stages','wrong-thread','missing-verifier','resume-before-recovery','receiver-drift','confirmation-drift'])await t.test(scenario,async t=>{
+ for(const scenario of ['running','changed-ledger','registered','stages','submitted-stage','second-attempt','stale-input','wrong-thread','missing-verifier','resume-before-recovery','receiver-drift','confirmation-drift'])await t.test(scenario,async t=>{
   const f=await suspendedReviewerFixture(t);
   if(scenario==='running')f.unsuspendReview();
   if(['receiver-drift','confirmation-drift'].includes(scenario)){
@@ -120,6 +128,9 @@ test('AC-5 suspended reviewer authority cannot hide registered, changed, running
   if(scenario==='changed-ledger')await f.ledger.withLock('review',l=>l.append({event:'verification',seq:1,key:f.intent.key,status:'unknown'}));
   if(scenario==='registered')await f.goals.transaction('goal',g=>({...g,revision:g.revision+1,reviews:[{unit:'review',targetUnit:'change'}]}));
   if(scenario==='stages')await f.store.update('review',r=>({...r,stages:[{stage:'review'}]}));
+  if(scenario==='submitted-stage')await openReviewStage(f,{attempt:{endedAt:'t2',result:'done',outputDigest:digest('out'),submissionId:'s1'}});
+  if(scenario==='second-attempt'){await openReviewStage(f);await f.store.update('review',r=>({...r,stages:[{...r.stages[0],attempts:[{n:0,endedAt:'t0',result:'superseded'},...r.stages[0].attempts]}]}));f.request.suspendedReviews[0].unitDigest=digest(await f.store.read('review'));}
+  if(scenario==='stale-input')await openReviewStage(f,{input:{head:'older'}});
   if(scenario==='wrong-thread')f.request.suspendedReviews[0].owner.worker.threadId='foreign';
   if(scenario==='missing-verifier')delete f.adapters.provider.verifySuspendedReviewRecovery;
   if(['missing-verifier','resume-before-recovery'].includes(scenario)){
@@ -252,8 +263,9 @@ test('AC-12 managed handoff rejects missing authority, inexact custody or identi
  await t.test('existing custody cannot claim a managed owner',async t=>{const f=await fixture(t);const result=await f.run({...f.request,previousOwner:f.owner});assert.notEqual(result.code,0);});
 });
 test('AC-13 managed InReview owner with a worked unregistered reviewer transfers and the same review restarts normally',async t=>{
- for(const mode of ['suspended','exited'])await t.test(mode,async t=>{
+ for(const [mode,opened] of [['suspended',false],['exited',false],['suspended',true],['exited',true]])await t.test(`${mode}${opened?' with an opened StageInput':''}`,async t=>{
   let f=await suspendedReviewerFixture(t,t=>managedFixture(t,'InReview'));
+  if(opened)await openReviewStage(f);
   assert.equal(f.intent.args.targetDigest,undefined);
   if(mode==='exited'){f=exitedOwner(f);const observe=f.adapters.session.observe;f.adapters.session.observe=async input=>input.exitedOwner?.sessionId==='old-review'?{...f.replacement,previousOwnerExited:true}:observe(input);
    f.request.exitedReviews=f.request.suspendedReviews;delete f.request.suspendedReviews;
@@ -268,5 +280,6 @@ test('AC-13 managed InReview owner with a worked unregistered reviewer transfers
   const started=await f.start();assert.equal(started.code,0,JSON.stringify(started));
   const reviews=(await f.goals.read('goal')).reviews;assert.equal(reviews.length,1);assert.equal(reviews[0].attempt,2);assert.equal(reviews[0].targetDigest,digest(target));
   assert.equal((await f.store.read('review')).verdict,undefined);
+  if(opened){const [attempt]=(await f.store.read('review')).stages[0].attempts;assert.equal(attempt.endedAt,null);assert.equal(attempt.n,1);}
  });
 });

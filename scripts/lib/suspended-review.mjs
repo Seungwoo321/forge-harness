@@ -28,13 +28,27 @@ export async function withSuspendedReviewLocks({stateRoot,store,entries,exitedEn
   return lock(0,[]);
 }
 
+// A worked reviewer normally opens its StageInput first. Only that single unsubmitted attempt, still bound to
+// the current target, may move: the recovered reviewer submits the same opened input.
+async function onlyOpenedReview(stateRoot,record,target){
+  const stages=record.stages??[];
+  if(!stages.length)return true;
+  const [stage]=stages,[attempt]=stage.attempts??[];
+  if(stages.length!==1 || stage.name!=='review' || stage.attempts.length!==1 || attempt.endedAt!==null
+    || ['result','outputDigest','submissionId'].some(key=>attempt[key]!==undefined) || typeof attempt.inputPath!=='string')return false;
+  let input;
+  try{input=JSON.parse(await readFile(path.join(stateRoot,'units',record.unit,attempt.inputPath),'utf8'));}catch{return false;}
+  return input?.inputDigest===attempt.inputDigest && input.attempt===attempt.n && input.targetUnit===target.unit
+    && Boolean(target.head) && input.head===target.head && input.contentFingerprint===target.contentFingerprint;
+}
+
 // A reviewer started by a managed target owner never bound the target digest; its audit pins the current target instead.
-export async function verifySuspendedReviews({lockedReviews,goal,target,owner,adapters,managedTarget=false}) {
+export async function verifySuspendedReviews({stateRoot,lockedReviews,goal,target,owner,adapters,managedTarget=false}) {
   const audited=[];
   for(const {entry,record,rows,exited} of lockedReviews){
     if(record.kind!=='review' || record.state!=='InReview' || record.targetUnit!==target.unit
       || record.continuity?.goalId!==goal.goal.id || record.sessionFinalization || record.deliveryPlan
-      || record.verdict || record.stages?.length || (goal.reviews??[]).some(item=>item.unit===record.unit))
+      || record.verdict || !await onlyOpenedReview(stateRoot,record,target) || (goal.reviews??[]).some(item=>item.unit===record.unit))
       fail('only unregistered reviewers without a submitted stage can be suspended');
     const intent=rows.findLast(row=>row.event==='intent' && row.effect==='session.start');
     const submission=rows.findLast(row=>row.event==='submission' && row.key===intent?.key && row.seq===intent?.seq);

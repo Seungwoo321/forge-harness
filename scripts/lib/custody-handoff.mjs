@@ -95,7 +95,7 @@ export async function handoffGoalSession({stateRoot,store,unit,request,userInput
         if(digest(await adapters.git.inspectUnit({unit,record}))!==request.targetDigest)fail('handoff target changed','CUSTODY_STALE');
         const observed=await adapters.session.observe({cwd:owner.cwd,targetCwd:owner.cwd,[exited?'exitedOwner':'suspendedOwner']:structuredClone(old)});
         if(observed[exited?'previousOwnerExited':'previousOwnerSuspended']!==true || digest(nativeOwner(observed))!==digest(owner))fail('native replacement or suspension unverified','CUSTODY_UNPROVEN');
-        const reviews=await verifySuspendedReviews({lockedReviews,goal:before,target:record,owner,adapters,managedTarget:managed});
+        const reviews=await verifySuspendedReviews({stateRoot,lockedReviews,goal:before,target:record,owner,adapters,managedTarget:managed});
         suspendedReviews=reviews.filter(item=>item.ownerState!=='exited');exitedReviews=reviews.filter(item=>item.ownerState==='exited');
         await assertReviewsSettled({stateRoot,store,goal,unit,suspendedReviews:[...suspendedReviews,...exitedReviews]});
       };

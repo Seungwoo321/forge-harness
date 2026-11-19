@@ -42,7 +42,8 @@ async function inspectAttribution({ record, adapters, cwd, observed, baseRef }) 
   };
   const parents = async commit => (await git(['show', '-s', '--format=%P', commit])).split(' ').filter(Boolean);
   let comparisonBase = observed.base, introduction = null;
-  if (comparisonBase === head) {
+  // Only committed content at HEAD can already be in the approved target. Uncommitted work on HEAD compares against HEAD.
+  if (comparisonBase === head && await git(['rev-parse', `${head}^{tree}`]) === observed.tree) {
     // The approved target already contains this delivery. Recover its actual pre-merge base, not a guessed ancestor.
     for (const commit of (await git(['rev-list', '--first-parent', '--reverse', `${first.checkpointHead}..${baseRef}`])).split('\n').filter(Boolean)) {
       const p = await parents(commit);

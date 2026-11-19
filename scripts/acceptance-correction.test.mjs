@@ -136,7 +136,7 @@ async function fixture(t, { owner = 'engine', goalBound = false } = {}) {
     return run(['acceptance', 'correct', unit, '--request', file, '--user-input', 'user-correction']); };
   const deliveryRequest = async () => { const r = await request({ id: 'delivery-1', acceptanceRef: 'AC-6', kind: 'delivery', level: 'pr', owner }); delete r.evidence; return r; };
   const both = async () => { assert.equal((await correct(await request())).code, 0); assert.equal((await correct(await deliveryRequest())).code, 0); };
-  return { cwd, stateRoot, store, unit, read, run, request, correct, deliveryRequest, both, adapters, target, trace, evidencePath, provenancePath,
+  return { cwd, stateRoot, store, unit, read, run, request, correct, deliveryRequest, both, adapters, target, trace, evidencePath, provenancePath, authority,
     revoke: () => { revoked = true; }, deny: () => { authorized = false; }, wrongBinding: () => { wrongBinding = true; },
     onVerify: callback => { onVerify = callback; } };
 }
@@ -330,10 +330,44 @@ test('a later correction cannot lower delivery or change classification, and mis
   const f = await fixture(t); await f.both();
   const delivery = await f.deliveryRequest();
   assert.equal((await f.correct({ ...delivery, id: 'weaker', level: 'push' })).error, 'ACCEPTANCE_CORRECTION_INVALID');
-  assert.equal((await f.correct({ ...delivery, id: 'external-owner', owner: 'external' })).error, 'ACCEPTANCE_CORRECTION_INVALID');
+  assert.equal((await f.correct({ ...delivery, id: 'external-owner', owner: 'external' })).error, 'ACCEPTANCE_CORRECTION_UNPROVEN');
   assert.equal((await f.correct(await f.request({ id: 'switch', acceptanceRef: 'AC-6' }))).error, 'ACCEPTANCE_CORRECTION_INVALID');
   delete f.adapters.provider.verifyAcceptanceCorrection;
   const before = await f.read(); assert.equal((await f.correct(await f.request({ id: 'refresh' }))).error, 'ADAPTER_MISSING'); assert.deepEqual(await f.read(), before);
+});
+
+test('an engine delivery the engine never started moves to its verified external owner and keeps the review', async t => {
+  const f = await fixture(t); await f.both();
+  const accepted = { ...f.target, validatedHead: f.target.head, basis: 'review' };
+  await f.store.update(f.unit, r => ({ ...r, state: 'Accepted', accepted }));
+  const before = await f.read();
+  f.authority.owner = 'external';
+  for (const [id, level] of [['weaker-external', 'push'], ['external-pr', 'pr']]) {
+    const result = await f.correct({ ...await f.deliveryRequest(), id, owner: 'external', level });
+    if (id === 'weaker-external') { assert.notEqual(result.code, 0); assert.deepEqual(await f.read(), before); }
+    else assert.equal(result.code, 0, JSON.stringify(result));
+  }
+  const after = await f.read();
+  assert.equal(after.state, 'SelfGated'); assert.equal(after.accepted, null);
+  for (const key of ['reviewDecision', 'reviewedHead', 'verdict', 'evidence', 'failures']) assert.deepEqual(after[key], before[key], key);
+  assert.equal(after.acceptanceCorrections.length, 3);
+  assert.equal(after.acceptanceCorrections.at(-1).request.owner, 'external');
+  const file = path.join(f.cwd, 'policy-none.json');
+  await writeFile(file, JSON.stringify({ id: 'external-none', expectedRevision: after.revision, delivery: 'none', reason: 'Delivery is owned externally' }));
+  assert.equal((await f.run(['policy', 'change', f.unit, '--request', file, '--user-input', 'user-correction'])).code, 0);
+  assert.equal(f.trace.length, 0);
+});
+
+test('an engine delivery that already started cannot change its owner', async t => {
+  const f = await fixture(t); await f.both();
+  await createLedgerStore(f.stateRoot).withLock(f.unit, async ledger => {
+    await ledger.append({ event: 'intent', unit: f.unit, seq: 1, key: 'commit-key', effect: 'git.commit', args: {} });
+    await ledger.append({ event: 'result', unit: f.unit, seq: 1, key: 'commit-key', result: { status: 'completed' } });
+  });
+  f.authority.owner = 'external';
+  const before = await f.read();
+  assert.equal((await f.correct({ ...await f.deliveryRequest(), id: 'late-external', owner: 'external' })).error, 'INVALID_TRANSITION');
+  assert.deepEqual(await f.read(), before);
 });
 
 test('the public executable loads the correction provider and returns an audited same-unit receipt', async t => {

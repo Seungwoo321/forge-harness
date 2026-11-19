@@ -3,6 +3,7 @@ import { createLedgerStore, sessionEffectRetired } from './ledger.mjs';
 import { attemptsFor } from './stage-attempts.mjs';
 import { resolvePolicy } from './policy.mjs';
 import { bindDeliveryCommit, validateAcceptedContent } from './delivery.mjs';
+import { transitionRecord } from './unit-state.mjs';
 
 const levels = ['none', 'commit', 'push', 'pr', 'merge'];
 const text = value => typeof value === 'string' && value.trim().length > 0;
@@ -191,7 +192,16 @@ export async function correctAcceptance({ stateRoot, store, unit, request, userI
           receipt = { ...existing, duplicate: true }; throw duplicate;
         }
         if (record.revision !== request.expectedRevision) fail('unit revision changed', 'ACCEPTANCE_CORRECTION_STALE');
-        if (record.state !== 'SelfGated' || ['review', 'ops'].includes(record.kind) || record.accepted
+        const previous = currentCorrections(record).find(item => item.request.acceptanceRef === request.acceptanceRef);
+        // A delivery the engine never started can move to its actual external owner at the same or a stronger level.
+        // Product criteria are unchanged, so the review stays; an accepted unit returns to SelfGated for re-acceptance.
+        const ownerHandover = previous?.request.kind === 'delivery' && request.kind === 'delivery'
+          && previous.request.owner === 'engine' && request.owner === 'external'
+          && levels.indexOf(request.level) >= levels.indexOf(previous.request.level);
+        if (ownerHandover && entries.some(entry => entry.event === 'intent'
+          && ['git.commit', 'git.push', 'git.integrate', 'pr.create', 'pr.merge'].includes(entry.effect)))
+          fail('engine delivery already started; its owner cannot change', 'INVALID_TRANSITION');
+        if (!(record.state === 'SelfGated' && !record.accepted || ownerHandover && record.state === 'Accepted') || ['review', 'ops'].includes(record.kind)
           || record.deliveryPlan || record.deliveryResult || record.sessionFinalization
           || (record.stages ?? []).some(stage => attemptsFor(record, stage.name).some(attempt => !attempt.endedAt))) {
           fail('correction requires a submitted, unaccepted SelfGated change unit', 'INVALID_TRANSITION');
@@ -201,11 +211,10 @@ export async function correctAcceptance({ stateRoot, store, unit, request, userI
           const latest = entries.findLast(row => row.event === 'result' && row.seq === entry.seq && row.key === entry.key);
           return !latest || ['unknown', 'uncertain'].includes(latest.result?.status);
         })) fail('reconcile uncertain effects before correction', 'EFFECT_UNCERTAIN');
-        const previous = currentCorrections(record).find(item => item.request.acceptanceRef === request.acceptanceRef);
         if ((record.inheritedDeliveryObligations ?? []).some(inherited => inherited.acceptanceRef === request.acceptanceRef
           && (request.kind !== 'delivery' || request.owner !== inherited.owner || levels.indexOf(request.level) < levels.indexOf(inherited.level))))
           fail('a correction cannot weaken an inherited delivery obligation');
-        if (previous && (previous.request.kind !== request.kind || previous.request.owner !== request.owner
+        if (previous && !ownerHandover && (previous.request.kind !== request.kind || previous.request.owner !== request.owner
           || request.kind === 'delivery' && levels.indexOf(request.level) < levels.indexOf(previous.request.level))) {
           fail('a correction cannot change a classification or weaken a delivery obligation');
         }
@@ -215,12 +224,12 @@ export async function correctAcceptance({ stateRoot, store, unit, request, userI
         const target = await adapters.git.inspectUnit({ unit, record });
         await verifyCorrection(record, receipt, adapters, target);
         const updated = { ...record, acceptanceCorrections: [...(record.acceptanceCorrections ?? []), receipt],
-          reviewDecision: null, reviewedHead: null, verdict: null, diff: null, handoff: null };
+          ...(ownerHandover ? { accepted: null } : { reviewDecision: null, reviewedHead: null, verdict: null, diff: null, handoff: null }) };
         const { policy } = resolvePolicy({ unit: record.policyOverrides ?? {}, project: record.policy ?? {} }, { nonInteractive: true });
         if (!(record.inheritedDeliveryObligations?.length)) assertDeliveryObligations(updated, policy.delivery);
         const checked = await adapters.git.inspectUnit({ unit, record });
         if (effectArgsDigest(checked ?? null) !== effectArgsDigest(target)) fail('target changed during correction', 'ACCEPTANCE_CORRECTION_STALE');
-        return updated;
+        return record.state === 'Accepted' ? transitionRecord(updated, 'SelfGated') : updated;
       });
     });
   } catch (error) { if (error !== duplicate) throw error; }

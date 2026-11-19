@@ -8,7 +8,15 @@ export function nativeComposerContents(screen, provider) {
   if (typeof screen === 'object') screen = screen.screen;
   if (typeof screen !== 'string') throw taskError('native goal composer is unavailable');
   const lines = screen.split('\n').map(line => provider === 'codex' ? line : line.trimEnd());
-  const start = lines.findLastIndex(line => provider === 'codex' ? /^ ?›(?: |$)/.test(line) : /^\s*❯(?:[ \u00a0]|$)/u.test(line));
+  // A tall Claude draft folds its first rows into the top rule ("─── ↑ N more ───"), hiding the ❯ row.
+  const folded = provider === 'claude' ? lines.findLastIndex(line => /^\s*─+ ↑ \d+ more ─+\s*$/u.test(line)) : -1;
+  const prompt = lines.findLastIndex(line => provider === 'codex' ? /^ ?›(?: |$)/.test(line) : /^\s*❯(?:[ \u00a0]|$)/u.test(line));
+  if (folded > prompt) {
+    const end = lines.findIndex((line, index) => index > folded && /^\s*─{8,}\s*$/u.test(line));
+    if (end < 0) throw taskError('native goal composer is ambiguous');
+    return lines.slice(folded + 1, end).map(line => line.trimStart()).join('\n').replace(/\n+$/, '');
+  }
+  const start = prompt;
   if (start < 0) throw taskError('native goal composer is unavailable');
   let end = lines.findIndex((line, index) => index > start && (provider === 'codex' ? /· (Ready|Working) ·/.test(line) : /^\s*─{8,}\s*$/u.test(line)));
   if (provider === 'codex') {

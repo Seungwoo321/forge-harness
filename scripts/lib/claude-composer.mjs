@@ -13,6 +13,8 @@ function composer(screen) {
 }
 const empty = text => !text || /^Try "[^\n]*"$/.test(text);
 export function claudeComposerMatches(screen, prompt) { return composerTextMatches(composer(screen), prompt); }
+export function claudeComposerEmpty(screen) { return empty(composer(screen)); }
+export const claudeWorking = screen => /esc to interrupt/i.test(screen);
 
 // Placeholders and prompt suggestions render every input cell faint; a typed draft never does.
 export function claudeComposerFaint(grid) {

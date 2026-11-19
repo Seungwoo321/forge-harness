@@ -21,7 +21,7 @@ async function setup(t, mode = 'success') {
   const recipient = { sessionId: 'existing-parent', incarnationId: 'recipient-generation', cwd: root, executable: 'worker' };
   const events = [];
   let closed = false;
-  let accepted = !['queued', 'prefilled', 'delivery-failed', 'pre-input', 'pre-input-stuck'].includes(mode);
+  let accepted = !['queued', 'prefilled', 'delivery-failed', 'pre-input', 'pre-input-stuck', 'unread', 'unread-stuck'].includes(mode);
   let deliveryAttempts = 0;
   const receipt = input => ({ ...recipient, task: { schema: 'harness.task-receipt/1', effectKey: input.key,
     sessionId: recipient.sessionId, incarnationId: recipient.incarnationId, cwd: root, promptDigest: taskDigest('native request'),
@@ -37,6 +37,8 @@ async function setup(t, mode = 'success') {
         deliveryAttempts += 1;
         if (mode === 'prefilled' && deliveryAttempts === 2) accepted = true;
         if (mode === 'pre-input' && deliveryAttempts === 2) accepted = true;
+        if (mode === 'unread' && deliveryAttempts === 2) accepted = true;
+        if (['unread', 'unread-stuck'].includes(mode) && !accepted) throw Object.assign(Error('request was received but its packet read is unproven'), { code: 'SESSION_TASK_UNVERIFIED' });
         if (['pre-input', 'pre-input-stuck'].includes(mode) && !accepted) throw Object.assign(Error('packet reference does not fit the exact composer viewport'), { code: 'SESSION_OBSERVATION_INVALID' });
         if (!accepted) throw Error('queued, not yet consumed');
         const result = receipt(input);
@@ -56,6 +58,7 @@ async function setup(t, mode = 'success') {
       if (input.effect === 'session.deliver' && ['prefilled', 'delivery-failed'].includes(mode)) return {
         status: 'not-applied', result: recipient, verify: { nativeRequestAbsent: true, exactPendingComposer: true },
       };
+      if (input.effect === 'session.deliver' && ['unread', 'unread-stuck'].includes(mode)) return { status: 'not-applied', result: recipient, verify: { unreadDelivery: true } };
       if (input.effect === 'session.deliver' && ['pre-input', 'pre-input-stuck'].includes(mode)) return {
         status: 'not-applied', result: recipient, verify: { nativeRequestAbsent: true, preInputFailure: true },
       };
@@ -142,6 +145,20 @@ test('an exhausted pre-input delivery budget reopens only under verified user in
   assert.equal((await f.run('finalize', ['--retry-delivery', '--user-input', 'retry-approved'])).code, 0);
   assert.equal((await f.ledger()).filter(row => row.event === 'delivery-retry-authorization').length, 2);
   assert.equal((await f.store.read('finished')).state, 'Closed');
+});
+
+test('an idle recipient that received the result without reading it gets the same reference again within budget', async t => {
+  const f = await setup(t, 'unread');
+  await f.run('finish');
+  assert.equal((await f.run('finalize')).code, 3);
+  assert.equal((await f.run('finalize')).code, 0);
+  assert.equal(f.deliveries(), 2);
+  assert.equal((await f.store.read('finished')).state, 'Closed');
+  const stuck = await setup(t, 'unread-stuck');
+  await stuck.run('finish');
+  for (let i = 0; i < 4; i += 1) assert.equal((await stuck.run('finalize')).code, 3);
+  assert.equal(stuck.deliveries(), 2);
+  assert.ok((await stuck.ledger()).some(row => row.event === 'verification' && row.verify?.code === 'SESSION_DELIVERY_RETRY_FAILED'));
 });
 
 test('queued result retry observes consumption without another submission', async t => {

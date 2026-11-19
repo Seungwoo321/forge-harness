@@ -100,13 +100,16 @@ export async function observeTask({ transport, observed, input, prompt, packets,
   if (!transport || typeof transport.observe !== 'function' || typeof prompt !== 'string' || !prompt.trim()) throw taskError('worker task transport is required');
   const request = { observed, input, prompt, packets };
   let evidence = await transport.observe(request);
-  if (submit && ['ready', 'prefilled'].includes(evidence?.state)) {
+  const resend = evidence?.state === 'accepted' && evidence.resendable === true;
+  if (submit && (['ready', 'prefilled'].includes(evidence?.state) || resend)) {
     if (typeof transport.submit !== 'function' || !evidence.fence) throw taskError('conditional submission is unavailable');
-    await transport.submit({ ...request, fence: evidence.fence });
+    await transport.submit({ ...request, fence: evidence.fence, ...(resend ? { resend: true } : {}) });
     evidence = await transport.observe(request);
   }
   if (evidence?.state !== 'started' || evidence.promptDigest !== taskDigest(prompt)) {
-    throw Object.assign(taskError('request has not started'), { taskState: evidence?.state, notApplied: evidence?.state === 'ready' && evidence.notApplied === true && Boolean(evidence.fence) });
+    throw Object.assign(taskError(evidence?.state === 'accepted' ? 'request was received but its packet read is unproven' : 'request has not started'),
+      { taskState: evidence?.state, notApplied: evidence?.state === 'ready' && evidence.notApplied === true && Boolean(evidence.fence),
+        resendable: evidence?.state === 'accepted' && evidence.resendable === true });
   }
   return validateTaskReceipt({ ...observed, task: {
     ...evidence, schema: 'harness.task-receipt/1', effectKey: input.key,

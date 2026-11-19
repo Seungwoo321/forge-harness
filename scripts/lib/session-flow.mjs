@@ -385,8 +385,11 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters, re
         const value = await adapters.session.verify(input);
         // Composer retries spend the verification budget; pre-input retries spend the failed execution-attempt budget.
         const pendingComposer = value?.verify?.exactPendingComposer === true && input.verificationCount + 1 < policy.retry.maxPerSignature;
-        const preInput = value?.verify?.preInputFailure === true && (input.failedAttemptCount ?? 0) < policy.retry.maxPerSignature;
-        if (!input.reconcileOnly && value?.status === 'not-applied' && value.verify?.nativeRequestAbsent === true && (pendingComposer || preInput)
+        // An idle recipient that received every copy without reading the packet shares the pre-input budget.
+        const unread = value?.verify?.unreadDelivery === true;
+        const preInput = (value?.verify?.preInputFailure === true && value.verify.nativeRequestAbsent === true || unread)
+          && (input.failedAttemptCount ?? 0) < policy.retry.maxPerSignature;
+        if (!input.reconcileOnly && value?.status === 'not-applied' && (pendingComposer && value.verify.nativeRequestAbsent === true || preInput)
           && value.result?.sessionId === recipient.sessionId && value.result.incarnationId === recipient.incarnationId) {
           try { return { status: 'completed', result: validateTaskReceipt(await adapters.session.execute(input), input) }; }
           catch (error) { if (preInput && !pendingComposer) error.code = 'SESSION_DELIVERY_RETRY_FAILED'; throw error; }

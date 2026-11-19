@@ -6,7 +6,7 @@ import { createClaudeTaskTransport } from './claude-task.mjs';
 import { launchedReceiver, observeTask, observeGoalTask, taskPackets, taskDigest } from './session-task.mjs';
 import { submitNativeGoal, classifyNativeGoalDraft, assertNativeGoalReady } from './goal-composer.mjs';
 import { codexComposerMatches, codexComposerWorking, submitCodexComposer } from './codex-composer.mjs';
-import { claudeComposerFaint, claudeComposerMatches, submitClaudeComposer } from './claude-composer.mjs';
+import { claudeComposerEmpty, claudeComposerFaint, claudeComposerMatches, claudeWorking, submitClaudeComposer } from './claude-composer.mjs';
 import { loadManagedLaunch } from './continuity-launch-io.mjs';
 import { effectArgsDigest } from './approvals.mjs';
 import { createOrcaRuntimeRpc } from './orca-runtime-rpc.mjs';
@@ -185,6 +185,8 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     }} : {submitInput: async (request, verifyNative) => {
       const { observed, prompt } = request;
       const target = ['--workspace', observed.workspaceId, '--surface', observed.sessionId];
+      // A resent reference must open a new turn, never join one that may still read the earlier copy.
+      if (request.resend && claudeWorking(await invoke('cmux',['read-screen',...target],observed.cwd))) throw invalid('recipient is still working on an earlier copy');
       const viewport = await cmux(['rpc', 'terminal.viewport', JSON.stringify({workspace_id:observed.workspaceId,surface_id:observed.sessionId})], observed.cwd);
       if (viewport.surface_id !== observed.sessionId || !Number.isSafeInteger(viewport.columns)
         || viewport.columns < 3) throw invalid('packet reference composer viewport is unavailable');
@@ -696,6 +698,18 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
           && input.submission && input.submission.attempted === false && !input.submission.binding) {
           return { status: 'not-applied', result: { sessionId: input.args.recipient.sessionId, incarnationId: input.args.recipient.incarnationId },
             verify: { nativeRequestAbsent: true, preInputFailure: true } };
+        }
+        // Every copy reached an idle recipient without proving the packet read, so the same reference may be resent.
+        if (input.effect === 'session.deliver' && error.taskState === 'accepted' && error.resendable === true && runtime === 'cmux'
+          && input.submission && input.submission.attempted === false && !input.submission.binding) {
+          try {
+            const observed = await inspect(input.args.recipient.sessionId, input.args.recipient.cwd, input.args.recipient.executable);
+            const screen = await invoke('cmux', ['read-screen', '--workspace', observed.workspaceId, '--surface', observed.sessionId], observed.cwd);
+            const replay = claudeComposerEmpty(screen) ? null : await cmux(['rpc','terminal.replay',JSON.stringify({workspace_id:observed.workspaceId,surface_id:observed.sessionId})],observed.cwd);
+            if (observed.incarnationId === input.args.recipient.incarnationId && !claudeWorking(screen) && (claudeComposerEmpty(screen) || replay?.surface_id === observed.sessionId && claudeComposerFaint(replay.render_grid)))
+              return { status: 'not-applied', result: { sessionId: input.args.recipient.sessionId, incarnationId: input.args.recipient.incarnationId },
+                verify: { unreadDelivery: true } };
+          } catch { /* An unreadable recipient never authorizes another input. */ }
         }
         if (input.effect === 'session.deliver' && error.pendingComposer === true) {
           return { status: 'not-applied', result: { sessionId: input.args.recipient.sessionId, incarnationId: input.args.recipient.incarnationId },

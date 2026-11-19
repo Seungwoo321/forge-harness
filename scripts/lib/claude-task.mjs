@@ -8,12 +8,14 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 
 // A packet is proven read when a Read result returns its exact numbered lines, or when a shell command that names
 // the packet path returns its exact content. Truncated, partial or failed output is not proof.
+// Claude stores shell output with trailing newlines stripped.
+const body = packet => packet.content.replace(/\n+$/, '');
 function provePacketReads(part, packets, reads, shells, verified) {
   if (part.is_error || typeof part.content !== 'string') return;
   for (const packet of packets) {
     const numbered = packet.content.split('\n').map((line,index)=>`${index+1}\t${line}`).join('\n');
     if (reads.get(part.tool_use_id) === packet.path && part.content === numbered
-      || shells.get(part.tool_use_id)?.includes(packet.path) && packet.content && part.content.includes(packet.content)) verified.add(packet.path);
+      || shells.get(part.tool_use_id)?.includes(packet.path) && body(packet) && part.content.includes(body(packet))) verified.add(packet.path);
   }
 }
 const recordToolUse = (part, reads, shells) => {
@@ -108,7 +110,8 @@ export function createClaudeTaskTransport({ command, env, submitInput }) {
         outcome = receiptFrom(candidate);
         if (outcome.state === 'started') return outcome;
       }
-      return outcome;
+      // Every copy reached the recipient without proving the packet read; the same reference may be sent again.
+      return request.input.effect === 'session.deliver' ? {...outcome, resendable:true, fence:threadId} : outcome;
       function receiptFrom(user) {
       const index=rows.indexOf(user), descendants=new Set([user.uuid]);
       let activity;
@@ -133,7 +136,9 @@ export function createClaudeTaskTransport({ command, env, submitInput }) {
     async submit(request) {
       if (request.input.effect !== 'session.deliver' || !submitInput || await binding(request.observed) !== request.fence) throw taskError('Claude conditional submission is unavailable');
       return submitInput(request, async () => {
-        if (await binding(request.observed) !== request.fence || (await this.observe(request)).state !== 'ready') throw taskError('Claude readiness changed');
+        const current = await this.observe(request);
+        if (await binding(request.observed) !== request.fence
+          || !(current.state === 'ready' || current.state === 'accepted' && current.resendable === true)) throw taskError('Claude readiness changed');
       });
     },
   };

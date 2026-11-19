@@ -358,6 +358,32 @@ test('an engine delivery the engine never started moves to its verified external
   assert.equal(f.trace.length, 0);
 });
 
+test('a delivery policy change retires an engine plan whose effects never started, but not a started one', async t => {
+  for (const started of [false, true]) await t.test(`started=${started}`, async t => {
+    const f = await fixture(t); await f.both();
+    f.authority.owner = 'external';
+    await f.store.update(f.unit, r => ({ ...r, state: 'Accepted', accepted: { ...f.target, validatedHead: f.target.head, basis: 'review' } }));
+    assert.equal((await f.correct({ ...await f.deliveryRequest(), id: 'to-external', owner: 'external' })).code, 0);
+    const reviewed = await f.read();
+    // A finish that still requested engine delivery planned it and stopped before any effect.
+    await f.store.update(f.unit, r => ({ ...r, state: 'Delivering', accepted: { ...f.target, validatedHead: f.target.head, basis: 'review' },
+      deliveryPlan: { level: 'pr', repo: f.target.repo, branch: f.target.branch }, deliveryStartSeq: 0, deliveryResult: null }));
+    if (started) await createLedgerStore(f.stateRoot).withLock(f.unit, ledger => ledger.append({ event: 'intent', unit: f.unit, seq: 1, key: 'push', effect: 'git.push', args: {} }));
+    const before = await f.read();
+    const file = path.join(f.cwd, 'retire.json');
+    await writeFile(file, JSON.stringify({ id: 'retire-plan', expectedRevision: before.revision, delivery: 'none', reason: 'Delivery was performed externally' }));
+    const result = await f.run(['policy', 'change', f.unit, '--request', file, '--user-input', 'user-correction']);
+    if (started) { assert.notEqual(result.code, 0); assert.deepEqual(await f.read(), before); return; }
+    assert.equal(result.code, 0, JSON.stringify(result));
+    const after = await f.read();
+    assert.equal(after.state, 'SelfGated'); assert.equal(after.accepted, null);
+    assert.equal(after.deliveryPlan, undefined); assert.equal(after.deliveryStartSeq, undefined);
+    assert.deepEqual(after.retiredDeliveryPlans, [{ plan: before.deliveryPlan, policyChange: 'retire-plan' }]);
+    for (const key of ['reviewDecision', 'reviewedHead', 'verdict', 'acceptanceCorrections']) assert.deepEqual(after[key], reviewed[key], key);
+    assert.equal(f.trace.length, 0);
+  });
+});
+
 test('an engine delivery that already started cannot change its owner', async t => {
   const f = await fixture(t); await f.both();
   await createLedgerStore(f.stateRoot).withLock(f.unit, async ledger => {

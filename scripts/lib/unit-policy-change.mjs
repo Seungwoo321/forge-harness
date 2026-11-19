@@ -35,10 +35,13 @@ export async function changeUnitPolicy({ stateRoot, store, unit, request, userIn
           receipt = { ...existing, duplicate: true }; throw duplicate;
         }
         if (record.revision !== request.expectedRevision) throw failure('POLICY_CHANGE_STALE', 'unit revision changed');
-        const states = field === 'retry' ? ['Implementing', 'SelfGated', 'Accepted', 'Stopped'] : ['SelfGated', 'Accepted'];
+        // A delivery plan whose engine effects never started is only a recorded intention; a delivery policy change retires it.
+        const unstartedPlan = field === 'delivery' && record.state === 'Delivering' && record.deliveryPlan && !record.deliveryResult
+          && !entries.some(entry => entry.event === 'intent' && ['git.commit', 'git.push', 'git.integrate', 'pr.create', 'pr.merge'].includes(entry.effect));
+        const states = field === 'retry' ? ['Implementing', 'SelfGated', 'Accepted', 'Stopped'] : ['SelfGated', 'Accepted', ...(unstartedPlan ? ['Delivering'] : [])];
         if (!states.includes(record.state) || ['review', 'ops'].includes(record.kind)
           || field === 'retry' && record.state === 'Stopped' && record.stopReport
-          || record.deliveryPlan || record.deliveryResult || record.sessionFinalization
+          || record.deliveryPlan && !unstartedPlan || record.deliveryResult || record.sessionFinalization
           || (record.stages ?? []).some(stage => attemptsFor(record, stage.name).some(attempt => !attempt.endedAt))) {
           throw failure('INVALID_TRANSITION', 'policy changes require a submitted, undelivered unit with no session finalization');
         }
@@ -67,11 +70,12 @@ export async function changeUnitPolicy({ stateRoot, store, unit, request, userIn
         // A delivery change does not alter the reviewed content: keep the independent review bound to its head and
         // fingerprint so re-acceptance can reuse it. A review policy change invalidates the prior review decision.
         const reviewState = field === 'review' ? { reviewDecision: null, reviewedHead: null, verdict: null } : {};
-        const updated = { ...record, policyOverrides: overrides,
+        const { deliveryPlan: retiredPlan, deliveryStartSeq: _start, ...unplanned } = record;
+        const updated = { ...(unstartedPlan ? { ...unplanned, retiredDeliveryPlans: [...(record.retiredDeliveryPlans ?? []), { plan: retiredPlan, policyChange: request.id }] } : record), policyOverrides: overrides,
           ...(field === 'retry' ? { policySources: { ...record.policySources, 'retry.onExhaustion': 'unit' } } : {}),
           policyChanges: [...(record.policyChanges ?? []), receipt],
           accepted: null, ...reviewState };
-        return record.state === 'Accepted' ? transitionRecord(updated, 'SelfGated') : updated;
+        return ['Accepted', 'Delivering'].includes(record.state) ? transitionRecord(updated, 'SelfGated') : updated;
       });
     });
   } catch (error) { if (error !== duplicate) throw error; }

@@ -10,7 +10,7 @@ import { createUnitStateStore } from './lib/unit-state.mjs';
 import { runUnitCli } from './lib/unit-driver.mjs';
 import { effectArgsDigest } from './lib/approvals.mjs';
 
-async function fixture(t, { overlap = false, outside = false, projection = false, integrateAfterOpen = false, delivered = false, editedMerge = false } = {}) {
+async function fixture(t, { overlap = false, outside = false, projection = false, integrateAfterOpen = false, delivered = false, editedMerge = false, fastForward = false } = {}) {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstream-scope-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const git = (...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -83,6 +83,26 @@ async function fixture(t, { overlap = false, outside = false, projection = false
   await submit('demo', 'scope', scoped, { acceptance: [{ id: 'AC-1', text: 'Source output is correct' }], scopePaths: ['source'] });
   const first = await open('demo', 'implement');
   await writeFile(path.join(cwd, 'source'), 'unit change\n');
+  if (fastForward) {
+    // The unit stays uncommitted while its branch fast-forwards to the approved base.
+    git('checkout', '-q', 'upstream-base');
+    await writeFile(path.join(cwd, 'upstream'), 'approved upstream\n');
+    git('add', 'upstream'); git('commit', '-qm', 'upstream integration');
+    const base = git('rev-parse', 'HEAD'); git('checkout', '-q', branch); git('merge', '-q', '--ff-only', 'upstream-base');
+    const currentHead = git('rev-parse', 'HEAD');
+    assert.equal((await request(['unit', 'stage', 'restart', 'demo', 'implement'], {
+      attempt: first.attempt, inputDigest: first.inputDigest, checkpointHead: originalHead, newHead: currentHead })).code, 0);
+    const reopened = await open('demo', 'implement');
+    await submit('demo', 'implement', reopened, { changedPaths: ['source'], coverage: [{ acceptanceRef: 'AC-1', evidenceHint: 'source test' }] });
+    assert.equal((await call(['unit', 'accept', 'demo'])).code, 20);
+    await start('review-current', 'review');
+    const review = await open('review-current', 'review');
+    await submit('review-current', 'review', review, { reviewedHead: review.head, verdict: 'ship', findings: [] });
+    assert.equal((await call(['unit', 'accept', 'demo'])).code, 1);
+    const before = await store.read('demo');
+    assert.ok(before.findings.some(f => f.kind === 'scope-guard' && f.paths.includes('upstream')));
+    return { cwd, git, core, adapters, call, store, before, base, currentHead, originalHead, observe };
+  }
   if (overlap) await writeFile(path.join(cwd, 'shared'), 'unit overlap\n');
   await submit('demo', 'implement', first, { changedPaths: ['source'], coverage: [{ acceptanceRef: 'AC-1', evidenceHint: 'source test' }] });
   git('add', '.'); git('commit', '-qm', 'unit implementation');
@@ -269,6 +289,18 @@ test('post-delivery attribution requires a real two-parent introduction, not a f
   const f = await fixture(t, { integrateAfterOpen: true, delivered: 'ff' });
   const result = await f.call(['unit', 'scope', 'recheck', 'demo']);
   assert.equal(result.error, 'STAGE_STALE'); assert.deepEqual(await f.store.read('demo'), f.before);
+});
+
+test('an uncommitted unit fast-forwarded to its approved base resolves upstream-only findings against HEAD', async t => {
+  const f = await fixture(t, { fastForward: true });
+  assert.equal(f.git('merge-base', 'HEAD', 'upstream-base'), f.currentHead);
+  assert.notEqual((await f.observe()).tree, f.git('rev-parse', 'HEAD^{tree}'));
+  const result = await f.call(['unit', 'scope', 'recheck', 'demo']);
+  assert.equal(result.code, 0, JSON.stringify(result)); assert.ok(result.recheck.resolved.length);
+  const a = result.recheck.attribution;
+  assert.equal(a.comparisonBase, f.currentHead); assert.equal(a.introduction, null);
+  assert.deepEqual(a.changedPaths, ['source']); assert.ok(a.upstreamPaths.includes('upstream')); assert.ok(!a.unitPaths.includes('upstream'));
+  assert.equal((await f.call(['unit', 'accept', 'demo'])).code, 0);
 });
 
 test('dirty upstream-to-allowed rename retains the original path even when provider and recorded attempt name only destination', async t => {

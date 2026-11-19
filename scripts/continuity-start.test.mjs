@@ -8,7 +8,10 @@ import {createContinuityStore} from './lib/continuity-store.mjs';
 import {createUnitStateStore} from './lib/unit-state.mjs';
 import {startGoalSession} from './lib/continuity-start.mjs';
 import {runUnitCli} from './lib/unit-driver.mjs';
+import {createLedgerStore} from './lib/ledger.mjs';
 import {taskDigest} from './lib/session-task.mjs';
+const hooks = [{eventName:'sessionStart',key:'start',hash:'start-hash',trust:'trusted'},{eventName:'stop',key:'guard',hash:'hash',trust:'trusted'}];
+const preflight = cwd => async () => ({enforcement:{provider:'codex',scope:'account-cwd',cwd,hooks}});
 const hash = value => `sha256:${createHash('sha256').update(value).digest('hex')}`;
 
 test('initial launch binds both packets and a retry observes the same session without relaunch', async t => {
@@ -19,7 +22,7 @@ test('initial launch binds both packets and a retry observes the same session wi
   await goals.create({goal:{id:'g1',objective:'goal',criteria:['done'],remaining:['u1'],status:'active'},policy:{runtime:'orca',provider:'codex',account:'/account',model:'model',effort:'high',argv:['codex']},source:{path:source,digest:hash('goal')}});
   await store.create({schema:'harness.unit/1',unit:'u1',kind:'impl',state:'Scoped',continuity:{goalId:'g1'},policy:{goal:{class:'product-prelaunch'}}});
   let launches = 0, receipt;
-  const session = {async observe(){return {sessionId:'parent',incarnationId:'v1',cwd:root,runtime:'orca'}}, async execute(input){launches++; const identity={sessionId:'child',incarnationId:'v2',cwd:input.args.cwd}; return receipt = {...identity,task:{...identity,schema:'harness.goal-receipt/1',enforcement:{status:'verified',cwd:root,key:'guard',hash:'hash'},effectKey:input.key,promptDigest:taskDigest('prompt'),goalDigest:input.args.goalDigest,goal:{threadId:'thread',status:'active',objective:'prompt'},threadId:'thread',turnId:'turn',activityId:'activity',packets:[{path:input.args.handoffPath,digest:input.args.handoffDigest},{path:input.args.goalPath,digest:input.args.goalDigest}]}}}, async verify(){return {status:'completed',result:receipt}}};
+  const session = {preflight:preflight(root),async observe(){return {sessionId:'parent',incarnationId:'v1',cwd:root,runtime:'orca'}}, async execute(input){launches++; const identity={sessionId:'child',incarnationId:'v2',cwd:input.args.cwd}; return receipt = {...identity,task:{...identity,schema:'harness.goal-receipt/1',enforcement:{status:'verified',cwd:root,key:'guard',hash:'hash',hooks},effectKey:input.key,promptDigest:taskDigest('prompt'),goalDigest:input.args.goalDigest,goal:{threadId:'thread',status:'active',objective:'prompt'},threadId:'thread',turnId:'turn',activityId:'activity',packets:[{path:input.args.handoffPath,digest:input.args.handoffDigest},{path:input.args.goalPath,digest:input.args.goalDigest}]}}}, async verify(){return {status:'completed',result:receipt}}};
   const request = {cwd:root,handoffPath:handoff,handoffDigest:hash(packet),parentRuntime:{sessionId:'parent',incarnationId:'v1',cwd:root}};
   const input = {stateRoot:root,unit:'u1',request,store,adapters:{session,now:()=>new Date().toISOString()}};
   assert.equal((await startGoalSession(input)).status,'completed');
@@ -43,7 +46,7 @@ test('independent review inherits the goal without advancing target ownership', 
  await store.create({schema:'harness.unit/1',unit:'target',kind:'impl',state:'InReview',head:'head',contentFingerprint:'content'});
  await store.create({schema:'harness.unit/1',unit:'review',kind:'review',state:'InReview',targetUnit:'target',continuity:{goalId:'g2'},policy:{goal:{class:'product-prelaunch'}}});
  let args;
- const session={async observe(){return {sessionId:'owner',incarnationId:'owner-1',cwd:root,runtime:'cmux'}},async execute(input){args=input.args;const identity={sessionId:'reviewer',incarnationId:'reviewer-1',cwd:root};return {...identity,task:{...identity,schema:'harness.goal-receipt/1',enforcement:{status:'verified',cwd:root,key:'guard',hash:'hash'},effectKey:input.key,promptDigest:taskDigest('prompt'),goalDigest:input.args.goalDigest,goal:{threadId:'thread',status:'active',objective:'prompt'},threadId:'thread',turnId:'turn',activityId:'activity',packets:['handoff','goal'].map(name=>({path:input.args[`${name}Path`],digest:input.args[`${name}Digest`]}))}}},async verify(){return {status:'unknown'}}};
+ const session={preflight:preflight(root),async observe(){return {sessionId:'owner',incarnationId:'owner-1',cwd:root,runtime:'cmux'}},async execute(input){args=input.args;const identity={sessionId:'reviewer',incarnationId:'reviewer-1',cwd:root};return {...identity,task:{...identity,schema:'harness.goal-receipt/1',enforcement:{status:'verified',cwd:root,key:'guard',hash:'hash',hooks},effectKey:input.key,promptDigest:taskDigest('prompt'),goalDigest:input.args.goalDigest,goal:{threadId:'thread',status:'active',objective:'prompt'},threadId:'thread',turnId:'turn',activityId:'activity',packets:['handoff','goal'].map(name=>({path:input.args[`${name}Path`],digest:input.args[`${name}Digest`]}))}}},async verify(){return {status:'unknown'}}};
  const request={cwd:root,handoffPath:handoff,handoffDigest:hash(packet),parentRuntime:{sessionId:'owner',incarnationId:'owner-1',cwd:root}};
  assert.equal((await startGoalSession({stateRoot:root,unit:'review',request,store,adapters:{session,git:{inspectUnit:async()=>({head:'head',contentFingerprint:'content'})},now:()=>new Date().toISOString()}})).status,'completed');
  assert.equal(args.role,'review');const goal=await goals.read('g2');assert.deepEqual(goal.goal.remaining,['target']);assert.equal(goal.reviews[0].targetUnit,'target');
@@ -74,8 +77,8 @@ test('an uncertain start is re-observed within the call until the receipt verifi
   await goals.create({goal:{id:'g1',objective:'goal',criteria:['done'],remaining:['u1'],status:'active'},policy:{runtime:'orca',provider:'codex',account:'/account',model:'model',effort:'high',argv:['codex']},source:{path:source,digest:hash('goal')}});
   await store.create({schema:'harness.unit/1',unit:'u1',kind:'impl',state:'Scoped',continuity:{goalId:'g1'},policy:{goal:{class:'product-prelaunch'}}});
   let launches = 0, checks = 0, sleeps = 0;
-  const receiptFor = input => { const identity={sessionId:'child',incarnationId:'v2',cwd:input.args.cwd}; return {...identity,task:{...identity,schema:'harness.goal-receipt/1',enforcement:{status:'verified',cwd:root,key:'guard',hash:'hash'},effectKey:input.key,promptDigest:taskDigest('prompt'),goalDigest:input.args.goalDigest,goal:{threadId:'thread',status:'active',objective:'prompt'},threadId:'thread',turnId:'turn',activityId:'activity',packets:[{path:input.args.handoffPath,digest:input.args.handoffDigest},{path:input.args.goalPath,digest:input.args.goalDigest}]}}; };
-  const session = {async observe(){return {sessionId:'parent',incarnationId:'v1',cwd:root,runtime:'orca'}},
+  const receiptFor = input => { const identity={sessionId:'child',incarnationId:'v2',cwd:input.args.cwd}; return {...identity,task:{...identity,schema:'harness.goal-receipt/1',enforcement:{status:'verified',cwd:root,key:'guard',hash:'hash',hooks},effectKey:input.key,promptDigest:taskDigest('prompt'),goalDigest:input.args.goalDigest,goal:{threadId:'thread',status:'active',objective:'prompt'},threadId:'thread',turnId:'turn',activityId:'activity',packets:[{path:input.args.handoffPath,digest:input.args.handoffDigest},{path:input.args.goalPath,digest:input.args.goalDigest}]}}; };
+  const session = {preflight:preflight(root),async observe(){return {sessionId:'parent',incarnationId:'v1',cwd:root,runtime:'orca'}},
     async execute(){ launches++; throw Object.assign(new Error('receipt not yet observable'),{taskState:'accepted'}); },
     async verify(input){ checks++; return checks < 3 ? {status:'unknown'} : {status:'completed',result:receiptFor(input)}; }};
   const request = {cwd:root,handoffPath:handoff,handoffDigest:hash(packet),parentRuntime:{sessionId:'parent',incarnationId:'v1',cwd:root}};
@@ -93,8 +96,8 @@ test('the public session-start command re-observes an uncertain start within one
   await goals.create({goal:{id:'g1',objective:'goal',criteria:['done'],remaining:['u1'],status:'active'},policy:{runtime:'orca',provider:'codex',account:'/account',model:'model',effort:'high',argv:['codex']},source:{path:source,digest:hash('goal')}});
   await store.create({schema:'harness.unit/1',unit:'u1',kind:'impl',state:'Scoped',continuity:{goalId:'g1'},policy:{goal:{class:'product-prelaunch'}}});
   let launches = 0, checks = 0, sleeps = 0;
-  const receiptFor = input => { const identity={sessionId:'child',incarnationId:'v2',cwd:input.args.cwd}; return {...identity,task:{...identity,schema:'harness.goal-receipt/1',enforcement:{status:'verified',cwd:root,key:'guard',hash:'hash'},effectKey:input.key,promptDigest:taskDigest('prompt'),goalDigest:input.args.goalDigest,goal:{threadId:'thread',status:'active',objective:'prompt'},threadId:'thread',turnId:'turn',activityId:'activity',packets:[{path:input.args.handoffPath,digest:input.args.handoffDigest},{path:input.args.goalPath,digest:input.args.goalDigest}]}}; };
-  const session = {async observe(){return {sessionId:'parent',incarnationId:'v1',cwd:root,runtime:'orca'}},
+  const receiptFor = input => { const identity={sessionId:'child',incarnationId:'v2',cwd:input.args.cwd}; return {...identity,task:{...identity,schema:'harness.goal-receipt/1',enforcement:{status:'verified',cwd:root,key:'guard',hash:'hash',hooks},effectKey:input.key,promptDigest:taskDigest('prompt'),goalDigest:input.args.goalDigest,goal:{threadId:'thread',status:'active',objective:'prompt'},threadId:'thread',turnId:'turn',activityId:'activity',packets:[{path:input.args.handoffPath,digest:input.args.handoffDigest},{path:input.args.goalPath,digest:input.args.goalDigest}]}}; };
+  const session = {preflight:preflight(root),async observe(){return {sessionId:'parent',incarnationId:'v1',cwd:root,runtime:'orca'}},
     async execute(){ launches++; throw Object.assign(new Error('receipt not yet observable'),{taskState:'accepted'}); },
     async verify(input){ checks++; return checks < 3 ? {status:'unknown'} : {status:'completed',result:receiptFor(input)}; }};
   const request = {cwd:root,handoffPath:handoff,handoffDigest:hash(packet),parentRuntime:{sessionId:'parent',incarnationId:'v1',cwd:root}};
@@ -111,4 +114,30 @@ test('starting a session for an unbound review unit names the missing goalId', a
   const store = createUnitStateStore(root);
   await store.create({schema:'harness.unit/1',unit:'r1',kind:'review',state:'InReview',targetUnit:'u1',policy:{goal:{class:'product-prelaunch'}}});
   await assert.rejects(startGoalSession({stateRoot:root,unit:'r1',request:{},store,adapters:{}}),/goalId/);
+});
+
+test('an untrusted or modified Codex hook refuses the start before any intent is recorded, and a trusted one is bound into it', async t => {
+  for (const trusted of [false, true]) await t.test(trusted ? 'trusted' : 'modified', async t => {
+    const root = await mkdtemp(path.join(tmpdir(),'continuity-start-trust-')); t.after(()=>rm(root,{recursive:true,force:true}));
+    const source = path.join(root,'goal.md'); await writeFile(source,'goal');
+    const handoff = path.join(root,'handoff.md'); const packet = ['목표: goal','수용 기준: criteria','작업관리: unit','결정: policy','변경: none','검증: none','남은 일·위험: work','다음 단위 첫 행동: begin'].join('\n'); await writeFile(handoff,packet);
+    const goals = createContinuityStore(root), store = createUnitStateStore(root);
+    await goals.create({goal:{id:'g1',objective:'goal',criteria:['done'],remaining:['u1'],status:'active'},policy:{runtime:'orca',provider:'codex',account:'/account',model:'model',effort:'high',argv:['codex']},source:{path:source,digest:hash('goal')}});
+    await store.create({schema:'harness.unit/1',unit:'u1',kind:'impl',state:'Scoped',continuity:{goalId:'g1'},policy:{goal:{class:'product-prelaunch'}}});
+    let launches = 0, launched;
+    const session = {async preflight(){ if (!trusted) throw Object.assign(new Error('required plugin hooks are not trusted before launch: stop hook enabled=true async=false trustStatus=modified'),{code:'SESSION_HOOK_UNTRUSTED'}); return preflight(root)(); },
+      async observe(){return {sessionId:'parent',incarnationId:'v1',cwd:root,runtime:'orca'}},
+      async execute(input){ launches++; launched = input.args; throw new Error('receipt not yet observable'); }, async verify(){return {status:'unknown'}}};
+    const request = {cwd:root,handoffPath:handoff,handoffDigest:hash(packet),parentRuntime:{sessionId:'parent',incarnationId:'v1',cwd:root},waitSeconds:0};
+    const run = startGoalSession({stateRoot:root,unit:'u1',request,store,adapters:{session,now:()=>new Date().toISOString()}});
+    const intents = async () => (await createLedgerStore(root).withLock('u1',ledger=>ledger.read())).filter(row=>row.event==='intent');
+    if (!trusted) {
+      await assert.rejects(run,{code:'SESSION_HOOK_UNTRUSTED',message:/trustStatus=modified/});
+      assert.equal(launches,0); assert.deepEqual(await intents(),[]);
+    } else {
+      assert.equal((await run).status,'uncertain');
+      assert.equal(launches,1); assert.deepEqual(launched.enforcement,{provider:'codex',scope:'account-cwd',cwd:root,hooks});
+      assert.deepEqual((await intents())[0].args.enforcement,launched.enforcement);
+    }
+  });
 });

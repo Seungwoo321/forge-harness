@@ -73,7 +73,9 @@ async function startLocked({stateRoot,unit,request,store,adapters,record,goal,le
   const previousBootstrap = entries?.find(item => item.unit === unit && (item.attempt ?? 1) === attempt);
   const goalSnapshot = boundArgs ? {path:boundArgs.goalPath,digest:boundArgs.goalDigest} : previousBootstrap ? {path:previousBootstrap.goalPath,digest:previousBootstrap.goalDigest} : await snapshotGoal(stateRoot, goal);
   const args = {unit,role:review ? 'review' : 'implementation',attempt,cwd:request.cwd,handoffPath:request.handoffPath,handoffDigest:request.handoffDigest,goalPath:goalSnapshot.path,goalDigest:goalSnapshot.digest,...(adoptedTarget ? {targetDigest:effectArgsDigest(adoptedTarget)} : {})};
-  if (boundArgs && effectArgsDigest(boundArgs) !== effectArgsDigest(args)) throw Object.assign(new Error('session start requires its original complete arguments'),{code:'EFFECT_UNCERTAIN'});
+  // The pre-launch hook observation is not request-derived: compare the remaining arguments and keep a recorded binding.
+  const {enforcement:_bound, ...boundBase} = boundArgs ?? {};
+  if (boundArgs && effectArgsDigest(boundBase) !== effectArgsDigest(args)) throw Object.assign(new Error('session start requires its original complete arguments'),{code:'EFFECT_UNCERTAIN'});
   await loadManagedLaunch(args);
   if (boundArgs) {
     const original = JSON.parse(await readFile(goalSnapshot.path,'utf8'));
@@ -108,7 +110,13 @@ async function startLocked({stateRoot,unit,request,store,adapters,record,goal,le
     // (Claude) records no enforcement and relies on the host-enabled, trusted Stop hook.
     return validateTaskReceipt(result,input,{requireEnforcement:result?.task?.enforcement !== undefined});
   };
-  const start = () => executeEffect({unit,effect:'session.start',args,policy,context:{explicitUserInstruction:true,productOwned:true},store:{withLock:async (_unit,action)=>action(ledger)},adapter:{
+  // Trust before launch: a new intent binds the hooks observed now; an existing intent keeps its original arguments.
+  let launchArgs = priorIntent ? priorIntent.args : args;
+  if (!priorIntent && typeof adapters.session.preflight === 'function') {
+    const checked = await boundary(() => adapters.session.preflight({effect:'session.start',args}));
+    if (checked?.enforcement) launchArgs = {...args,enforcement:checked.enforcement};
+  }
+  const start = () => executeEffect({unit,effect:'session.start',args:launchArgs,policy,context:{explicitUserInstruction:true,productOwned:true},store:{withLock:async (_unit,action)=>action(ledger)},adapter:{
     now:adapters.now,
     async execute(input) { return boundary(async () => validate(await adapters.session.execute(input), input)); },
     async verify(input) { const observed = await boundary(() => adapters.session.verify(input)); if (observed.status === 'completed') { try { validate(observed.result,input); } catch (error) { return {status:'unknown',verify:{code:'RECEIPT_INVALID',message:error.message}}; } } return observed; },
@@ -139,7 +147,7 @@ async function startLocked({stateRoot,unit,request,store,adapters,record,goal,le
   };
   if (review) await boundary(async () => {});
   const result = await perform();
-  return {result:{...result,intent:{seq:result.seq,key:result.key,argsDigest:effectArgsDigest(args)}},goal:registeredGoal};
+  return {result:{...result,intent:{seq:result.seq,key:result.key,argsDigest:effectArgsDigest(launchArgs)}},goal:registeredGoal};
 }
 
 async function verifyStoppedClosure({record,goal,rows,unit,attempt,adapters}) {

@@ -66,6 +66,8 @@ function registerSessionRunner(runner) {
     observe: input => runner.observe(input),
     execute: input => runner.execute(input),
     verify: input => runner.verify(input),
+    // Optional pre-intent check; a runner without it records no pre-launch hook binding.
+    ...(typeof runner.preflight === 'function' ? { preflight: input => runner.preflight(input) } : {}),
   });
 }
 

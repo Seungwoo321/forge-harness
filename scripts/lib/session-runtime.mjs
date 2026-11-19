@@ -6,7 +6,7 @@ import { createClaudeTaskTransport } from './claude-task.mjs';
 import { launchedReceiver, observeTask, observeGoalTask, taskPackets, taskDigest } from './session-task.mjs';
 import { submitNativeGoal, classifyNativeGoalDraft, assertNativeGoalReady } from './goal-composer.mjs';
 import { codexComposerMatches, codexComposerWorking, submitCodexComposer } from './codex-composer.mjs';
-import { claudeComposerMatches, submitClaudeComposer } from './claude-composer.mjs';
+import { claudeComposerFaint, claudeComposerMatches, submitClaudeComposer } from './claude-composer.mjs';
 import { loadManagedLaunch } from './continuity-launch-io.mjs';
 import { effectArgsDigest } from './approvals.mjs';
 import { createOrcaRuntimeRpc } from './orca-runtime-rpc.mjs';
@@ -190,6 +190,10 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
         || viewport.columns < 3) throw invalid('packet reference composer viewport is unavailable');
       await submitClaudeComposer({prompt,
         read: () => invoke('cmux',['read-screen',...target],observed.cwd),
+        placeholder: async () => {
+          const replay = await cmux(['rpc','terminal.replay',JSON.stringify({workspace_id:observed.workspaceId,surface_id:observed.sessionId})],observed.cwd);
+          return replay?.surface_id === observed.sessionId && claudeComposerFaint(replay.render_grid);
+        },
         paste: text => invoke('cmux',['rpc','surface.send_text',JSON.stringify({workspace_id:observed.workspaceId,surface_id:observed.sessionId,text})],observed.cwd),
         enter: () => invoke('cmux',['send-key',...target,'Return'],observed.cwd),
         verify: async () => {

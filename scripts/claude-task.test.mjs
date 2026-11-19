@@ -121,3 +121,21 @@ test('Claude legacy recovery needs positive empty native history; missing, queue
   const result=await transport.observeGoal(request);assert.equal(result.state,'unknown');assert.equal(result.notApplied,false);
  }
 });
+
+test('a delivery packet read through a shell command that names it and returns its exact content is proven',async t=>{
+ const root=await mkdtemp(path.join(tmpdir(),'claude-shell-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const id='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', project=path.join(root,'projects','project');await mkdir(project,{recursive:true});
+ const file=path.join(project,`${id}.jsonl`), content='# Review result\nverdict: ship\nfindings: none\n';
+ const packet={path:'/state/result.md',digest:taskDigest(content),content},prompt=`Read ${packet.path} (${packet.digest}); follow its referenced handoffs.`;
+ const transport=createClaudeTaskTransport({command:async()=>({exitCode:0,stdout:`claude --session-id ${id}`}),env:{CLAUDE_CONFIG_DIR:root}});
+ const request={observed:{pid:1,cwd:'/work'},input:{effect:'session.deliver',key:'key',args:{cwd:'/work'}},prompt,packets:[packet]};
+ const user={type:'user',sessionId:id,cwd:'/work',uuid:'user-1',message:{content:prompt}};
+ const call=command=>({type:'assistant',sessionId:id,uuid:'assistant-1',parentUuid:'user-1',message:{content:[{type:'tool_use',name:'Bash',id:'shell-1',input:{command}}]}});
+ const result=(output,extra={})=>({type:'user',sessionId:id,uuid:'result-1',parentUuid:'assistant-1',message:{content:[{type:'tool_result',tool_use_id:'shell-1',content:output,...extra}]}});
+ const observe=async rows=>{await writeFile(file,rows.map(JSON.stringify).join('\n')+'\n');return (await transport.observe(request)).state;};
+ const output=`${content}\n${packet.digest.slice(7)}  ${packet.path}`;
+ assert.equal(await observe([user,call(`F=${packet.path}; cat "$F"; shasum -a 256 "$F"`),result(output)]),'started');
+ assert.equal(await observe([user,call('cat /state/other.md'),result(output)]),'accepted');
+ assert.equal(await observe([user,call(`cat ${packet.path}`),result(content.slice(0,20))]),'accepted');
+ assert.equal(await observe([user,call(`cat ${packet.path}`),result(output,{is_error:true})]),'accepted');
+});

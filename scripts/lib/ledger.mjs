@@ -126,6 +126,15 @@ function executionFailure(error, effect) {
   };
 }
 
+// A failed verified re-execution is recorded as a verification, so it counts with the original execution errors.
+// A verified user retry authorization starts a fresh budget for the same unsubmitted intent.
+export function failedDeliveryAttempts(records, intent) {
+  const same = row => row.seq === intent.seq && row.key === intent.key;
+  const since = records.findLastIndex(row => same(row) && row.event === 'delivery-retry-authorization');
+  return records.slice(since + 1).filter(row => same(row) && (row.event === 'execution-error'
+    || row.event === 'verification' && row.verify?.code === 'SESSION_DELIVERY_RETRY_FAILED')).length;
+}
+
 export async function executeEffect({
   unit,
   effect,
@@ -292,9 +301,7 @@ export async function executeEffect({
       if (!retry && (!result || !closedPr)) {
         const verification = await verify({ effect, args: priorIntent.args, key: priorIntent.key, seq: priorIntent.seq,
           verificationCount: records.filter(row => row.event === 'verification' && row.seq === priorIntent.seq).length,
-          // A failed verified re-execution is recorded as a verification, so it counts with the original execution errors.
-          failedAttemptCount: records.filter(row => row.seq === priorIntent.seq && (row.event === 'execution-error'
-            || row.event === 'verification' && row.verify?.code === 'SESSION_DELIVERY_RETRY_FAILED')).length });
+          failedAttemptCount: failedDeliveryAttempts(records, priorIntent) });
         if (verification?.status === 'completed' && effect !== 'pr.create'
           || effect === 'pr.create' && matchingOpenPr(verification, priorIntent.args)) {
           if (!Object.hasOwn(verification, 'result')) throw errorWithCode('LEDGER_VERIFY_INVALID', 'completed verification requires a result');

@@ -7,10 +7,10 @@ import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { authorizeDelivery } from './delivery.mjs';
 import { assertDeliveryObligations, externalDeliveryObligations, verifyExternalDeliveryBoundary } from './acceptance-correction.mjs';
-import { executeEffect, createLedgerStore, sessionEffectRetired } from './ledger.mjs';
+import { executeEffect, createLedgerStore, failedDeliveryAttempts, sessionEffectRetired } from './ledger.mjs';
 import { formatUnitResult, prepareSuccessor, validateHandoffPacket, writeUnitResult } from './report.mjs';
 import { prepareEffect, resolvePolicy } from './policy.mjs';
-import { effectArgsDigest } from './approvals.mjs';
+import { effectArgsDigest, verifyApprovalInput } from './approvals.mjs';
 import { taskPackets, validateTaskReceipt } from './session-task.mjs';
 import { commitTerminalClose, createProjectionQueue, projectTerminalUnit } from './tracker.mjs';
 import { executeDelivery } from './delivery-flow.mjs';
@@ -320,7 +320,24 @@ export async function finishSessionUnit({
   return prepareFinalization(started.result, started);
 }
 
-export async function finalizeSessionUnit({ stateRoot, store, unit, adapters, reconcileOnly = false }) {
+// Reopens the pre-input retry budget only for the exact unsubmitted delivery intent, under verified user input.
+async function authorizeDeliveryRetry({ ledger, unit, deliveryArgs, policy, adapters, userInputRef }) {
+  const refuse = message => { throw Object.assign(new Error(message), { code: 'INVALID_TRANSITION' }); };
+  if (typeof userInputRef !== 'string' || !userInputRef.trim()) refuse('delivery retry requires --user-input');
+  const key = prepareEffect('session.deliver', deliveryArgs).key;
+  await ledger.withLock(unit, async entries => {
+    const rows = await entries.read();
+    const intent = rows.findLast(row => row.event === 'intent' && row.effect === 'session.deliver' && row.key === key);
+    if (!intent || rows.some(row => row.seq === intent.seq && row.key === key && ['result', 'submission'].includes(row.event)))
+      refuse('only an unresolved delivery with no submitted input can be retried');
+    const failedAttempts = failedDeliveryAttempts(rows, intent);
+    if (failedAttempts < policy.retry.maxPerSignature) return;
+    await verifyApprovalInput(adapters.provider, { effect: 'unit.finalize.retry-delivery', unit, key, seq: intent.seq, failedAttempts, userInputRef });
+    await entries.append({ event: 'delivery-retry-authorization', unit, seq: intent.seq, key, failedAttempts, userInputRef, authorized_at: adapters.now() });
+  });
+}
+
+export async function finalizeSessionUnit({ stateRoot, store, unit, adapters, reconcileOnly = false, retryDelivery }) {
   let record = await store.read(unit);
   const plan = record?.sessionFinalization;
   if (!plan || !['Delivered', 'Closed', 'Stopped'].includes(record.state)) throw Object.assign(new Error('no durable session finalization plan'), { code: 'INVALID_TRANSITION' });
@@ -358,6 +375,7 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters, re
     catch { return {code:3,state:record.state,finalizePending:true,summary:'Successor packet receipt is invalid'}; }
     delivered = {status:'reconciled',key:intent.key,result:observed.result,seq:intent.seq};
   } else {
+    if (retryDelivery !== undefined) await authorizeDeliveryRetry({ ledger, unit, deliveryArgs, policy, adapters, userInputRef: retryDelivery });
     delivered = await executeEffect({ unit, effect: 'session.deliver', args: deliveryArgs, policy,
     context: { explicitUserInstruction: true, productOwned: true }, store: ledger,
     adapter: { now: adapters.now, fence:action=>fenceGoalDelivery({continuityStore:createContinuityStore(stateRoot),unitStore:store,unit,plan,action}),

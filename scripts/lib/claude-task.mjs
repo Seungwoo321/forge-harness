@@ -8,12 +8,14 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 
 // A packet is proven read when a Read result returns its exact numbered lines, or when a shell command that names
 // the packet path returns its exact content. Truncated, partial or failed output is not proof.
+// Claude stores shell output with trailing newlines stripped.
+const body = packet => packet.content.replace(/\n+$/, '');
 function provePacketReads(part, packets, reads, shells, verified) {
   if (part.is_error || typeof part.content !== 'string') return;
   for (const packet of packets) {
     const numbered = packet.content.split('\n').map((line,index)=>`${index+1}\t${line}`).join('\n');
     if (reads.get(part.tool_use_id) === packet.path && part.content === numbered
-      || shells.get(part.tool_use_id)?.includes(packet.path) && packet.content && part.content.includes(packet.content)) verified.add(packet.path);
+      || shells.get(part.tool_use_id)?.includes(packet.path) && body(packet) && part.content.includes(body(packet))) verified.add(packet.path);
   }
 }
 const recordToolUse = (part, reads, shells) => {

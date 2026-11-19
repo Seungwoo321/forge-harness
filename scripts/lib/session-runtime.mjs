@@ -3,7 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { createCodexTaskTransport } from './codex-task.mjs';
 import { createClaudeTaskTransport } from './claude-task.mjs';
-import { observeTask, observeGoalTask, taskPackets, taskDigest } from './session-task.mjs';
+import { launchedReceiver, observeTask, observeGoalTask, taskPackets, taskDigest } from './session-task.mjs';
 import { submitNativeGoal, classifyNativeGoalDraft, assertNativeGoalReady } from './goal-composer.mjs';
 import { codexComposerMatches, codexComposerWorking, submitCodexComposer } from './codex-composer.mjs';
 import { claudeComposerMatches, submitClaudeComposer } from './claude-composer.mjs';
@@ -288,7 +288,9 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     if (!observed.executable
       || path.basename(observed.executable) !== path.basename(argv[0])) throw invalid('configured worker executable has not started');
     const transport = transportFor(argv[0], env);
-    const result = goalPrompt ? await observeGoalTask({ transport, observed, input, prompt, packets, submission, submit: async (request, beforeWrite) => {
+    const sessionFlag = path.basename(argv[0]) === 'claude' ? argv.indexOf('--session-id') : -1;
+    const launchThreadId = sessionFlag >= 0 ? argv[sessionFlag + 1]?.toLowerCase() : undefined;
+    const result = goalPrompt ? await observeGoalTask({ transport, observed, input, prompt, packets, submission, launchThreadId, submit: async (request, beforeWrite) => {
       if (request.preTurn) {
         if (!['cmux','orca'].includes(runtime) || path.basename(argv[0]) !== 'codex') throw invalid('full fresh native receiver observation is unavailable');
         for (let index = 1; index < argv.length; index += 1) {
@@ -334,7 +336,7 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
           if (JSON.stringify(await inspect(observed.sessionId,observed.cwd,observed.executable)) !== JSON.stringify(observed)) throw invalid('worker changed before goal input');
           const current = await transport.observeGoal({observed,input,prompt,packets});
           const available = request.preTurn ? current.state === 'unmaterialized' && JSON.stringify(current.proof) === JSON.stringify(request.preTurn)
-            : current.state === 'absent' && (!input.submission?.recovery || current.notApplied === true);
+            : current.state === 'absent' && (!input.submission?.recovery || current.notApplied === true || launchedReceiver(current, request.threadId, launchThreadId));
           if (!available || (current.threadId ?? current.fence) !== request.threadId) throw invalid('native goal or pending input is already present or unverified');
         },
       });

@@ -552,16 +552,23 @@ test('native thread drift after submission cannot satisfy the original durable b
   submit:async(_request,mark)=>{await mark();submitted=true;}}),/owner or packets changed/);
 });
 
-test('only a fresh launch may use missing Claude startup history; positive pending evidence never permits input',async()=>{
+test('missing Claude startup history permits input only on a fresh launch or the exact unsubmitted launched receiver',async()=>{
  const goalInput={...input,args:{...input.args,goalPath:packets[0].path,goalDigest:packets[0].digest}};
- for(const recovery of [false,true])for(const state of ['unknown','accepted','absent']) {
+ for(const recovery of [false,true])for(const state of ['unknown','accepted','absent'])for(const launchThreadId of [undefined,'thread','other']) {
   let submits=0;
   const submission={recovery,async mark(binding){this.attempted=true;this.binding=binding;}};
   const transport={observeGoal:async()=>({state,threadId:'thread',fence:'thread',notApplied:false,freshOnly:true})};
-  await assert.rejects(observeGoalTask({transport,observed,input:goalInput,prompt:'finish',packets,submission,
+  await assert.rejects(observeGoalTask({transport,observed,input:goalInput,prompt:'finish',packets,submission,launchThreadId,
    submit:async(_request,mark)=>{await mark();submits++;}}));
-  assert.equal(submits,state==='absent'&&!recovery?1:0);
+  assert.equal(submits,state==='absent'&&(!recovery||launchThreadId==='thread')?1:0,`${recovery} ${state} ${launchThreadId}`);
  }
+ // A prior submission row always blocks replay, even on the launched receiver.
+ let submits=0;
+ const prior={recovery:true,attempted:true,binding:{},async mark(){submits++;}};
+ const transport={observeGoal:async()=>({state:'absent',threadId:'thread',fence:'thread',notApplied:false,freshOnly:true})};
+ await assert.rejects(observeGoalTask({transport,observed,input:goalInput,prompt:'finish',packets,submission:prior,launchThreadId:'thread',
+  submit:async(_request,mark)=>{await mark();submits++;}}));
+ assert.equal(submits,0);
 });
 
 const expandedFooterScreen = text => `› ${text.replaceAll('\n','\n  ')}\n\n  GPT-6.1-Sol high · ~/work/product · fix/change · Ready ·…  ⚠ 1 warning · f2 to view\n`;

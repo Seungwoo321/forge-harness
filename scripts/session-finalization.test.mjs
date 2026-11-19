@@ -21,7 +21,7 @@ async function setup(t, mode = 'success') {
   const recipient = { sessionId: 'existing-parent', incarnationId: 'recipient-generation', cwd: root, executable: 'worker' };
   const events = [];
   let closed = false;
-  let accepted = !['queued', 'prefilled', 'delivery-failed'].includes(mode);
+  let accepted = !['queued', 'prefilled', 'delivery-failed', 'pre-input', 'pre-input-stuck'].includes(mode);
   let deliveryAttempts = 0;
   const receipt = input => ({ ...recipient, task: { schema: 'harness.task-receipt/1', effectKey: input.key,
     sessionId: recipient.sessionId, incarnationId: recipient.incarnationId, cwd: root, promptDigest: taskDigest('native request'),
@@ -36,6 +36,8 @@ async function setup(t, mode = 'success') {
       if (input.effect === 'session.deliver') {
         deliveryAttempts += 1;
         if (mode === 'prefilled' && deliveryAttempts === 2) accepted = true;
+        if (mode === 'pre-input' && deliveryAttempts === 2) accepted = true;
+        if (['pre-input', 'pre-input-stuck'].includes(mode) && !accepted) throw Object.assign(Error('packet reference does not fit the exact composer viewport'), { code: 'SESSION_OBSERVATION_INVALID' });
         if (!accepted) throw Error('queued, not yet consumed');
         const result = receipt(input);
         if (mode === 'bad-receipt') result.task.incarnationId = 'stale';
@@ -54,6 +56,9 @@ async function setup(t, mode = 'success') {
       if (input.effect === 'session.deliver' && ['prefilled', 'delivery-failed'].includes(mode)) return {
         status: 'not-applied', result: recipient, verify: { nativeRequestAbsent: true, exactPendingComposer: true },
       };
+      if (input.effect === 'session.deliver' && ['pre-input', 'pre-input-stuck'].includes(mode)) return {
+        status: 'not-applied', result: recipient, verify: { nativeRequestAbsent: true, preInputFailure: true },
+      };
       if (input.effect === 'session.close' && closed) return { status: 'completed', result: { closed: true, sessionId: owner.sessionId, incarnationId: owner.incarnationId } };
       if (input.effect === 'session.close' && mode === 'close-failed') return { status: 'not-applied', result: { closed: false, sessionId: owner.sessionId, incarnationId: owner.incarnationId } };
       return { status: 'unknown' };
@@ -67,7 +72,7 @@ async function setup(t, mode = 'success') {
     const output = await runUnitCli(['unit', command, 'finished', ...(command === 'finish' ? ['--request', request] : [])], { stateRoot: root, adapters });
     return JSON.parse(output.slice(output.lastIndexOf('RESULT ') + 7));
   };
-  return { root, store, events, run, adapters, accept: () => { accepted = true; }, ledger: () => createLedgerStore(root).withLock('finished', ledger => ledger.read()) };
+  return { root, store, events, run, adapters, accept: () => { accepted = true; }, deliveries: () => deliveryAttempts, ledger: () => createLedgerStore(root).withLock('finished', ledger => ledger.read()) };
 }
 
 test('public finish persists existing-parent return; finalizer delivers and closes the exact owner', async t => {
@@ -93,6 +98,27 @@ for (const mode of ['bad-receipt', 'queued', 'identity-drift', 'close-failed']) 
     if (['bad-receipt', 'queued'].includes(mode)) assert.equal(f.events.includes('session.close'), false);
   });
 }
+
+test('a delivery that failed before any input retries the same intent once the recipient is Ready', async t => {
+  const f = await setup(t, 'pre-input');
+  await f.run('finish');
+  assert.equal((await f.run('finalize')).code, 3);
+  assert.equal(f.deliveries(), 1);
+  assert.ok((await f.ledger()).some(row => row.event === 'execution-error'));
+  assert.equal((await f.run('finalize')).code, 0);
+  assert.equal(f.deliveries(), 2);
+  assert.equal((await f.store.read('finished')).state, 'Closed');
+  assert.equal((await f.ledger()).filter(row => row.event === 'intent' && row.effect === 'session.deliver').length, 1);
+});
+
+test('repeated pre-input failures stop at the retry budget', async t => {
+  const f = await setup(t, 'pre-input-stuck');
+  await f.run('finish');
+  for (let i = 0; i < 4; i += 1) assert.equal((await f.run('finalize')).code, 3);
+  assert.equal(f.deliveries(), 2);
+  assert.ok((await f.ledger()).some(row => row.event === 'verification' && row.verify?.code === 'SESSION_DELIVERY_RETRY_FAILED'));
+  assert.equal((await f.store.read('finished')).state, 'Delivered');
+});
 
 test('queued result retry observes consumption without another submission', async t => {
   const f = await setup(t, 'queued');

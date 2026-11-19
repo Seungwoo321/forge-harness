@@ -365,10 +365,13 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters, re
       async verify(input) {
         await observeCustody();
         const value = await adapters.session.verify(input);
-        if (!input.reconcileOnly && value?.status === 'not-applied' && value.verify?.nativeRequestAbsent === true && value.verify.exactPendingComposer === true
-          && value.result?.sessionId === recipient.sessionId && value.result.incarnationId === recipient.incarnationId
-          && input.verificationCount + 1 < policy.retry.maxPerSignature) {
-          return { status: 'completed', result: validateTaskReceipt(await adapters.session.execute(input), input) };
+        // Composer retries spend the verification budget; pre-input retries spend the failed execution-attempt budget.
+        const pendingComposer = value?.verify?.exactPendingComposer === true && input.verificationCount + 1 < policy.retry.maxPerSignature;
+        const preInput = value?.verify?.preInputFailure === true && (input.failedAttemptCount ?? 0) < policy.retry.maxPerSignature;
+        if (!input.reconcileOnly && value?.status === 'not-applied' && value.verify?.nativeRequestAbsent === true && (pendingComposer || preInput)
+          && value.result?.sessionId === recipient.sessionId && value.result.incarnationId === recipient.incarnationId) {
+          try { return { status: 'completed', result: validateTaskReceipt(await adapters.session.execute(input), input) }; }
+          catch (error) { if (preInput && !pendingComposer) error.code = 'SESSION_DELIVERY_RETRY_FAILED'; throw error; }
         }
         if (value?.status === 'completed') validateTaskReceipt(value.result, input);
         return value;

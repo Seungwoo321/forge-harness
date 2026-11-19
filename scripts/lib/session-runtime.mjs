@@ -685,6 +685,13 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
           if(await exactPendingGoal(input))return {status:'unknown',verify:{code:'SESSION_TASK_UNVERIFIED',
             message:'native goal is pending exact verified Return',nativeRequestAbsent:true,exactPendingComposer:true}};
         } catch { /* A failed observation never authorizes another input. */ }
+        // A delivery whose transport failed before any input has no submission row. A Ready recipient without the
+        // request is then proven not applied, so the bounded finalize retry may execute the same intent again.
+        if (input.effect === 'session.deliver' && error.notApplied === true && error.pendingComposer !== true
+          && input.submission && input.submission.attempted === false && !input.submission.binding) {
+          return { status: 'not-applied', result: { sessionId: input.args.recipient.sessionId, incarnationId: input.args.recipient.incarnationId },
+            verify: { nativeRequestAbsent: true, preInputFailure: true } };
+        }
         if (input.effect === 'session.deliver' && error.pendingComposer === true) {
           return { status: 'not-applied', result: { sessionId: input.args.recipient.sessionId, incarnationId: input.args.recipient.incarnationId },
             verify: { nativeRequestAbsent: true, exactPendingComposer: true } };

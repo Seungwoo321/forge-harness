@@ -291,7 +291,10 @@ export async function executeEffect({
       }
       if (!retry && (!result || !closedPr)) {
         const verification = await verify({ effect, args: priorIntent.args, key: priorIntent.key, seq: priorIntent.seq,
-          verificationCount: records.filter(row => row.event === 'verification' && row.seq === priorIntent.seq).length });
+          verificationCount: records.filter(row => row.event === 'verification' && row.seq === priorIntent.seq).length,
+          // A failed verified re-execution is recorded as a verification, so it counts with the original execution errors.
+          failedAttemptCount: records.filter(row => row.seq === priorIntent.seq && (row.event === 'execution-error'
+            || row.event === 'verification' && row.verify?.code === 'SESSION_DELIVERY_RETRY_FAILED')).length });
         if (verification?.status === 'completed' && effect !== 'pr.create'
           || effect === 'pr.create' && matchingOpenPr(verification, priorIntent.args)) {
           if (!Object.hasOwn(verification, 'result')) throw errorWithCode('LEDGER_VERIFY_INVALID', 'completed verification requires a result');

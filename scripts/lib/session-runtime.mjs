@@ -186,7 +186,8 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       const { observed, prompt } = request;
       const target = ['--workspace', observed.workspaceId, '--surface', observed.sessionId];
       const viewport = await cmux(['rpc', 'terminal.viewport', JSON.stringify({workspace_id:observed.workspaceId,surface_id:observed.sessionId})], observed.cwd);
-      if (viewport.surface_id !== observed.sessionId || !Number.isSafeInteger(viewport.columns) || Buffer.byteLength(prompt,'utf8') + 2 > viewport.columns) throw invalid('packet reference does not fit the exact composer viewport');
+      if (viewport.surface_id !== observed.sessionId || !Number.isSafeInteger(viewport.columns)
+        || viewport.columns < 3) throw invalid('packet reference composer viewport is unavailable');
       await submitClaudeComposer({prompt,
         read: () => invoke('cmux',['read-screen',...target],observed.cwd),
         paste: text => invoke('cmux',['rpc','surface.send_text',JSON.stringify({workspace_id:observed.workspaceId,surface_id:observed.sessionId,text})],observed.cwd),

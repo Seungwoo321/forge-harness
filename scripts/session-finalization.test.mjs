@@ -68,8 +68,8 @@ async function setup(t, mode = 'success') {
   const request = path.join(root, 'request.json');
   await writeFile(request, JSON.stringify({ goalComplete: true, parentRuntime: owner, returnTo: recipient,
     resultFields: { title: 'Completed work', objective: 'repair', acceptance: 'all pass', tracking: 'none', decision: 'return to owner', changed: 'source', verification: 'tests', remainingRisk: 'none', nextFirstAction: 'resume' } }));
-  const run = async command => {
-    const output = await runUnitCli(['unit', command, 'finished', ...(command === 'finish' ? ['--request', request] : [])], { stateRoot: root, adapters });
+  const run = async (command, extra = []) => {
+    const output = await runUnitCli(['unit', command, 'finished', ...(command === 'finish' ? ['--request', request] : []), ...extra], { stateRoot: root, adapters });
     return JSON.parse(output.slice(output.lastIndexOf('RESULT ') + 7));
   };
   return { root, store, events, run, adapters, accept: () => { accepted = true; }, deliveries: () => deliveryAttempts, ledger: () => createLedgerStore(root).withLock('finished', ledger => ledger.read()) };
@@ -118,6 +118,30 @@ test('repeated pre-input failures stop at the retry budget', async t => {
   assert.equal(f.deliveries(), 2);
   assert.ok((await f.ledger()).some(row => row.event === 'verification' && row.verify?.code === 'SESSION_DELIVERY_RETRY_FAILED'));
   assert.equal((await f.store.read('finished')).state, 'Delivered');
+});
+
+test('an exhausted pre-input delivery budget reopens only under verified user input for the same intent', async t => {
+  const f = await setup(t, 'pre-input-stuck');
+  await f.run('finish');
+  for (let i = 0; i < 3; i += 1) await f.run('finalize');
+  assert.equal(f.deliveries(), 2);
+  assert.equal((await f.run('finalize', ['--retry-delivery'])).error, 'CLI_USAGE');
+  assert.equal((await f.run('finalize', ['--retry-delivery', '--user-input', 'retry-approved'])).error, 'EFFECT_APPROVAL_REQUIRED');
+  assert.equal(f.deliveries(), 2);
+  const checked = [];
+  f.adapters.provider = { verifyUserInput: async input => { checked.push(input); return { ...input, verified: input.userInputRef === 'retry-approved' }; } };
+  assert.equal((await f.run('finalize', ['--retry-delivery', '--user-input', 'retry-approved'])).code, 3);
+  assert.equal(f.deliveries(), 3);
+  const intent = (await f.ledger()).find(row => row.event === 'intent' && row.effect === 'session.deliver');
+  assert.deepEqual(checked.map(({ effect, seq, key, failedAttempts }) => ({ effect, seq, key, failedAttempts })),
+    [{ effect: 'unit.finalize.retry-delivery', seq: intent.seq, key: intent.key, failedAttempts: 2 }]);
+  assert.equal((await f.ledger()).filter(row => row.event === 'delivery-retry-authorization').length, 1);
+  await f.run('finalize'); await f.run('finalize');
+  assert.equal(f.deliveries(), 4);
+  f.accept();
+  assert.equal((await f.run('finalize', ['--retry-delivery', '--user-input', 'retry-approved'])).code, 0);
+  assert.equal((await f.ledger()).filter(row => row.event === 'delivery-retry-authorization').length, 2);
+  assert.equal((await f.store.read('finished')).state, 'Closed');
 });
 
 test('queued result retry observes consumption without another submission', async t => {

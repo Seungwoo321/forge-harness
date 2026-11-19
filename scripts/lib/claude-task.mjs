@@ -6,6 +6,22 @@ const textOf = message => typeof message?.content === 'string' ? message.content
   : Array.isArray(message?.content) ? message.content.filter(part => part?.type === 'text').map(part => part.text ?? '').join('') : '';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+// A packet is proven read when a Read result returns its exact numbered lines, or when a shell command that names
+// the packet path returns its exact content. Truncated, partial or failed output is not proof.
+function provePacketReads(part, packets, reads, shells, verified) {
+  if (part.is_error || typeof part.content !== 'string') return;
+  for (const packet of packets) {
+    const numbered = packet.content.split('\n').map((line,index)=>`${index+1}\t${line}`).join('\n');
+    if (reads.get(part.tool_use_id) === packet.path && part.content === numbered
+      || shells.get(part.tool_use_id)?.includes(packet.path) && packet.content && part.content.includes(packet.content)) verified.add(packet.path);
+  }
+}
+const recordToolUse = (part, reads, shells) => {
+  if (part.type !== 'tool_use' || typeof part.id !== 'string') return;
+  if (part.name === 'Read') reads.set(part.id, part.input?.file_path);
+  if (part.name === 'Bash' && typeof part.input?.command === 'string') shells.set(part.id, part.input.command);
+};
+
 export function createClaudeTaskTransport({ command, env, submitInput }) {
   async function binding(observed) {
     if (!Number.isSafeInteger(observed.pid) || !path.isAbsolute(env?.CLAUDE_CONFIG_DIR ?? '')) throw taskError('Claude process or account is unavailable');
@@ -55,7 +71,7 @@ export function createClaudeTaskTransport({ command, env, submitInput }) {
       if (relevant.slice(relevant.indexOf(statuses.at(-1)) + 1).some(row => row.type === 'user'
         && /<local-command-stdout>\s*(?:Goal cleared:|No goal set)/.test(textOf(row.message)))) throw taskError('native goal was cleared');
       const descendants = new Set([matches[0].uuid]);
-      const reads = new Map(), verified = new Set();
+      const reads = new Map(), shells = new Map(), verified = new Set();
       let activity;
       for (const row of relevant.slice(relevant.indexOf(matches[0]) + 1)) {
         if (!descendants.has(row.parentUuid) || typeof row.uuid !== 'string') continue;
@@ -63,13 +79,8 @@ export function createClaudeTaskTransport({ command, env, submitInput }) {
         const content = Array.isArray(row.message?.content) ? row.message.content : [];
         if (row.type === 'assistant' && content.some(part => ['text','tool_use'].includes(part?.type))) activity ??= row;
         for (const part of content) {
-          if (row.type === 'assistant' && part.type === 'tool_use' && part.name === 'Read' && typeof part.id === 'string') reads.set(part.id, part.input?.file_path);
-          if (row.type === 'user' && part.type === 'tool_result' && !part.is_error && typeof part.content === 'string') {
-            for (const packet of request.packets) {
-              const numbered = packet.content.split('\n').map((line,index)=>`${index+1}\t${line}`).join('\n');
-              if (reads.get(part.tool_use_id) === packet.path && part.content === numbered) verified.add(packet.path);
-            }
-          }
+          if (row.type === 'assistant') recordToolUse(part, reads, shells);
+          if (row.type === 'user' && part.type === 'tool_result') provePacketReads(part, request.packets, reads, shells, verified);
         }
       }
       if (activity && request.packets.every(packet => verified.has(packet.path))) {
@@ -101,7 +112,7 @@ export function createClaudeTaskTransport({ command, env, submitInput }) {
       function receiptFrom(user) {
       const index=rows.indexOf(user), descendants=new Set([user.uuid]);
       let activity;
-      const reads = new Map(), verified = new Set();
+      const reads = new Map(), shells = new Map(), verified = new Set();
       for (const row of rows.slice(index+1)) {
         if (row.sessionId?.toLowerCase() !== threadId || row.isSidechain === true || !descendants.has(row.parentUuid) || typeof row.uuid !== 'string') continue;
         if (row.type === 'user' && typeof row.message?.content === 'string') break;
@@ -109,13 +120,8 @@ export function createClaudeTaskTransport({ command, env, submitInput }) {
         const content = Array.isArray(row.message?.content) ? row.message.content : [];
         if (row.type === 'assistant' && content.some(part=>['text','tool_use'].includes(part?.type))) activity ??= row;
         for (const part of content) {
-          if (row.type === 'assistant' && part.type === 'tool_use' && part.name === 'Read' && typeof part.id === 'string') reads.set(part.id,part.input?.file_path);
-          if (row.type === 'user' && part.type === 'tool_result' && !part.is_error && typeof part.content === 'string') {
-            for (const packet of request.packets) {
-              const numbered = packet.content.split('\n').map((line,index)=>`${index+1}\t${line}`).join('\n');
-              if (reads.get(part.tool_use_id) === packet.path && part.content === numbered) verified.add(packet.path);
-            }
-          }
+          if (row.type === 'assistant') recordToolUse(part, reads, shells);
+          if (row.type === 'user' && part.type === 'tool_result') provePacketReads(part, request.packets, reads, shells, verified);
         }
       }
       if (!activity) return {state:'accepted'};

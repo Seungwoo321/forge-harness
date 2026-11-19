@@ -293,7 +293,7 @@ export function parseUnitArgs(argv) {
     const argument = argv[index];
     if (argument.startsWith('--')) {
       const key = argument.slice(2);
-      if (['non-interactive','reconcile-only'].includes(key)) {
+      if (['non-interactive','reconcile-only','retry-delivery'].includes(key)) {
         if (options[key] !== undefined) usageError(`duplicate option: ${argument}`);
         options[key] = true;
         continue;
@@ -1575,6 +1575,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
     if (parsed.options['state-root'] && !parsed.options['project-root']) usageError('--state-root requires --project-root outside a Git checkout');
     const [noun, subcommand, ...rest] = parsed.positional;
     if (parsed.options['reconcile-only'] && (noun !== 'unit' || subcommand !== 'finalize')) usageError('--reconcile-only is supported only by unit finalize');
+    if (parsed.options['retry-delivery'] && (noun !== 'unit' || subcommand !== 'finalize')) usageError('--retry-delivery is supported only by unit finalize');
     if (noun === 'evidence') {
       const [unit] = rest;
       if (subcommand !== 'rerun' || rest.length !== 1 || !unit || !parsed.options.gate) usageError('usage: evidence rerun <unit> --gate <id>');
@@ -1965,11 +1966,14 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
     }
     if (subcommand === 'finalize') {
       const [unit] = rest;
-      if (!unit || rest.length !== 1) usageError('unit finalize requires <unit> [--wait <seconds>] [--interval <seconds>]');
+      if (!unit || rest.length !== 1) usageError('unit finalize requires <unit> [--wait <seconds>] [--interval <seconds>] [--retry-delivery --user-input <ref>]');
+      if ((parsed.options['retry-delivery'] === true) !== (parsed.options['user-input'] !== undefined) || parsed.options['retry-delivery'] && parsed.options['reconcile-only'])
+        usageError('unit finalize --retry-delivery requires --user-input and excludes --reconcile-only');
       const waitSeconds = parsed.options.wait === undefined ? 0 : Number(parsed.options.wait);
       const intervalSeconds = parsed.options.interval === undefined ? 30 : Number(parsed.options.interval);
       if (!Number.isFinite(waitSeconds) || waitSeconds < 0 || !Number.isFinite(intervalSeconds) || intervalSeconds <= 0) usageError('unit finalize --wait and --interval must be non-negative seconds');
-      const { code, summary, ...details } = await finalizeWithin(() => finalizeSessionUnit({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, adapters, reconcileOnly: parsed.options['reconcile-only'] === true }), { waitSeconds, intervalSeconds });
+      const { code, summary, ...details } = await finalizeWithin(() => finalizeSessionUnit({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, adapters, reconcileOnly: parsed.options['reconcile-only'] === true,
+        ...(parsed.options['retry-delivery'] ? { retryDelivery: parsed.options['user-input'] } : {}) }), { waitSeconds, intervalSeconds });
       return formatCliResult({ code, summary, details });
     }
     if (subcommand === 'finish') {

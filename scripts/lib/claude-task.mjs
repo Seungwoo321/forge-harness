@@ -108,7 +108,8 @@ export function createClaudeTaskTransport({ command, env, submitInput }) {
         outcome = receiptFrom(candidate);
         if (outcome.state === 'started') return outcome;
       }
-      return outcome;
+      // Every copy reached the recipient without proving the packet read; the same reference may be sent again.
+      return request.input.effect === 'session.deliver' ? {...outcome, resendable:true, fence:threadId} : outcome;
       function receiptFrom(user) {
       const index=rows.indexOf(user), descendants=new Set([user.uuid]);
       let activity;
@@ -133,7 +134,9 @@ export function createClaudeTaskTransport({ command, env, submitInput }) {
     async submit(request) {
       if (request.input.effect !== 'session.deliver' || !submitInput || await binding(request.observed) !== request.fence) throw taskError('Claude conditional submission is unavailable');
       return submitInput(request, async () => {
-        if (await binding(request.observed) !== request.fence || (await this.observe(request)).state !== 'ready') throw taskError('Claude readiness changed');
+        const current = await this.observe(request);
+        if (await binding(request.observed) !== request.fence
+          || !(current.state === 'ready' || current.state === 'accepted' && current.resendable === true)) throw taskError('Claude readiness changed');
       });
     },
   };

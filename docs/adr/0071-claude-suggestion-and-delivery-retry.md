@@ -26,3 +26,15 @@ Claude recipients often read a packet with a shell command, for example `cat` an
 - a non-error Bash result, whose command names the packet path, contains the packet's exact content.
 
 Truncated, partial, failed or unrelated output stays unproven. An already received return then reconciles through an ordinary finalize, with no new recovery operation.
+
+## Received but unread deliveries
+
+A reference sent to a busy recipient is queued and injected into its running turn. The recipient may end that turn without reading the result packet, for example when it read the packet in an earlier turn. The receipt then stays `accepted`.
+
+When every copy of the request has reached the recipient without packet proof, Claude delivery marks the receipt resendable. Finalize re-sends the identical reference as a new turn only under all of these conditions:
+
+- the recipient shows no work in progress;
+- its composer is empty or holds only a placeholder;
+- its incarnation is unchanged.
+
+The re-send shares the pre-input retry budget. Any later copy that proves the read satisfies the delivery. The verification message says that the request was received but its packet read is unproven.

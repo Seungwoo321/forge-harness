@@ -139,3 +139,27 @@ test('a delivery packet read through a shell command that names it and returns i
  assert.equal(await observe([user,call(`cat ${packet.path}`),result(content.slice(0,20))]),'accepted');
  assert.equal(await observe([user,call(`cat ${packet.path}`),result(output,{is_error:true})]),'accepted');
 });
+
+test('a delivery that reached the recipient without packet proof is resendable; a started copy still wins',async t=>{
+ const root=await mkdtemp(path.join(tmpdir(),'claude-resend-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const id='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', project=path.join(root,'projects','project');await mkdir(project,{recursive:true});
+ const file=path.join(project,`${id}.jsonl`), content='# Review result\nverdict: fix\n';
+ const packet={path:'/state/result.md',digest:taskDigest(content),content},prompt=`Read ${packet.path} (${packet.digest}); follow its referenced handoffs.`;
+ let submitted=0;
+ const transport=createClaudeTaskTransport({command:async()=>({exitCode:0,stdout:`claude --session-id ${id}`}),env:{CLAUDE_CONFIG_DIR:root},
+  submitInput:async(request,verifyNative)=>{await verifyNative();submitted++;assert.equal(request.resend,true);}});
+ const request={observed:{pid:1,cwd:'/work'},input:{effect:'session.deliver',key:'key',args:{cwd:'/work'}},prompt,packets:[packet]};
+ const queued={type:'attachment',sessionId:id,uuid:'queued-1',parentUuid:'turn',attachment:{type:'queued_command',commandMode:'prompt',prompt}};
+ const shasum={type:'assistant',sessionId:id,uuid:'assistant-1',parentUuid:'queued-1',message:{content:[{type:'tool_use',name:'Bash',id:'shell-1',input:{command:`shasum ${packet.path} | cut -c1-16`}}]}};
+ const out={type:'user',sessionId:id,uuid:'result-1',parentUuid:'assistant-1',message:{content:[{type:'tool_result',tool_use_id:'shell-1',content:packet.digest.slice(7,23)}]}};
+ await writeFile(file,[queued,shasum,out].map(JSON.stringify).join('\n')+'\n');
+ const evidence=await transport.observe(request);
+ assert.deepEqual([evidence.state,evidence.resendable,evidence.fence],['accepted',true,id]);
+ await transport.submit({...request,fence:id,resend:true});assert.equal(submitted,1);
+ assert.equal((await transport.observe({...request,input:{...request.input,effect:'session.start'}})).resendable,undefined);
+ const user={type:'user',sessionId:id,cwd:'/work',uuid:'user-2',message:{content:prompt}};
+ const read={type:'assistant',sessionId:id,uuid:'assistant-2',parentUuid:'user-2',message:{content:[{type:'tool_use',name:'Bash',id:'shell-2',input:{command:`cat ${packet.path}`}}]}};
+ const full={type:'user',sessionId:id,uuid:'result-2',parentUuid:'assistant-2',message:{content:[{type:'tool_result',tool_use_id:'shell-2',content}]}};
+ await writeFile(file,[queued,shasum,out,user,read,full].map(JSON.stringify).join('\n')+'\n');
+ const started=await transport.observe(request);assert.equal(started.state,'started');assert.equal(started.resendable,undefined);
+});

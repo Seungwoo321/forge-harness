@@ -384,6 +384,21 @@ test('a delivery policy change retires an engine plan whose effects never starte
   });
 });
 
+test('stale corrections on an InReview unit are refreshed for the rebased target and return it to SelfGated', async t => {
+  const f = await fixture(t); await f.both();
+  await f.store.update(f.unit, r => ({ ...r, state: 'InReview' }));
+  f.target.head = 'head-rebased'; f.target.contentFingerprint = 'content-rebased';
+  assert.equal((await f.run(['accept', f.unit])).error, 'ACCEPTANCE_CORRECTION_STALE');
+  assert.equal((await f.read()).state, 'InReview');
+  await writeFile(f.evidencePath, JSON.stringify({ unit: f.unit, head: f.target.head, contentFingerprint: f.target.contentFingerprint, repo: f.target.repo, policy: 'verified', valid: true }));
+  assert.equal((await f.correct(await f.request({ id: 'rebased-observation' }))).code, 0);
+  const refreshed = await f.read();
+  assert.equal(refreshed.state, 'SelfGated'); assert.equal(refreshed.verdict, null); assert.equal(refreshed.reviewDecision, null);
+  assert.equal((await f.correct({ ...await f.deliveryRequest(), id: 'rebased-delivery' })).code, 0);
+  assert.equal((await f.read()).acceptanceCorrections.length, 4);
+  assert.equal(f.trace.length, 0);
+});
+
 test('an engine delivery that already started cannot change its owner', async t => {
   const f = await fixture(t); await f.both();
   await createLedgerStore(f.stateRoot).withLock(f.unit, async ledger => {

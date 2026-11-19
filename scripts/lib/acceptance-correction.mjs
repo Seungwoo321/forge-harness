@@ -201,7 +201,8 @@ export async function correctAcceptance({ stateRoot, store, unit, request, userI
         if (ownerHandover && entries.some(entry => entry.event === 'intent'
           && ['git.commit', 'git.push', 'git.integrate', 'pr.create', 'pr.merge'].includes(entry.effect)))
           fail('engine delivery already started; its owner cannot change', 'INVALID_TRANSITION');
-        if (!(record.state === 'SelfGated' && !record.accepted || ownerHandover && record.state === 'Accepted') || ['review', 'ops'].includes(record.kind)
+        // InReview is unaccepted like SelfGated; a correction clears its review and returns it to SelfGated.
+        if (!(['SelfGated', 'InReview'].includes(record.state) && !record.accepted || ownerHandover && record.state === 'Accepted') || ['review', 'ops'].includes(record.kind)
           || record.deliveryPlan || record.deliveryResult || record.sessionFinalization
           || (record.stages ?? []).some(stage => attemptsFor(record, stage.name).some(attempt => !attempt.endedAt))) {
           fail('correction requires a submitted, unaccepted SelfGated change unit', 'INVALID_TRANSITION');
@@ -229,7 +230,7 @@ export async function correctAcceptance({ stateRoot, store, unit, request, userI
         if (!(record.inheritedDeliveryObligations?.length)) assertDeliveryObligations(updated, policy.delivery);
         const checked = await adapters.git.inspectUnit({ unit, record });
         if (effectArgsDigest(checked ?? null) !== effectArgsDigest(target)) fail('target changed during correction', 'ACCEPTANCE_CORRECTION_STALE');
-        return record.state === 'Accepted' ? transitionRecord(updated, 'SelfGated') : updated;
+        return ['Accepted', 'InReview'].includes(record.state) ? transitionRecord(updated, 'SelfGated') : updated;
       });
     });
   } catch (error) { if (error !== duplicate) throw error; }

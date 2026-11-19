@@ -4,7 +4,7 @@
 
 ## 요청과 증거
 
-명령은 `unit acceptance correct <unit> --request <file> --user-input <ref>`다. 모든 명령에 원래의 roots와 `--adapters <module>`을 전달한다. 제출된 미수용 SelfGated 단위만 허용한다. 열린 단계·전달 계획·세션 종료·불확실한 효과는 없어야 한다. Blocked/Stopped 단위는 기존 진단·재개 계약과 재시도 상한을 먼저 따른다. 정정이 상태를 재개하거나 재시도 예산을 초기화하지 않는다.
+명령은 `unit acceptance correct <unit> --request <file> --user-input <ref>`다. 모든 명령에 원래의 roots와 `--adapters <module>`을 전달한다. 제출된 미수용 SelfGated 또는 InReview 단위만 허용한다. InReview 단위는 정정 뒤 리뷰가 해제된 채 SelfGated로 돌아가며, rebase 등으로 대상이 바뀌어 기존 정정이 stale이면 새 대상으로 같은 기준을 다시 정정한다. 열린 단계·전달 계획·세션 종료·불확실한 효과는 없어야 한다. Blocked/Stopped 단위는 기존 진단·재개 계약과 재시도 상한을 먼저 따른다. 정정이 상태를 재개하거나 재시도 예산을 초기화하지 않는다.
 
 관찰 정정 요청의 전체 키는 다음과 같다. 숫자와 digest 및 참조는 실제 관찰값으로 채운다.
 

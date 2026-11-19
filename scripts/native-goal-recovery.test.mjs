@@ -59,11 +59,11 @@ process.stdout.write(out);
   const core=createAdapters({repositoryRoot:cwd});
   const create=()=>{
     const command=(binary,args,options)=>core.command(process.execPath,[stub,binary,...args],options);
-    const transport={identity:async observed=>({threadId:observed.pid===11?'owner-thread':(await read()).thread}),
+    const transport={preflight:async({cwd:target})=>({provider:'codex',scope:'account-cwd',cwd:target,hooks:[{eventName:'stop',key:'hook',hash:'hash',trust:'trusted'}]}),identity:async observed=>({threadId:observed.pid===11?'owner-thread':(await read()).thread}),
       async observeGoal(request){const s=await read();if(s.native==='wrong')throw Error('different native goal');
         if(s.native==='absent')return preTurn?{state:'unmaterialized',threadId:s.thread,proof:{platform:`codex/${version}`,threadId:s.thread,sqliteRoot:'/test-account',account:s.account??'/test-account',queueCount:s.queueCount??0,defaultLineEditing:s.customKeys!==true}}:{state:'absent',threadId:s.thread,fence:s.thread,notApplied:s.absence};
         return {state:s.native,threadId:s.thread,goal:{threadId:s.thread,status:'active',objective:request.prompt},
-          enforcement:{status:'verified',cwd,key:'hook',hash:'hash'},turnId:'turn',activityId:'read-packets',packets:request.packets};}};
+          enforcement:{status:'verified',cwd,key:'hook',hash:'hash',hooks:[{eventName:'stop',key:'hook',hash:'hash',trust:'trusted'}]},turnId:'turn',activityId:'read-packets',packets:request.packets};}};
     const sessionRunner=createSessionRunner({runtime:'cmux',command,parent:{...owner,workerExecutable:'codex'},launch:()=>['codex'],taskTransport:transport,pollAttempts});
     return {...core,...createAdapters({sessionRunner}),git:{inspectUnit:async()=>({head:'head',contentFingerprint:'content'})}};
   };

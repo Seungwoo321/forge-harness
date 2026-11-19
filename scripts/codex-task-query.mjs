@@ -10,6 +10,7 @@ try {
   const goalOperation = ['goal', 'goal-observe'].includes(operation);
   const nativeGoal = goalOperation ? readCodexNativeGoal(threadId, sqliteRoot ?? account) : undefined;
   const result = operation === 'goal' && !nativeGoal && typeof cwd==='string' ? {thread:{id:threadId,cwd},turns:[],queued:[],goal:null} : await withJsonRpcProcess(executable, ['app-server', '--stdio'], async (rpc, initialization) => {
+    if (operation === 'hooks') return rpc('hooks/list', {cwds:[cwd]});
     if (operation === 'identify') {
       const candidates = [];
       for (const id of threadIds) {

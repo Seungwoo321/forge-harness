@@ -419,7 +419,7 @@ LLM 이 제어면의 결정을 우회하지 못하도록 두 가지를 둔다: �
 
 제어면은 native 목표 상태에서 정확한 목표와 active 또는 실제 착수 이후 complete 상태를 확인하고, 정확한 요청과 그 뒤 실제 응답 또는 도구 실행을 각각 관찰한다. worker transport는 목표·prompt·packet digest와 thread·request·turn·실행 항목을 effect key·session·incarnation·cwd에 결속한다. 불변 인계는 실제로 읽었거나 native 목표 입력에 정확한 본문이 포함됐음을 확인한다. 최초 입력이 이미 제출됐거나 결과가 불확실하면 동일 intent를 재관찰하며 재입력·재기동하지 않는다. 동일 worker의 여러 native lock은 root-session metadata로 유일한 주 thread에 결속한다. busy 큐·composer·startup modal은 착수 증거가 아니다. 작업 착수 이후 interrupted 상태도 구분해 보존한다.
 
-실행기 또는 호스트가 목표 상태·훅 신뢰를 관찰할 수 없으면 미검증으로 남는다. 신뢰 우회 플래그를 자동으로 쓰지 않는다. 사용자 중단과 host의 목표 일시중지·반복 제한을 존중하며, 미완료 목표가 중단될 때는 남은 작업과 재개 조건을 보고한다.
+실행기 또는 호스트가 목표 상태·훅 신뢰를 관찰할 수 없으면 미검증으로 남는다. 신뢰 우회 플래그를 자동으로 쓰지 않는다. 훅을 관찰할 수 있는 관리 작업자(Codex)는 필수 플러그인 훅(SessionStart, Stop)이 같은 account·cwd에서 enabled·동기·trusted 또는 managed로 관측된 뒤에만 기동한다. 세션 어댑터의 사전검사가 시작 intent 기록 전에 이를 확인하고, 미충족이면 원인을 담아 거부하며 훅을 자동 승인하지 않는다. 관측한 훅의 event·key·hash는 시작 intent 인자 `enforcement`에 결속하고, 시작 검증은 현재 관측이 trusted이고 결속된 key·hash와 같을 때만 강제를 인정한다. 사전 관측이 없는 시작이나 기동 뒤 바뀐 hash는 원인과 함께 미검증이다. 공개 시작 복구가 예약하는 다음 attempt는 원 결속을 승계하지 않고 기동 전에 다시 관측한다([ADR 0067](adr/0067-codex-hook-trust-before-launch.md)). 사용자 중단과 host의 목표 일시중지·반복 제한을 존중하며, 미완료 목표가 중단될 때는 남은 작업과 재개 조건을 보고한다.
 
 실제 소유권 이전이나 리뷰 반환의 `returnTo`는 기존 수신 세션의 정확한 sessionId·incarnationId·cwd·executable이다. 새 successor와 함께 지정하지 않는다. 제어면은 관찰한 owner·recipient·result·handoff를 `sessionFinalization`에 고정한다. 별도 생존 프로세스의 `unit finalize <unit>`가 `session.deliver`로 결과를 한 번 제출하고 실제 수신·착수를 확인한 뒤 `session.close` intent를 기록한다. 종료 대상은 런타임 설정의 `parent.closable: true`와 `parent.workerExecutable`로 명시한 worker만이다. 셸·오케스트레이터·수신 세션은 종료하지 않는다. 원 session·incarnation·cwd·native thread를 재검사하고 실제 소멸을 생존 프로세스에서 확인한 뒤에만 소유자 종료를 확정한다. 미수신·실패·불확실성은 원래 intent를 유지하며 재관찰한다.
 
@@ -1041,6 +1041,7 @@ CLI 는 사람용 출력의 마지막 줄에 기계용 한 줄 `RESULT {json}` �
 | H-GO-05 | 자동 압축·계획 조정·검증 전환은 세션을 나누지 않고, 실제 책임 경계에서만 검증된 인계를 수행한다 | T/L |
 | H-GO-06 | 완료·차단·리뷰 반환은 각각 단일 목적 스킬과 스크립트로 처리한다. 실제 이전에만 수신을 확인하고 수신자 없는 완료·차단은 사용자 보고와 재개 조건을 보존하며 허용된 worker 종료만 정확히 확인한다 | T/L |
 | H-GO-07 | 호스트의 중단·목표 제어·훅 신뢰를 우회하지 않고 미검증 강제 상태를 성공으로 보고하지 않는다 | T/L |
+| H-GO-22 | 관리 Codex 작업자는 필수 플러그인 훅이 trusted/managed로 관측된 뒤에만 기동하고, 미충족이면 시작 intent 없이 원인과 함께 거부한다. 관측한 key·hash를 시작 intent에 결속하며 같은 hash일 때만 강제를 인정하고, 기동 뒤 변경과 사전 관측 없는 기존 시작은 미검증이다 | T |
 | H-GO-10 | startup trust 전 기동이 불확실해진 기존 reviewer는 원 intent·수신자를 보존해 검증된 native 부재·빈 Ready에서만 복구한다. Codex 0.167.0과 0.167.1의 첫 입력 전 lazy rollout은 별도 unmaterialized 관찰로 원 managed 기동·동일 native 신원·미제출 원장·실제 queue/goal 부재·전체 fresh Ready 화면을 결합하며 일반 조회 실패를 empty로 취급하지 않는다. 최초 입력 전 원장 제출 경계를 동기화하고 crash·동시 재검증·이력 지연 후 중복 입력하지 않는다 | T |
 | H-GO-13 | 기존 미전송 Codex 결과 전달은 같은 intent에서 전체 native 이력·queue 내 해당 참조의 부재와 정확한 수신자/composer를 검증하고 paste 전 submission·Return 전 confirmation을 동기 기록한다. 경계 뒤 신원·패킷·전체 draft를 재검사하며 불확실한 paste·소비된 Return을 반복하지 않는다. 실제 활동·결과 패킷 읽기 없이 전달 완료를 만들지 않는다 | T |
 | H-GO-11 | native goal의 첫 인자가 실제 정착한 뒤 나머지를 입력해 slash 메뉴 손실을 막는다. 원 intent의 사전 Return 실패·동일 native/패킷·전체 Ready draft·실제 goal/queue 부재를 검증한 경우에만 정확한 pending 원문을 재입력 없이 진행하거나, 고정된 첫 burst 슬래시 소실 패턴을 별도 영속 정정 경계로 원문 복구한다. Return은 별도 영속 경계 후 한 번만 수행하고 손상·외래·잘린 draft를 정상으로 간주하지 않는다 | T |

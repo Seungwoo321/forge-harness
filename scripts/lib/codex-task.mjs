@@ -3,6 +3,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { taskDigest, taskError } from './session-task.mjs';
 
+const hookError = message => Object.assign(new Error(message), { code: 'SESSION_HOOK_UNTRUSTED' });
 const queryScript = fileURLToPath(new URL('../codex-task-query.mjs', import.meta.url));
 const textOf = item => Array.isArray(item.content) && item.content.length > 0 && item.content.every(part => part.type === 'text' && typeof part.text === 'string')
   ? item.content.map(part => part.text).join('') : null;
@@ -20,6 +21,25 @@ const readPacket = (packet, value, verification = [], exactOutput = false) => {
     return match && `sha256:${match[1]}` === packet.digest && path.resolve(item.cwd, match[2]) === packet.path;
   })));
 };
+
+// Managed Codex workers require both plugin hooks: SessionStart injects policy and Stop enforces continuity.
+const requiredHooks = [['sessionStart', /[\/\\]policy-startup-hook\.mjs["']?$/], ['stop', /[\/\\]continuity-stop-hook\.mjs["']?$/]];
+export function codexHookTrust(response, cwd) {
+  const entry = response?.data?.find(item => item.cwd === cwd);
+  if (!entry) return {ok:false, reason:'hooks/list has no entry for the worker cwd'};
+  if (!Array.isArray(entry.errors) || entry.errors.length) return {ok:false, reason:'hooks/list reported errors for the worker cwd'};
+  const hooks = [], problems = [];
+  for (const [eventName, command] of requiredHooks) {
+    const found = (entry.hooks ?? []).filter(hook => hook.pluginId === 'forge-harness@forge-harness' && hook.source === 'plugin'
+      && hook.eventName === eventName && hook.handlerType === 'command' && command.test(hook.command ?? ''));
+    if (found.length !== 1) { problems.push(`${eventName} hook is ${found.length ? 'ambiguous' : 'missing'}`); continue; }
+    const [hook] = found;
+    if (hook.enabled !== true || hook.async !== false || !['trusted','managed'].includes(hook.trustStatus) || !hook.key || !hook.currentHash)
+      problems.push(`${eventName} hook enabled=${hook.enabled} async=${hook.async} trustStatus=${hook.trustStatus}`);
+    else hooks.push({eventName, key:hook.key, hash:hook.currentHash, trust:hook.trustStatus});
+  }
+  return problems.length ? {ok:false, reason:problems.join('; ')} : {ok:true, hooks};
+}
 
 export function createCodexTaskTransport({ command, executable = 'codex', submitInput, env }) {
   const account = path.resolve(env?.CODEX_HOME ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'));
@@ -61,6 +81,14 @@ export function createCodexTaskTransport({ command, executable = 'codex', submit
     return { ...data, threadId };
   }
   return {
+    // Read-only pre-launch observation of the exact account/cwd hook configuration. It never approves a hook.
+    async preflight({cwd}) {
+      const result = await command(process.execPath, [queryScript], { cwd, env, input: JSON.stringify({ executable, operation: 'hooks', cwd }) });
+      if (result.exitCode !== 0 || result.signal) throw hookError('native hook trust is unobservable before launch');
+      const trust = codexHookTrust(JSON.parse(result.stdout), cwd);
+      if (!trust.ok) throw hookError(`required plugin hooks are not trusted before launch: ${trust.reason}`);
+      return {provider:'codex',scope:'account-cwd',cwd,hooks:trust.hooks};
+    },
     async identity(observed) { return { threadId: (await binding(observed)).threadId }; },
     async goal(observed) {
       const data = await query({ observed, input: {} }, 'goal');
@@ -78,13 +106,10 @@ export function createCodexTaskTransport({ command, executable = 'codex', submit
       }
       // The goal timestamp has second precision; only later events prove ordering.
       const cutoff = Number.isSafeInteger(data.goal.createdAt) ? (data.goal.createdAt + 1) * 1000 : Infinity;
-      const hookEntry = data.hooks?.data?.find(entry => entry.cwd === request.observed.cwd);
-      const guard = hookEntry?.errors?.length === 0 && hookEntry.hooks?.find(hook => hook.pluginId === 'forge-harness@forge-harness'
-        && hook.source === 'plugin' && hook.eventName === 'stop' && hook.enabled === true && hook.async === false
-        && ['trusted','managed'].includes(hook.trustStatus) && hook.handlerType === 'command'
-        && /[\/\\]continuity-stop-hook\.mjs["']?$/.test(hook.command));
-      const enforcement = guard ? {status:'verified',provider:'codex',scope:'account-cwd',cwd:request.observed.cwd,key:guard.key,hash:guard.currentHash,trust:guard.trustStatus}
-        : {status:'unverified',provider:'codex',scope:'account-cwd'};
+      const trust = codexHookTrust(data.hooks, request.observed.cwd);
+      const stop = trust.hooks?.find(hook => hook.eventName === 'stop');
+      const enforcement = trust.ok ? {status:'verified',provider:'codex',scope:'account-cwd',cwd:request.observed.cwd,key:stop.key,hash:stop.hash,trust:stop.trust,hooks:trust.hooks}
+        : {status:'unverified',provider:'codex',scope:'account-cwd',reason:trust.reason};
       const eligible = data.turns.map(turn => ({ ...turn, items: turn.items.filter(item =>
         Number.isSafeInteger(turn.startedAt) && turn.startedAt * 1000 >= cutoff
         || Number.isSafeInteger(item.startedAtMs) && item.startedAtMs >= cutoff) }));

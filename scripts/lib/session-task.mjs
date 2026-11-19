@@ -21,6 +21,21 @@ export async function taskPackets(args) {
   return packets;
 }
 
+// A worker's hooks count as enforced only when the hooks trusted before launch are the hooks observed now.
+// A current account/cwd observation alone does not show what an already-running worker loaded.
+function assertLaunchEnforcement(observed, bound, cwd) {
+  const unverified = reason => { throw taskError(`managed session hook enforcement is unverified: ${reason}`); };
+  if (observed?.status !== 'verified' || observed.cwd !== cwd || !observed.key || !observed.hash || !Array.isArray(observed.hooks))
+    unverified(observed?.reason ?? 'required hooks are not currently trusted');
+  if (!bound) unverified('the start has no pre-launch trusted hook observation');
+  if (bound.cwd !== cwd || !Array.isArray(bound.hooks) || !bound.hooks.length) unverified('the pre-launch hook observation is incomplete');
+  for (const hook of bound.hooks) {
+    const current = observed.hooks.find(item => item.eventName === hook.eventName);
+    if (current?.key !== hook.key || current.hash !== hook.hash)
+      unverified(`${hook.eventName} hook changed after launch (${hook.hash} -> ${current?.hash ?? 'missing'})`);
+  }
+}
+
 export function validateTaskReceipt(result, input, {requireEnforcement = false} = {}) {
   const receipt = result?.task;
   const goalReceipt = receipt?.schema === 'harness.goal-receipt/1';
@@ -38,8 +53,7 @@ export function validateTaskReceipt(result, input, {requireEnforcement = false} 
       ref.path === input.args[`${name}Path`] && ref.digest === input.args[`${name}Digest`]))) {
     throw taskError('native request/start receipt does not match the intended task');
   }
-  if (requireEnforcement && (receipt.enforcement?.status !== 'verified' || receipt.enforcement.cwd !== result.cwd
-    || !receipt.enforcement.key || !receipt.enforcement.hash)) throw taskError('managed session hook enforcement is unverified');
+  if (requireEnforcement) assertLaunchEnforcement(receipt.enforcement, input.args.enforcement, result.cwd);
   return result;
 }
 

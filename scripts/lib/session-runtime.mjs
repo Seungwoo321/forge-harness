@@ -631,6 +631,15 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       await assertPreviousAbsent();
       return { ...current, targetCwd: target, ...(worker ? { worker } : {}), closable: parent.closable === true, ...(previousOwner ? {previousOwnerAbsent:true} : {}) };
     },
+    // Runs before the start intent is recorded, so a refusal leaves no uncertain intent behind.
+    async preflight(input) {
+      if (input.effect !== 'session.start' || !input.args?.goalPath) return undefined;
+      const { argv, env } = await configuredLaunch(input.args);
+      if (!Array.isArray(argv) || path.basename(argv[0] ?? '') !== 'codex') return undefined;
+      const transport = transportFor(argv[0], env);
+      if (typeof transport?.preflight !== 'function') throw invalid('native hook trust preflight is unavailable');
+      return { enforcement: await transport.preflight({ cwd: input.args.cwd }) };
+    },
     async execute(input) {
       if (input.effect === 'session.deliver') { const submission = {}; return poll(() => deliver(input, submission)); }
       if (input.effect === 'session.close') return close(input, false);

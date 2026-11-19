@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { observeTask, observeGoalTask, taskDigest, validateTaskReceipt } from './lib/session-task.mjs';
-import { createCodexTaskTransport } from './lib/codex-task.mjs';
+import { codexHookTrust, createCodexTaskTransport } from './lib/codex-task.mjs';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -518,8 +518,29 @@ test('managed custody cannot accept a receipt without verified hook enforcement'
   goal:{threadId:'thread',status:'active',objective:'finish'},threadId:'thread',turnId:'turn',activityId:'activity',packets:[]}};
  const bareInput={...goalInput,args:{cwd:observed.cwd,goalDigest:goalInput.args.goalDigest}};
  assert.throws(()=>validateTaskReceipt(result,bareInput,{requireEnforcement:true}),/hook enforcement is unverified/);
- result.task.enforcement={status:'verified',cwd:observed.cwd,key:'guard',hash:'hash'};
- assert.equal(validateTaskReceipt(result,bareInput,{requireEnforcement:true}),result);
+ const hooks=[{eventName:'sessionStart',key:'start',hash:'start-hash',trust:'trusted'},{eventName:'stop',key:'guard',hash:'hash',trust:'trusted'}];
+ const bound={...bareInput,args:{...bareInput.args,enforcement:{provider:'codex',scope:'account-cwd',cwd:observed.cwd,hooks}}};
+ result.task.enforcement={status:'verified',cwd:observed.cwd,key:'guard',hash:'hash',hooks};
+ // (b) the hooks trusted before launch are the hooks observed now.
+ assert.equal(validateTaskReceipt(result,bound,{requireEnforcement:true}),result);
+ // (d) a legacy start without a pre-launch observation stays unverified even when the hooks are trusted now.
+ assert.throws(()=>validateTaskReceipt(result,bareInput,{requireEnforcement:true}),/no pre-launch trusted hook observation/);
+ // (c) a hook whose content changed after launch is unverified with the changed hash as its cause.
+ result.task.enforcement={...result.task.enforcement,hooks:[hooks[0],{...hooks[1],hash:'changed'}]};
+ assert.throws(()=>validateTaskReceipt(result,bound,{requireEnforcement:true}),/stop hook changed after launch \(hash -> changed\)/);
+ result.task.enforcement={status:'unverified',provider:'codex',scope:'account-cwd',reason:'stop hook enabled=true async=false trustStatus=modified'};
+ assert.throws(()=>validateTaskReceipt(result,bound,{requireEnforcement:true}),/trustStatus=modified/);
+});
+
+test('Codex hook trust requires both plugin hooks enabled, synchronous and trusted for the exact cwd',()=>{
+ const hook=(eventName,script,extra={})=>({pluginId:'forge-harness@forge-harness',source:'plugin',eventName,handlerType:'command',command:`node "/plugin/scripts/${script}"`,
+  enabled:true,async:false,trustStatus:'trusted',key:`${eventName}-key`,currentHash:`${eventName}-hash`,...extra});
+ const listed=hooks=>({data:[{cwd:'/work',errors:[],hooks}]});
+ const both=[hook('sessionStart','policy-startup-hook.mjs'),hook('stop','continuity-stop-hook.mjs')];
+ assert.deepEqual(codexHookTrust(listed(both),'/work'),{ok:true,hooks:[{eventName:'sessionStart',key:'sessionStart-key',hash:'sessionStart-hash',trust:'trusted'},{eventName:'stop',key:'stop-key',hash:'stop-hash',trust:'trusted'}]});
+ assert.match(codexHookTrust(listed([both[0],hook('stop','continuity-stop-hook.mjs',{trustStatus:'modified'})]),'/work').reason,/stop hook .*trustStatus=modified/);
+ assert.match(codexHookTrust(listed([both[1]]),'/work').reason,/sessionStart hook is missing/);
+ assert.equal(codexHookTrust(listed(both),'/other').ok,false);
 });
 
 test('native thread drift after submission cannot satisfy the original durable binding',async()=>{

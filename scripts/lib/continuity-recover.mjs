@@ -69,7 +69,9 @@ export async function recoverGoalSession({stateRoot,unit,request,userInputRef,st
       const nextAttempt=intent.args.attempt+1;
       if (!Number.isSafeInteger(nextAttempt)) fail('invalid next attempt');
       const snapshot=settleOnly?null:await snapshotGoal(stateRoot,goal);
-      const nextArgs=settleOnly?null:{...intent.args,attempt:nextAttempt,goalPath:snapshot.path,goalDigest:snapshot.digest};
+      // The next attempt observes its own hooks before launch; the original attempt's binding does not carry over.
+      const {enforcement:_previous,...previousArgs}=intent.args;
+      const nextArgs=settleOnly?null:{...previousArgs,attempt:nextAttempt,goalPath:snapshot.path,goalDigest:snapshot.digest};
       if (nextArgs) await loadManagedLaunch(nextArgs);
       const submission=rows.findLast(row=>row.event==='submission' && row.seq===intent.seq && row.key===intent.key);
       const receiver=rows.findLast(row=>row.event==='receiver' && row.seq===intent.seq && row.key===intent.key);

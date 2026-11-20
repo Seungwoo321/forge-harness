@@ -40,7 +40,10 @@ export async function runPublicUnitCli(argv, { cwd = process.cwd(), contractsDir
     const session = createAdapters({ sessionRunner }).session;
     const output = await runUnitCli(argv, { cwd, contractsDir, adapters: Object.freeze({ ...core, ...injected, session }) });
     const result = JSON.parse(output.split(/\r?\n/).findLast(line => line.startsWith('RESULT ')).slice(7));
-    if (argv[0] === 'unit' && ['finish', 'session-stop', 'session-return'].includes(argv[1]) && result.finalizePending && options.adapters) {
+    // A finalize run inside the owner session cannot close it, so it hands the close to the same detached finalizer.
+    // A bounded-wait finalize is already that survivor and keeps retrying itself.
+    const handOff = argv[1] === 'finalize' && result.externalFinalizerRequired === true && options.wait === undefined;
+    if (argv[0] === 'unit' && (['finish', 'session-stop', 'session-return'].includes(argv[1]) || handOff) && result.finalizePending && options.adapters) {
       const directory = path.join(result.stateRoot, 'units', argv[2]);
       await mkdir(directory, { recursive: true });
       // The detached finalizer keeps re-observing a pending delivery for up to two hours, so a busy owner still receives the

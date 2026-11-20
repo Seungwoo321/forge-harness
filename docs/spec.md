@@ -421,7 +421,7 @@ LLM 이 제어면의 결정을 우회하지 못하도록 두 가지를 둔다: �
 
 실행기 또는 호스트가 목표 상태·훅 신뢰를 관찰할 수 없으면 미검증으로 남는다. 신뢰 우회 플래그를 자동으로 쓰지 않는다. 훅을 관찰할 수 있는 관리 작업자(Codex)는 필수 플러그인 훅(SessionStart, Stop)이 같은 account·cwd에서 enabled·동기·trusted 또는 managed로 관측된 뒤에만 기동한다. 세션 어댑터의 사전검사가 시작 intent 기록 전에 이를 확인하고, 미충족이면 원인을 담아 거부하며 훅을 자동 승인하지 않는다. 관측한 훅의 event·key·hash는 시작 intent 인자 `enforcement`에 결속하고, 시작 검증은 현재 관측이 trusted이고 결속된 key·hash와 같을 때만 강제를 인정한다. 사전 관측이 없는 시작이나 기동 뒤 바뀐 hash는 원인과 함께 미검증이다. 공개 시작 복구가 예약하는 다음 attempt는 원 결속을 승계하지 않고 기동 전에 다시 관측한다([ADR 0067](adr/0067-codex-hook-trust-before-launch.md)). 사용자 중단과 host의 목표 일시중지·반복 제한을 존중하며, 미완료 목표가 중단될 때는 남은 작업과 재개 조건을 보고한다.
 
-실제 소유권 이전이나 리뷰 반환의 `returnTo`는 기존 수신 세션의 정확한 sessionId·incarnationId·cwd·executable이다. 새 successor와 함께 지정하지 않는다. 제어면은 관찰한 owner·recipient·result·handoff를 `sessionFinalization`에 고정한다. 별도 생존 프로세스의 `unit finalize <unit>`가 `session.deliver`로 결과를 한 번 제출하고 실제 수신·착수를 확인한 뒤 `session.close` intent를 기록한다. 종료 대상은 런타임 설정의 `parent.closable: true`와 `parent.workerExecutable`로 명시한 worker만이다. 셸·오케스트레이터·수신 세션은 종료하지 않는다. 원 session·incarnation·cwd·native thread를 재검사하고 실제 소멸을 생존 프로세스에서 확인한 뒤에만 소유자 종료를 확정한다. 미수신·실패·불확실성은 원래 intent를 유지하며 재관찰한다.
+실제 소유권 이전이나 리뷰 반환의 `returnTo`는 기존 수신 세션의 정확한 sessionId·incarnationId·cwd·executable이다. 새 successor와 함께 지정하지 않는다. 제어면은 관찰한 owner·recipient·result·handoff를 `sessionFinalization`에 고정한다. 별도 생존 프로세스의 `unit finalize <unit>`가 `session.deliver`로 결과를 한 번 제출하고 실제 수신·착수를 확인한 뒤 `session.close` intent를 기록한다. 종료 대상은 런타임 설정의 `parent.closable: true`와 `parent.workerExecutable`로 명시한 worker만이다. 셸·오케스트레이터·수신 세션은 종료하지 않는다. 원 session·incarnation·cwd·native thread를 재검사하고 실제 소멸을 생존 프로세스에서 확인한 뒤에만 소유자 종료를 확정한다. 호출 프로세스의 조상 중 소유자 프로세스·worker이거나 소유자 단말에 붙은 것이 있으면 소유자와 함께 끝나므로 close intent 전에 거부하고 아무것도 기록하지 않는다. 대기 없는 `unit finalize`는 이때 분리된 finalizer를 기동해 종료를 넘긴다([ADR 0078](adr/0078-surviving-session-closer.md)). 미수신·실패·불확실성은 원래 intent를 유지하며 재관찰한다.
 
 전체 목표 완료 또는 수신자가 없는 실제 차단·사용자 일시중지에는 successor나 returnTo를 만들지 않는다. 목표 완료 근거 또는 Stopped 상태·원인·객관적인 재개 조건과 결과를 영속 기록해 사용자에게 보고한다. 수신자가 없으므로 native 수신·목표 활성·착수 영수증을 요구하지 않는다. 허용된 관리 worker의 자동 종료가 요청된 경우에만 생존 제어면이 정확한 소유자의 소멸을 별도로 확인한다. 허용되지 않은 셸·오케스트레이터와 사용자 소유 terminal은 유지한다.
 
@@ -1020,7 +1020,7 @@ intent와 유한 예산을 먼저 영속 기록하고 수신자를 직렬화한�
 | H-DL-06 | 동일 검증 트리의 전달 commit은 SHA를 결속하고 내용 변경은 재수용한다. target merge SHA는 단위 head 변경이 아니다 | T |
 | H-DL-07 | merged·closed PR은 새 전달에 재사용하지 않으며 새 head 전달은 새 키를 쓴다 | T |
 | H-DL-08 | 입력 제출과 실제 착수는 정확한 native request·실행 항목·packet·worker incarnation으로 결속하며 큐 대기는 성공이 아니다 | T/L |
-| H-DL-09 | 기존 owner로 결과를 전달하며 별도 생존 프로세스가 원장 intent·정확한 worker 신원·사후 소멸 관찰을 확인한 뒤에만 세션을 종료 완료한다 | T/L |
+| H-DL-09 | 기존 owner로 결과를 전달하며 별도 생존 프로세스가 원장 intent·정확한 worker 신원·사후 소멸 관찰을 확인한 뒤에만 세션을 종료 완료한다. 소유자 프로세스 트리·단말 안의 finalize는 close intent 없이 대기로 끝나고 분리된 finalizer에 종료를 넘긴다 | T/L |
 | H-DL-05 | 리뷰 없는 수용(`basis: gates`)으로 머지할 때는 `review.mode` 가 `none` 이거나 트리거가 거짓이었음이 Unit Record 에 기록되어 있다 | T |
 | H-EV-09 | 환경·하네스·사용자 영역·불명 실패 후 같은 fingerprint 정상 통과를 비결정으로 분류하지 않는다 | T |
 | H-BD-05 | clock·id stub의 동일 입력은 동일 출력이며 결정 모듈이 시각·난수를 직접 읽지 않는다 | T/S |

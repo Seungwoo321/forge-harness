@@ -43,7 +43,8 @@ function fixture(options = {}) {
       if (args.includes('close-workspace')) workspaceCloses++; else {closes++;assert.equal(args[args.indexOf('--surface')+1],'owner');}
       if (options.failed || options.lost) return {exitCode:1,stdout:''};
     } else if (binary === 'ps') {
-      if (args.includes('tty=')) stdout=options.caller?'tty1':'??';
+      // The caller runs from a tool process (no terminal) whose ancestors are 500 and then the owner worker or init.
+      if (args.includes('pid=,ppid=,tty=')) stdout=`${process.pid} 500 ${options.caller?'tty1':'??'}\n500 ${options.descendant?11:1} ??\n11 1 tty1\n1 0 ??\n`;
       else if (args.includes('pid=,pgid=,tpgid=,comm=')) stdout=args.includes('tty2')?'22 22 22 worker\n':'11 11 11 worker\n';
       else stdout=(options.reused || marked && options.processDrift) && args.includes('11')
         || options.recipientDrift && args.includes('22')?'CHANGED':'START';
@@ -58,12 +59,21 @@ function fixture(options = {}) {
     state:()=>({present,workspacePresent,closes,workspaceCloses,trees})};
 }
 
-for (const key of ['orchestrator','caller','reused','recipientDrift','threadDrift','processDrift','lateThreadDrift','routeDrift','titleDrift']) {
+for (const key of ['orchestrator','caller','descendant','reused','recipientDrift','threadDrift','processDrift','lateThreadDrift','routeDrift','titleDrift']) {
   test(`native close rejects ${key} before mutation (AC-2)`,async()=>{
     const f=fixture({[key]:true}); await assert.rejects(f.runner.execute(f.input));
     assert.equal(f.state().closes+f.state().workspaceCloses,0);
   });
 }
+
+test('a terminal-less caller inside the owner process tree is refused before the close intent',async()=>{
+  const inside=fixture({descendant:true});
+  await assert.rejects(inside.runner.preflight({effect:'session.close',args:inside.input.args}),{code:'SESSION_CLOSE_SELF'});
+  await assert.rejects(inside.runner.execute(inside.input),{code:'SESSION_CLOSE_SELF'});
+  assert.equal(inside.submission.attempted,undefined);assert.equal(inside.state().closes+inside.state().workspaceCloses,0);
+  const outside=fixture();
+  assert.equal(await outside.runner.preflight({effect:'session.close',args:outside.input.args}),undefined);
+});
 
 test('exclusive managed workspace closes directly without a replacement shell (AC-1)',async()=>{
   const f=fixture(); const result=await f.runner.execute(f.input);

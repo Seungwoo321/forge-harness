@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { open, readFile, link, rm, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { createAdapters } from './adapters.mjs';
+import { holdingStateLock } from './deferred-termination.mjs';
 
 const defaultAdapters = createAdapters();
 const failure = (kind, suffix, message) => Object.assign(new Error(message), { code: `${kind}_LOCK_${suffix}` });
@@ -41,6 +42,10 @@ export async function archiveLock(file, bytes) {
 }
 
 export async function withStateLockGuard(file, kind, action, adapters = defaultAdapters, {wait=true} = {}) {
+  return holdingStateLock(() => guardedStateLock(file, kind, action, adapters, wait));
+}
+
+async function guardedStateLock(file, kind, action, adapters, wait) {
   await mkdir(path.dirname(file), { recursive: true });
   let guard;
   try { guard = await adapters.stateLock(`${file}.guard`,{wait}); }

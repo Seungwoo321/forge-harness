@@ -431,12 +431,28 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
     return result;
   }
 
+  // The closer must outlive the owner to record the close result and release its locks. Agent tool commands often
+  // run without the owner's terminal, so the terminal alone does not show that the caller dies with the owner; any
+  // ancestor that is the owner process or on its terminal does.
+  async function assertSurvivingCloser(owner) {
+    const rows = (await invoke('ps', ['-axo', 'pid=,ppid=,tty='], owner.cwd)).trim().split('\n').map(line => line.trim().split(/\s+/));
+    if (rows.some(row => row.length !== 3 || !/^\d+$/.test(row[0]) || !/^\d+$/.test(row[1]) || !row[2]))
+      throw invalid('caller process ancestry is incomplete');
+    const processes = new Map(rows.map(([pid, ppid, tty]) => [Number(pid), { ppid: Number(ppid), tty }]));
+    if (!processes.has(process.pid)) throw invalid('caller process ancestry is incomplete');
+    const ownerProcesses = new Set([owner.pid, owner.worker?.pid].filter(Number.isSafeInteger));
+    for (let pid = process.pid, seen = new Set(); processes.has(pid) && !seen.has(pid); pid = processes.get(pid).ppid) {
+      seen.add(pid);
+      if (ownerProcesses.has(pid) || owner.tty && processes.get(pid).tty === owner.tty)
+        throw Object.assign(new Error('session close requires a surviving external supervisor'), { code: 'SESSION_CLOSE_SELF' });
+    }
+  }
+
   async function close(input, verifyOnly) {
     const { owner, recipient } = input.args;
     if (parent.closable !== true || !owner || !recipient || owner.sessionId !== parent.sessionId || owner.incarnationId !== parent.incarnationId
       || owner.cwd !== parent.cwd || owner.sessionId === recipient.sessionId || !owner.worker?.executable || !owner.worker.incarnationId || !owner.worker.threadId) throw invalid('session close ownership is not authorized');
-    const callerTty = (await invoke('ps', ['-p', String(process.pid), '-o', 'tty='], owner.cwd)).trim();
-    if (!callerTty || callerTty === owner.tty) throw invalid('session close requires a surviving external supervisor');
+    await assertSurvivingCloser(owner);
     const inventory = runtime === 'cmux' ? await closeInventory(owner.cwd) : null;
     const present = runtime === 'cmux'
       ? inventory.surfaces.filter(item => item.id === owner.sessionId)
@@ -640,8 +656,9 @@ export function createSessionRunner({ runtime, command, parent, launch, runtimeR
       await assertPreviousAbsent();
       return { ...current, targetCwd: target, ...(worker ? { worker } : {}), closable: parent.closable === true, ...(previousOwner ? {previousOwnerAbsent:true} : {}) };
     },
-    // Runs before the start intent is recorded, so a refusal leaves no uncertain intent behind.
+    // Runs before the start or close intent is recorded, so a refusal leaves no uncertain intent behind.
     async preflight(input) {
+      if (input.effect === 'session.close') return void await assertSurvivingCloser(input.args.owner);
       if (input.effect !== 'session.start' || !input.args?.goalPath) return undefined;
       const { argv, env } = await configuredLaunch(input.args);
       if (!Array.isArray(argv) || path.basename(argv[0] ?? '') !== 'codex') return undefined;

@@ -439,6 +439,15 @@ export async function finalizeSessionUnit({ stateRoot, store, unit, adapters, re
         return result;
       } },
   };
+  // A finalizer inside the owner session would end with it while holding the unit and ledger locks, leaving the close
+  // intent unresolved and both locks orphaned. It is refused before the intent and leaves the close to a survivor.
+  if (typeof adapters.session.preflight === 'function') {
+    try { await adapters.session.preflight({ effect: 'session.close', args: closeArgs }); }
+    catch (error) {
+      if (error.code !== 'SESSION_CLOSE_SELF') return pending('Surviving closer cannot be verified');
+      return { ...pending('Owner session cannot close itself; a surviving finalizer closes it'), externalFinalizerRequired: true };
+    }
+  }
   let closed = await executeEffect(closeEffect);
   // The closing terminal may drop the command response. The survivor checks the same intent immediately.
   if (closed.status === 'uncertain') closed = await executeEffect(closeEffect);

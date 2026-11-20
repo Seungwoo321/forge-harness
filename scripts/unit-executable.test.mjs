@@ -15,7 +15,7 @@ const runtimeModule = new URL('./lib/session-runtime.mjs', import.meta.url).href
 const fields = { title: 'Completed work', objective: 'complete work', acceptance: 'AC-1 passes', tracking: 'none', decision: 'approved successor', changed: 'src/main.mjs', verification: 'tests pass', remainingRisk: 'none', nextFirstAction: 'read packet' };
 const packet = ['목표: finish', '수용 기준: AC-1', '작업관리: none', '결정: approved', '변경: src/main.mjs', '검증: tests', '남은 일·위험: none', '다음 단위 첫 행동: read packet'].join('\n');
 
-async function fixture(t, { state = 'Delivered', runtime = null, mode = 'success', separate = false, managed = false, managedProvider = 'codex' } = {}) {
+async function fixture(t, { state = 'Delivered', runtime = null, mode = 'success', separate = false, managed = false, managedProvider = 'codex', selfClose = false } = {}) {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'unit-executable-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const cwd = path.join(root, 'product checkout');
@@ -56,6 +56,14 @@ export async function createRuntimeAdapters({cwd,adapters}) {
     parent:{sessionId:'parent',incarnationId:${JSON.stringify(incarnationId)},cwd:parentCwd},launch:args=>['worker','--unit',args.unit],
     async runtimeRpc(method,params){const result=await adapters.command('orca-rpc',[method,JSON.stringify(params)],{cwd});if(result.exitCode!==0)throw Error('RPC failed');return JSON.parse(result.stdout)}}) : {
     contractVersion:'harness.session-adapter/1',capabilities:['fix-forward','failure-classification-five-way','retry-limit','ops-e0-only','policy-review'],
+    // A foreground finalize runs inside the owner; a bounded-wait finalizer is detached. A blocked detached finalizer
+    // exits before closing, standing in for one that is gone.
+    ...(process.env.TEST_SELF_CLOSE ? {async preflight(input){
+      if(input.effect!=='session.close')return;
+      if(!process.argv.includes('--wait'))throw Object.assign(Error('session close requires a surviving external supervisor'),{code:'SESSION_CLOSE_SELF'});
+      try{await readFile(process.env.TEST_NATIVE+'.block');}catch{return;}
+      await writeFile(process.env.TEST_NATIVE+'.exited','');process.exit(0);
+    }} : {}),
     async observe(input){await trace({event:'observe',...input});const observations=(await readFile(process.env.TEST_TRACE,'utf8')).trim().split('\\n').map(JSON.parse).filter(row=>row.event==='observe').length;return {sessionId:mode==='wrong-parent'||(mode==='late-parent'&&observations>1)?'wrong':'parent',cwd:mode==='wrong-parent-cwd'?cwd:parentCwd,incarnationId:${JSON.stringify(incarnationId)},targetCwd:mode==='wrong-target'?'wrong':input.targetCwd,...(mode==='finalize'?{closable:true,tty:'tty-owner',worker:{incarnationId:'owner-worker',pid:42,executable:'worker',threadId:'owner-thread'}}:{})}},
     async execute(input){await trace({event:'execute',...input});if(mode==='finalize'){if(input.effect==='session.close'){await writeFile(process.env.TEST_NATIVE,JSON.stringify({closed:true}));return {closed:true,sessionId:'parent',incarnationId:${JSON.stringify(incarnationId)}}}return receipt(input)}if(mode==='uncertain')throw Error('lost response');return {sessionId:'child',cwd:mode==='wrong-child'?'wrong':input.args.cwd}},
     async verify(input){await trace({event:'verify',...input});if(mode==='finalize'&&input.effect==='session.close'&&JSON.parse(await readFile(process.env.TEST_NATIVE,'utf8')).closed)return {status:'completed',result:{closed:true,sessionId:'parent',incarnationId:${JSON.stringify(incarnationId)}}};return {status:'unknown'}}
@@ -132,7 +140,7 @@ else if(binary==='cmux'){
   }
   const run = command => {
     const process = spawnSync(globalThis.process.execPath, [cli, 'unit', command, 'unit-a', '--adapters', providers, '--state-root', stateRoot, '--project-root', cwd, ...(command === 'finish' ? ['--request', request] : [])], {
-      cwd, encoding: 'utf8', env: { ...globalThis.process.env, PATH: `${bin}${path.delimiter}${globalThis.process.env.PATH}`, ORCA_TERMINAL_HANDLE: 'parent', TEST_TRACE: trace, TEST_NATIVE: nativeState, TEST_RUNTIME: runtime ?? '', TEST_MODE: mode, TEST_PARENT: parentCwd, TEST_PRODUCT: cwd, TEST_MANAGED: managed ? '1' : '', TEST_PROVIDER: managedProvider },
+      cwd, encoding: 'utf8', env: { ...globalThis.process.env, PATH: `${bin}${path.delimiter}${globalThis.process.env.PATH}`, ORCA_TERMINAL_HANDLE: 'parent', TEST_TRACE: trace, TEST_NATIVE: nativeState, TEST_RUNTIME: runtime ?? '', TEST_MODE: mode, TEST_PARENT: parentCwd, TEST_PRODUCT: cwd, TEST_MANAGED: managed ? '1' : '', TEST_PROVIDER: managedProvider, TEST_SELF_CLOSE: selfClose ? '1' : '' },
     });
     const line = process.stdout.trim().split('\n').at(-1);
     assert.match(line ?? '', /^RESULT /, process.stderr);
@@ -370,6 +378,23 @@ test('public executable starts a detached finalizer that survives the finish cal
   const intents = (await f.ledger()).filter(row => row.event === 'intent');
   assert.deepEqual(intents.map(row => row.effect), ['session.start', 'session.deliver', 'session.close']);
   assert.equal(f.run('finalize').code, 0);
+  assert.equal((await f.rows()).filter(row => row.event === 'execute' && row.effect === 'session.close').length, 1);
+});
+
+test('a finalize run inside the owner session hands the close to a detached finalizer', async t => {
+  const f = await fixture(t, { mode: 'finalize', separate: true, selfClose: true });
+  const native = path.join(f.root, 'native.json');
+  await writeFile(`${native}.block`, '');
+  assert.equal(f.run('finish').code, 3);
+  const settle = async ready => { for (let attempt = 0; attempt < 1500 && !(await ready()); attempt += 1) await new Promise(resolve => setTimeout(resolve, 20)); };
+  await settle(() => readFile(`${native}.exited`).then(() => true, () => false));
+  await rm(`${native}.block`);
+  const own = f.run('finalize');
+  assert.equal(own.code, 3); assert.equal(own.externalFinalizerRequired, true);
+  assert.equal((await f.rows()).some(row => row.event === 'execute' && row.effect === 'session.close'), false);
+  await settle(async () => (await f.store.read('unit-a')).state === 'Closed');
+  assert.equal((await f.store.read('unit-a')).state, 'Closed');
+  assert.equal((await f.ledger()).filter(row => row.event === 'intent' && row.effect === 'session.close').length, 1);
   assert.equal((await f.rows()).filter(row => row.event === 'execute' && row.effect === 'session.close').length, 1);
 });
 

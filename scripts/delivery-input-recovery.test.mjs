@@ -45,7 +45,7 @@ async function fixture(t,{pending=false,seed=true,expandedFooter=false,legacy:le
     if(state.mode==='crash-submission'&&marked||state.mode==='crash-confirmation'&&confirmed)throw Error('simulated process loss after synced boundary');
     let stdout;
     if(binary==='cmux'&&argv.includes('tree'))stdout=JSON.stringify({windows:[{id:'window',workspaces:[{id:'owner-workspace',panes:[{surfaces:[...(!state.closed?[{id:'owner',type:'terminal',tty:'tty1'}]:[]),{id:'user-shell',type:'terminal',tty:'tty9'}]}]},{id:'receiver-workspace',panes:[{surfaces:[{id:'receiver',type:'terminal',tty:'tty2'}]}]}]}]});
-    else if(binary==='ps')stdout=argv.includes('tty=')?'supervisor':argv.includes('pid=,pgid=,tpgid=,comm=')?(argv.includes('tty1')?'22 22 22 codex':'33 33 33 codex'):'START';
+    else if(binary==='ps')stdout=argv.includes('pid=,ppid=,tty=')?`${process.pid} 1 ??`:argv.includes('pid=,pgid=,tpgid=,comm=')?(argv.includes('tty1')?'22 22 22 codex':'33 33 33 codex'):'START';
     else if(binary==='lsof')stdout=argv.includes('-d')?'n'+root+'\n':`n${process.env.CODEX_HOME??process.env.HOME+'/.codex'}/thread-writer-locks/${argv.includes('22')?ownerThread:state.thread}.lock\n`;
     else if(binary==='cmux'&&argv.includes('terminal.viewport'))stdout=JSON.stringify({surface_id:'receiver',columns:44});
     else if(binary==='cmux'&&argv.includes('read-screen')){const text=state.draft.match(/.{1,42}/gu)??[''];stdout=`› ${text.join('\n  ')}\n\n`+(expandedFooter ? `  GPT-6.1-Sol high · ~/work/product · fix/change · ${state.footerStatus} ·…  ⚠ 1 warning · f2 to view\n` : '  Model high · ~/work…\n  ? for shortcuts\n');}

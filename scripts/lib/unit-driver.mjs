@@ -1985,7 +1985,7 @@ export async function runUnitCli(argv, { cwd = process.cwd(), stateRoot, contrac
       if (!Number.isFinite(waitSeconds) || waitSeconds < 0 || !Number.isFinite(intervalSeconds) || intervalSeconds <= 0) usageError('unit finalize --wait and --interval must be non-negative seconds');
       const { code, summary, ...details } = await finalizeWithin(() => finalizeSessionUnit({ stateRoot: effectiveRoot, store: createUnitStateStore(effectiveRoot), unit, adapters, reconcileOnly: parsed.options['reconcile-only'] === true,
         ...(parsed.options['retry-delivery'] ? { retryDelivery: parsed.options['user-input'] } : {}) }), { waitSeconds, intervalSeconds });
-      return formatCliResult({ code, summary, details });
+      return formatCliResult({ code, summary, details: { ...details, stateRoot: effectiveRoot } });
     }
     if (subcommand === 'finish') {
       const [unit] = rest;

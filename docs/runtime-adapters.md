@@ -15,7 +15,7 @@ export async function createRuntimeAdapters({ cwd, adapters }) {
   return {
     git: projectGit,
     gates: projectGates,
-    // tracker, sessionRunner, repository, provider, effect, effectContext
+    // tracker, sessionRunner, repository, provider, effect, effectContext, processIdentity, checkpoint
   };
 }
 ```
@@ -33,6 +33,7 @@ export async function createRuntimeAdapters({ cwd, adapters }) {
 | `repository` | PR 생성·머지의 `deliveryContext`, `execute`, `verify` |
 | `provider` | `verifyUserInput`: 사용자 승인 입력의 실제 출처 확인. 승인된 기준 제외에는 `verifyAcceptanceChange`, 검증 방식 정정에는 `verifyAcceptanceCorrection`, 외부 소유 전달에는 `verifyExternalDelivery`, 원 목표/AC 명확화에는 `verifyGoalAcceptanceClarification`, 같은 live 중단 소유자의 결속 전용 계속에는 `verifyGoalAcceptanceResume`도 필수. 원 권한·기록 불일치·관찰/현재 외부 전달 증거를 읽기 전용 검증 |
 | `effect` + `effectContext` | 일반 외부 효과의 `execute`, `verify` 및 신뢰 경계 boolean 문맥. 두 제공자는 함께 등록 |
+| `checkpoint` | 단계 체크포인트의 `createCheckpoint`, `inspectChanges`. 등록하면 기본 Git 체크포인트를 대체하며, 호스트의 `git.inspectUnit` 이 실제 HEAD 가 아닌 단위 내용 관찰을 돌려줄 때 같은 기준으로 체크포인트를 만들어야 한다 ([ADR 0075](adr/0075-runtime-checkpoint-provider.md)) |
 
 `contentFingerprint`는 검증 경로·바이트·파일 모드와 포함/제외 규칙의 정렬된 해시다. `head`만으로 변경된 작업트리의 검증을 대체하지 않는다. delivery를 사용하는 관찰에는 `repo`, `branch`, `tree`, `indexTree`, `headTree`, `base`를 추가한다. 요청이 관찰 결과나 승인 대상을 덮어쓸 수 없다.
 

@@ -146,3 +146,51 @@ test('AC-4 unconfirmed, retired, changed, completed or foreign review returns re
     await f.save();assert.equal(f.run().decision,'block');
   });
 });
+
+test('an unverified managed start names each start packet not yet read with the Read tool after /goal', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'start-packets-'));
+  t.after(() => rm(root, {recursive:true, force:true}));
+  for (const dir of ['goals/g', 'units/u1', 'units/u2', 'packets']) await mkdir(path.join(root, dir), {recursive:true});
+  await writeFile(path.join(root,'goals','g','goal.json'), JSON.stringify({goal:{status:'active',remaining:['u2']}}));
+  await writeFile(path.join(root,'units','u2','unit.json'), JSON.stringify({state:'Implementing',kind:'impl'}));
+  const handoff = path.join(root,'packets','handoff.md'), snapshot = path.join(root,'packets','goal.json');
+  const policy = {runtime:'cmux',provider:'claude',account:'/account',model:'model',effort:'low',argv:['claude']};
+  await writeFile(handoff, '# Handoff\nnext\n'); await writeFile(snapshot, `${JSON.stringify({goal:{id:'g'},policy}, null, 2)}\n`);
+  const args = {unit:'u2', role:'implementation', attempt:1, cwd:root, handoffPath:handoff, handoffDigest:taskDigest(await readFile(handoff,'utf8')),
+    goalPath:snapshot, goalDigest:taskDigest(await readFile(snapshot,'utf8'))};
+  const ledger = path.join(root,'units','u1','ledger.ndjson');
+  const intent = {event:'intent',seq:2,key:'start-key',effect:'session.start',args};
+  await writeFile(ledger, [intent, {event:'submission',seq:2,key:'start-key',binding:{threadId:'SESS-1'}}].map(JSON.stringify).join('\n')+'\n');
+  const transcript = path.join(root,'transcript.jsonl');
+  const numbered = content => content.split('\n').map((line, index) => `${index + 1}\t${line}`).join('\n');
+  const read = (n, file) => [{type:'assistant',message:{content:[{type:'tool_use',id:`r${n}`,name:'Read',input:{file_path:file}}]}},
+    {type:'user',message:{content:[{type:'tool_result',tool_use_id:`r${n}`,content:numbered(readFileSync(file))}]}}];
+  const { readFileSync: rf } = await import('node:fs'); const readFileSync = file => rf(file, 'utf8');
+  const goalCommand = {type:'user',message:{content:'<command-name>/goal</command-name>\n<command-args>Goal</command-args>'}};
+  const save = rows => writeFile(transcript, rows.map(JSON.stringify).join('\n')+'\n');
+  const run = (event = {}) => {
+    const result = spawnSync(process.execPath,[hook],{env:{...process.env,FORGE_CONTINUITY_ROOT:root,FORGE_CONTINUITY_GOAL:'g',FORGE_CONTINUITY_UNIT:'u2'},
+      input:JSON.stringify({session_id:'sess-1',transcript_path:transcript,cwd:root,...event}),encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr); return JSON.parse(result.stdout);
+  };
+  // A snapshot read before /goal does not count; only the handoff was read after it.
+  await save([...read(1, snapshot), goalCommand, ...read(2, handoff)]);
+  const blocked = run();
+  assert.equal(blocked.decision,'block'); assert.match(blocked.reason, /Read tool/); assert.ok(blocked.reason.includes(snapshot)); assert.ok(!blocked.reason.includes(handoff));
+  assert.ok(run({stop_hook_active:true}).systemMessage.includes(snapshot), 'an active Stop hook only informs');
+  // Another session or a recorded start receipt does not demand reads.
+  assert.doesNotMatch(run({session_id:'other'}).reason ?? '', /start packet/);
+  // A Codex start verifies its own native record; its transcript is not checked for Read results.
+  await writeFile(snapshot, `${JSON.stringify({goal:{id:'g'},policy:{...policy,provider:'codex',argv:['codex']}}, null, 2)}\n`);
+  args.goalDigest = intent.args.goalDigest = taskDigest(await readFile(snapshot,'utf8'));
+  await writeFile(ledger, [intent, {event:'submission',seq:2,key:'start-key',binding:{threadId:'SESS-1'}}].map(JSON.stringify).join('\n')+'\n');
+  assert.doesNotMatch(run().reason ?? '', /start packet/);
+  await writeFile(snapshot, `${JSON.stringify({goal:{id:'g'},policy}, null, 2)}\n`);
+  args.goalDigest = intent.args.goalDigest = taskDigest(await readFile(snapshot,'utf8'));
+  await writeFile(ledger, [intent, {event:'submission',seq:2,key:'start-key',binding:{threadId:'SESS-1'}}].map(JSON.stringify).join('\n')+'\n');
+  await save([goalCommand, ...read(2, handoff), ...read(3, snapshot)]);
+  assert.doesNotMatch(run().reason ?? '', /start packet/);
+  await save([goalCommand, ...read(2, handoff)]);
+  await writeFile(ledger, [intent, {event:'submission',seq:2,key:'start-key',binding:{threadId:'SESS-1'}}, {event:'result',seq:2,key:'start-key',result:{}}].map(JSON.stringify).join('\n')+'\n');
+  assert.doesNotMatch(run().reason ?? '', /start packet/);
+});
